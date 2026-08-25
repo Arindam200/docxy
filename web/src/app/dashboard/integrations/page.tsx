@@ -1,6 +1,8 @@
+import { LuPlug } from "react-icons/lu";
 import { fetchIntegrations } from "@/lib/docxy";
 import { Page, PageHead } from "@/components/dashboard/Page";
-import { IntegrationCard } from "@/components/dashboard/IntegrationCard";
+import { IntegrationsGrid } from "@/components/dashboard/IntegrationsGrid";
+import { site } from "@/lib/site";
 
 export const dynamic = "force-dynamic";
 
@@ -16,11 +18,11 @@ export default async function IntegrationsPage() {
     <Page>
       <PageHead
         title="Integrations"
-        lede="Everything docxy talks to, whether it is wired up, and what each missing piece needs."
+        lede="Everything docxy talks to, whether it is wired up, and what each missing piece needs. Status is read live from the pipeline, so a card that says connected has answered."
       >
         {online && (
           <p className="text-xs text-muted tabular-nums">
-            {connected} of {integrations.length} connected
+            <span className="text-foreground">{connected}</span> of {integrations.length} connected
           </p>
         )}
       </PageHead>
@@ -46,17 +48,40 @@ export default async function IntegrationsPage() {
         </div>
       )}
 
-      <div className="grid gap-4 md:grid-cols-2">
-        {integrations.map((integration) => (
-          <IntegrationCard key={integration.id} integration={integration} />
-        ))}
-      </div>
+      <IntegrationsGrid integrations={integrations} />
 
-      {online && integrations.length === 0 && (
-        <div className="border border-dashed border-rule px-6 py-12 text-center">
-          <p className="text-sm text-muted">No integrations reported.</p>
+      {/*
+        Connecting is a server-side act — env vars, then a restart — so the page
+        closes by saying so rather than offering a button that cannot do it.
+      */}
+      <section
+        aria-labelledby="integrations-how"
+        className="flex flex-col gap-4 border border-rule bg-surface px-5 py-4 sm:flex-row sm:items-center sm:justify-between"
+      >
+        <div className="flex items-start gap-3">
+          <span aria-hidden className="mt-0.5 text-accent [&>svg]:h-5 [&>svg]:w-5">
+            <LuPlug />
+          </span>
+          <div>
+            <h2 id="integrations-how" className="text-sm font-semibold tracking-tight">
+              How connecting works
+            </h2>
+            <p className="mt-1 text-xs leading-relaxed text-muted">
+              Every integration is wired up with environment variables on the machine running the
+              pipeline, not from this page. Set the variables a card lists, restart the server, and
+              the status here follows. Missing something you need?
+            </p>
+          </div>
         </div>
-      )}
+        <a
+          href={`${site.repo}/issues/new`}
+          target="_blank"
+          rel="noreferrer"
+          className="shrink-0 self-start border border-rule bg-surface-2 px-3 py-1.5 text-xs font-medium transition-colors hover:border-accent hover:text-accent sm:self-auto"
+        >
+          Request an integration
+        </a>
+      </section>
     </Page>
   );
 }
