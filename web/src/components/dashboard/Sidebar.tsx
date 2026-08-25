@@ -137,7 +137,7 @@ export function Sidebar({ user }: { user: DashboardUser | null }) {
         </Link>
       </div>
 
-      <nav className="flex-1 overflow-y-auto py-2">
+      <nav className="flex-1 py-2">
         <ul className="space-y-1">
           {NAV.map((item) => (
             <li key={item.href}>

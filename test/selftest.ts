@@ -9,6 +9,8 @@ import { openDocsTree, resolveBaseRef } from '../src/git/worktree.js';
 import { listDocs, readRepoFile } from '../src/git/repo.js';
 import { prBaseBranch } from '../src/config.js';
 import { costOf, priceFor } from '../src/trueforge/pricing.js';
+import type { RoleName } from '../src/config.js';
+import type { DocEdit, RoleTrace, RunRecord } from '../src/types.js';
 import { buildReport } from '../src/server/observability.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -198,7 +200,7 @@ const priceCfg = {
   registeredModels: [
     { name: 'deepseek-v4-pro', modelId: 'deepseek-ai/DeepSeek-V4-Pro', contextLength: 1 },
   ],
-} as any;
+};
 const priceTable = new Map([
   ['deepseek-ai/deepseek-v4-pro', { prompt: 0.0000004, completion: 0.0000012 }],
 ]);
@@ -220,34 +222,39 @@ check('unpriced usage yields no cost',
   costOf({ inputTokens: 100, outputTokens: 10 }, undefined) === undefined);
 
 // --- observability report ------------------------------------------------
-const trace = (role: string, over: Record<string, any> = {}) => ({
+const trace = (role: RoleName, over: Partial<RoleTrace> = {}): RoleTrace => ({
   role, sessionId: 's', startedAt: '2026-08-01T00:00:00.000Z', status: 'done',
   events: [], reusedSession: true, durationMs: 1000,
   usage: { inputTokens: 100, outputTokens: 10, costUsd: 0.01 }, ...over,
-}) as any;
+});
+
+const edit = (path: string): DocEdit =>
+  ({ path, section: 'Usage', find: 'a', replace: 'b', mode: 'replace', rationale: '' });
+
+const fixture = (over: Partial<RunRecord> & Pick<RunRecord, 'id' | 'startedAt' | 'status'>): RunRecord => ({
+  repoPath: '/x', commit: { sha: 'a', shortSha: 'aaa', subject: 'one' },
+  traces: [], priorSymbolCount: 0, newSymbolCount: 0, ...over,
+});
 
 const report = buildReport([
-  {
-    id: 'r1', repoPath: '/x', commit: { sha: 'a', shortSha: 'aaa', subject: 'one' },
-    startedAt: '2026-08-01T00:00:00.000Z', status: 'done', durationMs: 4000,
+  fixture({
+    id: 'r1', startedAt: '2026-08-01T00:00:00.000Z', status: 'done', durationMs: 4000,
     traces: [trace('change-analyst'), trace('docs-updater', { durationMs: 3000 })],
     classification: { kind: 'fix', surface: 'internal', summary: '', changedSymbols: [], breakingRationale: '', confidence: 0.9 },
-    docs: { edits: [{ path: 'docs/api.md' }, { path: 'docs/api.md' }, { path: 'docs/cli.md' }], skipped: [] },
+    docs: { edits: [edit('docs/api.md'), edit('docs/api.md'), edit('docs/cli.md')], skipped: [] },
     totals: { inputTokens: 200, outputTokens: 20, costUsd: 0.02 },
-    priorSymbolCount: 0, newSymbolCount: 0,
-  },
-  {
-    id: 'r2', repoPath: '/x', commit: { sha: 'b', shortSha: 'bbb', subject: 'two' },
+  }),
+  fixture({
+    id: 'r2', commit: { sha: 'b', shortSha: 'bbb', subject: 'two' },
     startedAt: '2026-08-02T00:00:00.000Z', status: 'failed', durationMs: 2000,
     traces: [
       trace('change-analyst', { reusedSession: false }),
       trace('docs-updater', { status: 'failed', failure: 'parse-error', usage: undefined }),
     ],
-    docs: { edits: [{ path: 'docs/api.md' }], skipped: [] },
+    docs: { edits: [edit('docs/api.md')], skipped: [] },
     totals: { inputTokens: 100, outputTokens: 10, costUsd: 0.01 },
-    priorSymbolCount: 0, newSymbolCount: 0,
-  },
-] as any);
+  }),
+]);
 
 check('window counts every run', report.window.runs === 2);
 check('window runs oldest to newest', report.window.from === '2026-08-01T00:00:00.000Z');

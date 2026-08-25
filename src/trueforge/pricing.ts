@@ -31,9 +31,10 @@ const CACHE_TTL_MS = 60 * 60 * 1000;
 
 let cache: { at: number; table: PriceTable } | null = null;
 
+/** Nebius sends rates as decimal strings; anything unparseable is not a price. */
 function toNumber(value: string | number | undefined): number {
-  const n = typeof value === 'string' ? Number.parseFloat(value) : value;
-  return Number.isFinite(n) ? (n as number) : 0;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
 }
 
 /**
@@ -54,6 +55,9 @@ export async function loadPrices(config: Config, now = Date.now()): Promise<Pric
     });
     if (!res.ok) return new Map();
 
+    // SAFETY: the shape is not trusted — every field below is read through
+    // optional access and coerced, and a response that looks nothing like this
+    // yields an empty table rather than a wrong price.
     const body = (await res.json()) as { data?: VerboseModel[] };
     for (const model of body.data ?? []) {
       if (!model.id || !model.pricing) continue;
@@ -87,7 +91,7 @@ export function clearPriceCache(): void {
  */
 export function priceFor(
   model: string | undefined,
-  config: Config,
+  config: Pick<Config, 'registeredModels'>,
   prices: PriceTable,
 ): ModelPrice | undefined {
   if (!model || prices.size === 0) return undefined;
