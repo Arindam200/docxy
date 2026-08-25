@@ -9,6 +9,7 @@ import {
   LuGithub,
   LuHouse,
   LuLayers,
+  LuPlug,
   LuZap,
 } from "react-icons/lu";
 import { signOut } from "@/lib/auth-client";
@@ -25,6 +26,7 @@ const NAV: Array<{ href: string; label: string; icon: ReactNode }> = [
   { href: "/dashboard/tracking", label: "Tracking", icon: <LuLayers /> },
   { href: "/dashboard/instructions", label: "Instructions", icon: <LuBot /> },
   { href: "/dashboard/activity", label: "Activity", icon: <LuZap /> },
+  { href: "/dashboard/integrations", label: "Integrations", icon: <LuPlug /> },
 ];
 
 function RailButton({
@@ -144,7 +146,12 @@ export function Sidebar({ user }: { user: DashboardUser | null }) {
                 active={
                   item.href === "/dashboard"
                     ? pathname === "/dashboard"
-                    : pathname.startsWith(item.href)
+                    : // Run detail lives under /dashboard/runs but is reached
+                      // from Activity, so that entry stays lit there.
+                      item.href === "/dashboard/activity"
+                      ? pathname.startsWith("/dashboard/activity") ||
+                        pathname.startsWith("/dashboard/runs")
+                      : pathname.startsWith(item.href)
                 }
               />
             </li>

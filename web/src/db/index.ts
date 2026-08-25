@@ -20,7 +20,6 @@ function create(connectionString: string) {
 
 // Cached across module reloads so `next dev` does not leak a client per edit.
 declare global {
-  // eslint-disable-next-line no-var
   var docxyDb: Database | undefined;
 }
 

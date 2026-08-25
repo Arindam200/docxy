@@ -1,4 +1,7 @@
+import Link from "next/link";
 import type { RunSummary } from "@/lib/docxy";
+import { dateTime, duration, roleTitle, tokens } from "@/lib/format";
+import { RoleDots } from "@/components/dashboard/RoleDots";
 
 const STATUS_STYLES: Record<RunSummary["status"], string> = {
   running: "text-accent",
@@ -37,34 +40,55 @@ export function RunTimeline({ runs }: { runs: RunSummary[] }) {
 
   return (
     <ol className="border border-rule divide-y divide-rule bg-surface overflow-hidden">
-      {runs.map((run) => (
-        <li
-          key={run.id}
-          className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 hover:bg-surface-2 transition-colors"
-        >
-          <code className="font-mono text-xs text-accent">{run.commit.shortSha}</code>
-          <span className="min-w-0 flex-1 truncate text-sm">{run.commit.subject}</span>
-          <StatusChip status={run.status} />
-          {run.pullRequestUrl && (
-            <a
-              href={run.pullRequestUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="text-xs text-muted underline decoration-rule underline-offset-4 hover:text-accent hover:decoration-accent"
+      {runs.map((run) => {
+        const failed = run.roles?.find((role) => role.status === "failed");
+
+        return (
+          <li key={run.id}>
+            <Link
+              href={`/dashboard/runs/${run.id}`}
+              className="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 hover:bg-surface-2 transition-colors"
             >
-              PR ↗
-            </a>
-          )}
-          <time className="text-xs tabular-nums text-muted whitespace-nowrap">
-            {new Date(run.startedAt).toLocaleString(undefined, {
-              month: "short",
-              day: "numeric",
-              hour: "numeric",
-              minute: "2-digit",
-            })}
-          </time>
-        </li>
-      ))}
+              <code className="font-mono text-xs text-accent">{run.commit.shortSha}</code>
+
+              <span className="min-w-0 flex-1 truncate text-sm">
+                {run.commit.subject}
+                {/* The role that stopped the run is the first thing worth
+                    reading on a failure, so it sits with the subject rather
+                    than being buried in the detail view. */}
+                {failed && (
+                  <span className="ml-2 text-xs text-red-300">{roleTitle(failed.role)} failed</span>
+                )}
+              </span>
+
+              <RoleDots roles={run.roles} />
+              <StatusChip status={run.status} />
+
+              <span className="w-14 text-right text-xs tabular-nums text-muted">
+                {duration(run.durationMs)}
+              </span>
+              <span
+                className="w-14 text-right text-xs tabular-nums text-muted"
+                title={
+                  run.totals
+                    ? `${run.totals.inputTokens} in / ${run.totals.outputTokens} out`
+                    : "No usage recorded"
+                }
+              >
+                {tokens((run.totals?.inputTokens ?? 0) + (run.totals?.outputTokens ?? 0))}
+              </span>
+
+              <span className="w-10 text-right text-xs text-muted">
+                {run.pullRequestUrl ? "PR" : "—"}
+              </span>
+
+              <time className="w-28 text-right text-xs tabular-nums text-muted whitespace-nowrap">
+                {dateTime(run.startedAt)}
+              </time>
+            </Link>
+          </li>
+        );
+      })}
     </ol>
   );
 }

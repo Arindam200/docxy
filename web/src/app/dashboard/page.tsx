@@ -1,28 +1,30 @@
-import { fetchConfig, fetchRuns, fetchTracking } from "@/lib/docxy";
+import { fetchConfig, fetchIntegrations, fetchRuns, fetchTracking } from "@/lib/docxy";
+import { timeAgo, tokens } from "@/lib/format";
 import { Page, PageHead } from "@/components/dashboard/Page";
 import { StatCard } from "@/components/dashboard/StatCard";
 import { RunTimeline } from "@/components/dashboard/RunTimeline";
 
 export const dynamic = "force-dynamic";
 
-function timeAgo(iso?: string): string {
-  if (!iso) return "—";
-  const seconds = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
-  if (seconds < 60) return `${seconds}s ago`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.floor(hours / 24)}d ago`;
-}
-
 export default async function OverviewPage() {
-  const [runs, config, tracking] = await Promise.all([fetchRuns(), fetchConfig(), fetchTracking()]);
+  const [runs, config, tracking, integrations] = await Promise.all([
+    fetchRuns(),
+    fetchConfig(),
+    fetchTracking(),
+    fetchIntegrations(),
+  ]);
 
   const online = runs !== null;
   const list = runs ?? [];
   const count = (status: string): number => list.filter((r) => r.status === status).length;
   const lastRun = [...list].sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
+  const spent = list.reduce(
+    (total, run) => total + (run.totals?.inputTokens ?? 0) + (run.totals?.outputTokens ?? 0),
+    0,
+  );
+  const blocking = (integrations?.integrations ?? []).filter(
+    (item) => item.required && !item.connected,
+  );
 
   return (
     <Page>
@@ -64,9 +66,26 @@ export default async function OverviewPage() {
       <div className="grid grid-cols-2 md:grid-cols-4 border border-rule divide-x divide-y md:divide-y-0 divide-rule bg-surface">
         <StatCard label="Total runs" value={list.length} hint={lastRun ? `Last ${timeAgo(lastRun.startedAt)}` : "No runs yet"} />
         <StatCard label="Awaiting approval" value={count("awaiting-approval")} hint={count("running") > 0 ? `${count("running")} running now` : "Nothing blocked"} accent={count("awaiting-approval") > 0} />
-        <StatCard label="PRs opened" value={list.filter((r) => r.pullRequestUrl).length} hint={`${count("denied")} denied`} />
+        <StatCard
+          label="Tokens used"
+          value={tokens(spent)}
+          hint={`across ${list.length} run${list.length === 1 ? "" : "s"}`}
+        />
         <StatCard label="Symbols mapped" value={tracking?.symbolCount ?? 0} hint={`${tracking?.processedCommits ?? 0} commits processed`} />
       </div>
+
+      {blocking.length > 0 && (
+        <div
+          role="alert"
+          className="border border-red-500/30 bg-red-500/5 px-4 py-3 text-sm leading-relaxed text-red-200"
+        >
+          {blocking.map((item) => item.name).join(" and ")}{" "}
+          {blocking.length === 1 ? "is" : "are"} not connected, so runs cannot complete.{" "}
+          <a href="/dashboard/integrations" className="underline underline-offset-4">
+            Set up integrations
+          </a>
+        </div>
+      )}
 
       <section aria-labelledby="overview-recent" className="space-y-3">
         <div className="flex items-baseline justify-between">
