@@ -4,3 +4,9 @@ dist/
 .docxy/
 *.log
 .demo-repo/
+
+# Temporarily untracked: the pipeline workflow needs the NEBIUS_API_KEY secret,
+# the docxy-approval environment, and the docs branch before it can pass. The
+# file is still on disk at .github/workflows/docxy.yml — delete these two lines
+# to start tracking it again.
+.github/workflows/
