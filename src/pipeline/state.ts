@@ -27,7 +27,8 @@ export class KnowledgeStore {
   private readonly file: string;
 
   constructor(private readonly config: Config) {
-    const key = createHash('sha256').update(config.repoPath).digest('hex').slice(0, 16);
+    // Keyed on the project's stable identity, not its checkout path — see SessionStore.
+    const key = createHash('sha256').update(config.projectKey).digest('hex').slice(0, 16);
     this.file = join(config.stateDir, `knowledge-${key}.json`);
   }
 

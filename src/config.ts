@@ -22,6 +22,13 @@ function loadDotEnv(dir: string): void {
   }
 }
 
+/**
+ * `auto`     — never gate; open the pull request as soon as it validates.
+ * `elevated` — gate only elevated scope (breaking, public API, major bump).
+ * `always`   — gate every proposal, however routine.
+ */
+export type ApprovalMode = 'auto' | 'elevated' | 'always';
+
 export type RoleName =
   | 'coordinator'
   | 'change-analyst'
@@ -76,6 +83,13 @@ export interface Config {
     checkLinks: boolean;
   };
   approval: {
+    /**
+     * When a human must sign off *before* the pull request is opened.
+     *
+     * Opening a pull request is not shipping — it is a review request, and the
+     * PR review is itself the gate. So the default adds no second gate.
+     */
+    mode: ApprovalMode;
     /** Minutes before a pending request is reported stale. It is never auto-resolved. */
     staleAfterMinutes: number;
   };
@@ -83,6 +97,13 @@ export interface Config {
   github: { token?: string; repo?: string; baseBranch: string };
   /** Enable TrueForge sandbox + git-backed skills instead of inlined skill packs. */
   useHarnessSkills: boolean;
+  /**
+   * Stable identity for the thing being documented. Agent sessions and the
+   * symbol map are keyed on this, so it must not be a filesystem path anywhere
+   * the checkout is ephemeral — a fresh temp dir per run would silently reset
+   * everything both of them have accumulated.
+   */
+  projectKey: string;
 }
 
 function env(key: string, fallback?: string): string {
@@ -186,6 +207,7 @@ export function loadConfig(overrides: Partial<{ repoPath: string }> = {}): Confi
       checkLinks: envBool('DOCXY_CHECK_LINKS', true),
     },
     approval: {
+      mode: approvalMode(env('DOCXY_APPROVAL_MODE', 'auto')),
       staleAfterMinutes: envInt('DOCXY_APPROVAL_STALE_MINUTES', 60),
     },
     server: { port: envInt('DOCXY_PORT', 4317) },
@@ -195,7 +217,17 @@ export function loadConfig(overrides: Partial<{ repoPath: string }> = {}): Confi
       baseBranch: env('DOCXY_BASE_BRANCH', 'main'),
     },
     useHarnessSkills: envBool('DOCXY_USE_HARNESS_SKILLS', false),
+    // GITHUB_REPOSITORY is `owner/repo` and is stable across checkouts; the raw
+    // path is only a sensible key for a long-lived local clone.
+    projectKey: env('DOCXY_PROJECT_KEY') || env('GITHUB_REPOSITORY') || repoPath,
   };
+}
+
+function approvalMode(raw: string): ApprovalMode {
+  if (raw === 'auto' || raw === 'elevated' || raw === 'always') return raw;
+  throw new Error(
+    `DOCXY_APPROVAL_MODE must be one of auto, elevated, always — got "${raw}".`,
+  );
 }
 
 /**

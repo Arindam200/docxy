@@ -7,8 +7,14 @@ import type { RoleDefinition } from '../agents/roles.js';
 
 type SessionMap = Record<string, Partial<Record<RoleName, string>>>;
 
-function repoKey(repoPath: string): string {
-  return createHash('sha256').update(repoPath).digest('hex').slice(0, 16);
+/**
+ * Sessions are keyed on the project's stable identity, never on where it happens
+ * to be checked out: a hosted run clones to a fresh temp dir each time, and
+ * keying on that path would hand every role a brand-new session on every commit
+ * while still looking like it worked.
+ */
+function repoKey(projectKey: string): string {
+  return createHash('sha256').update(projectKey).digest('hex').slice(0, 16);
 }
 
 export class SessionStore {
@@ -38,25 +44,25 @@ export class SessionStore {
 
   async get(role: RoleName): Promise<string | undefined> {
     const map = await this.read();
-    return map[repoKey(this.config.repoPath)]?.[role];
+    return map[repoKey(this.config.projectKey)]?.[role];
   }
 
   async set(role: RoleName, sessionId: string): Promise<void> {
     const map = await this.read();
-    const key = repoKey(this.config.repoPath);
+    const key = repoKey(this.config.projectKey);
     map[key] = { ...map[key], [role]: sessionId };
     await this.write(map);
   }
 
   async clear(): Promise<void> {
     const map = await this.read();
-    delete map[repoKey(this.config.repoPath)];
+    delete map[repoKey(this.config.projectKey)];
     await this.write(map);
   }
 
   async all(): Promise<Partial<Record<RoleName, string>>> {
     const map = await this.read();
-    return map[repoKey(this.config.repoPath)] ?? {};
+    return map[repoKey(this.config.projectKey)] ?? {};
   }
 }
 

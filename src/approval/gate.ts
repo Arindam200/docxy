@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { Config } from '../config.js';
+import type { ApprovalMode, Config } from '../config.js';
 import type {
   ApprovalRequest,
   ApprovalScope,
@@ -44,6 +44,19 @@ export function decideScope(
       `Routine: a ${classification.kind} on ${classification.surface} surface, ` +
       `proposing a ${changelog.semverBump} bump. One sign-off required.`,
   };
+}
+
+/**
+ * Whether this proposal needs a sign-off before the pull request is opened.
+ *
+ * Opening a pull request does not merge anything: it asks for review, and the
+ * review is the control. A pre-PR gate is therefore opt-in, for teams that want
+ * a second look before the proposal is visible at all.
+ */
+export function requiresSignoff(mode: ApprovalMode, scope: ApprovalScope): boolean {
+  if (mode === 'always') return true;
+  if (mode === 'elevated') return scope === 'elevated';
+  return false;
 }
 
 export function createApprovalRequest(
@@ -127,7 +140,12 @@ export function staleness(
 
 export function describeGate(run: RunRecord, config: Config): string {
   const request = run.approval;
-  if (!request) return 'no approval request on this run';
+  if (!request) {
+    return (
+      `not gated (approval mode "${config.approval.mode}", ${run.scope ?? 'unscoped'} scope) — ` +
+      `the pull request review is the gate`
+    );
+  }
   const { stale, waitingMinutes } = staleness(request, config);
   const progress = `${request.signoffs.length}/${request.requiredSignoffs} sign-off(s)`;
   const staleNote = stale ? ` — STALE, waiting ${waitingMinutes} min, still pending` : '';

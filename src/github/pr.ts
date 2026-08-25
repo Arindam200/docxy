@@ -30,7 +30,7 @@ export function buildPrBody(run: RunRecord): string {
   const cl = run.changelog;
 
   lines.push(`## What changed`, '');
-  lines.push(run.approval?.summary ?? c?.summary ?? 'Documentation and changelog update.');
+  lines.push(run.approval?.summary ?? run.summary ?? c?.summary ?? 'Documentation and changelog update.');
   lines.push('');
 
   if (c) {
@@ -71,11 +71,18 @@ export function buildPrBody(run: RunRecord): string {
     lines.push('');
   }
 
+  lines.push('## Review', '');
   if (run.approval) {
-    lines.push('## Approval', '');
     lines.push(`- **Scope:** ${run.approval.scope} — ${run.approval.scopeRationale}`);
     lines.push(
       `- **Signed off by:** ${run.approval.signoffs.map((s) => s.by).join(', ') || '(none)'}`,
+    );
+    lines.push('');
+  } else {
+    if (run.scope) lines.push(`- **Scope:** ${run.scope} — ${run.scopeRationale}`);
+    lines.push(
+      '- **Sign-off:** not required before opening. Reviewing and merging this ' +
+        'pull request is the control — nothing has been merged by opening it.',
     );
     lines.push('');
   }
@@ -83,8 +90,8 @@ export function buildPrBody(run: RunRecord): string {
   lines.push('---', '');
   lines.push(
     `Opened by [Docxy](https://github.com/) for commit \`${run.commit.shortSha}\` — ` +
-      `${run.commit.subject}. Every edit above was drafted by a specialist agent, ` +
-      `validated before review, and released only after explicit human sign-off.`,
+      `${run.commit.subject}. Every edit above was drafted by a specialist agent ` +
+      `and validated before you saw it. Nothing merges without your review.`,
   );
 
   return lines.join('\n');
@@ -107,8 +114,19 @@ export async function openPullRequest(
   files: ProposedFile[],
 ): Promise<PrResult> {
   if (files.length === 0) throw new Error('There is nothing to open a pull request with.');
-  if (run.approval?.status !== 'approved') {
-    throw new Error('Refusing to open a pull request: the run is not approved.');
+
+  // A gated run must be signed off. An ungated one only has to have validated —
+  // opening the pull request is the request for review, not the merge.
+  if (run.approval && run.approval.status !== 'approved') {
+    throw new Error(
+      `Refusing to open a pull request: this run is gated and its approval is ` +
+        `"${run.approval.status}".`,
+    );
+  }
+  if (run.status !== 'ready' && run.status !== 'approved') {
+    throw new Error(
+      `Refusing to open a pull request: the run is "${run.status}", not ready or approved.`,
+    );
   }
 
   // Check the remote before doing any work, so a repo with no origin fails with
@@ -153,9 +171,12 @@ export async function openPullRequest(
       '-m',
       subject,
       '-m',
-      `Drafted from commit ${run.commit.sha} and approved by ${
-        run.approval.signoffs.map((s) => s.by).join(', ') || 'a reviewer'
-      }.`,
+      run.approval
+        ? `Drafted from commit ${run.commit.sha} and approved by ${
+            run.approval.signoffs.map((s) => s.by).join(', ') || 'a reviewer'
+          }.`
+        : `Drafted from commit ${run.commit.sha}. No pre-review sign-off was ` +
+          `required; this pull request is the review request.`,
     ]);
 
     try {

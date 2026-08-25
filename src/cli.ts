@@ -206,6 +206,15 @@ async function main(): Promise<void> {
           : `${c.yellow('!')} no GitHub token — PR creation falls back to the gh CLI`,
       );
 
+      console.log(`\n${c.bold('Gate')}        ${config.approval.mode}`);
+      console.log(
+        config.approval.mode === 'auto'
+          ? `${c.dim('·')} pull requests open automatically; their review is the control`
+          : `${c.dim('·')} ${config.approval.mode === 'always' ? 'every proposal' : 'elevated proposals'} need a sign-off first`,
+      );
+      console.log(`${c.bold('Project')}     ${config.projectKey}`);
+      console.log(`${c.dim('·')} sessions and the symbol map are keyed on this`);
+
       console.log(`\n${c.bold('Docs')}`);
       if (!config.docs.branch) {
         console.log(
@@ -256,6 +265,30 @@ async function main(): Promise<void> {
       });
 
       summarizeRun(run, config);
+
+      if (run.status === 'ready') {
+        const files = await rebuildProposedFiles(config, run);
+        console.log(`\n${c.dim('No sign-off required — opening the pull request...')}`);
+        try {
+          const pr = await openPullRequest(config, run, files);
+          run.pullRequestUrl = pr.url;
+          run.status = 'done';
+          run.finishedAt = new Date().toISOString();
+          await new RunStore(config).save(run);
+          console.log(`${c.green('✓')} ${pr.url}`);
+          console.log(
+            `\n  ${c.dim('Nothing is merged. Review the pull request and merge it when you are ready.')}`,
+          );
+          console.log(
+            `  ${c.dim('Want a sign-off before the PR is even opened? Set DOCXY_APPROVAL_MODE=elevated or always.')}`,
+          );
+        } catch (err) {
+          run.error = err instanceof Error ? err.message : String(err);
+          await new RunStore(config).save(run);
+          throw err;
+        }
+        return;
+      }
 
       if (run.status === 'awaiting-approval') {
         console.log(`\n${c.yellow('▌')} ${c.bold('Waiting for human approval.')}`);

@@ -127,7 +127,18 @@ export interface ApprovalRequest {
   summary: string;
 }
 
-export type RunStatus = 'running' | 'awaiting-approval' | 'approved' | 'denied' | 'failed' | 'done';
+/**
+ * `ready` means validated and not gated: the proposal may be opened as a pull
+ * request without any sign-off, because the pull request review is the gate.
+ */
+export type RunStatus =
+  | 'running'
+  | 'ready'
+  | 'awaiting-approval'
+  | 'approved'
+  | 'denied'
+  | 'failed'
+  | 'done';
 
 export interface RoleTrace {
   role: RoleName;
@@ -163,6 +174,11 @@ export interface RunRecord {
   proposedFiles?: ProposedFile[];
   /** Branch the docs were read from, when they live on their own branch. */
   docsBranch?: string;
+  /** Computed for every run, whether or not a sign-off was required. */
+  scope?: ApprovalScope;
+  scopeRationale?: string;
+  /** The Coordinator's human-readable summary, for the pull request body. */
+  summary?: string;
   approval?: ApprovalRequest;
   pullRequestUrl?: string;
   error?: string;

@@ -75,6 +75,7 @@ export function createServer(client: TrueForge, config: Config): CreatedServer {
       trueforgeBaseUrl: config.trueforge.baseUrl,
       provider: config.nebius.providerName,
       models: config.models,
+      approvalMode: config.approval.mode,
       validationEnabled: config.validation.enabled,
     }),
   );
@@ -120,6 +121,17 @@ export function createServer(client: TrueForge, config: Config): CreatedServer {
       onRunUpdate: (run) => bus.publish('run', run),
       onRoleEvent: (role, event) => bus.publish('role', { role, event }),
     })
+      .then(async ({ run }) => {
+        // Nothing gated it: open the pull request now. Its review is the control.
+        if (run.status !== 'ready') return;
+        const files = await rebuildProposedFiles(config, run);
+        const pr = await openPullRequest(config, run, files);
+        run.pullRequestUrl = pr.url;
+        run.status = 'done';
+        run.finishedAt = new Date().toISOString();
+        await runs.save(run);
+        bus.publish('run', run);
+      })
       .catch((cause) => {
         bus.publish('error', { message: cause instanceof Error ? cause.message : String(cause) });
       })

@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { extractJson, normalizeConfidence } from '../src/agents/parse.js';
 import { applyDocEdits, applyChangelogEntry } from '../src/pipeline/apply.js';
 import { checkLinks } from '../src/validate/links.js';
-import { decideScope, createApprovalRequest, signOff, deny, ApprovalError } from '../src/approval/gate.js';
+import { decideScope, createApprovalRequest, signOff, deny, ApprovalError, requiresSignoff } from '../src/approval/gate.js';
 import { openDocsTree, resolveBaseRef } from '../src/git/worktree.js';
 import { listDocs, readRepoFile } from '../src/git/repo.js';
 import { prBaseBranch } from '../src/config.js';
@@ -190,6 +190,20 @@ try {
 } catch (e) {
   check('missing docs branch throws', e instanceof Error && e.message.includes('does not exist'));
 }
+
+// --- approval modes -------------------------------------------------------
+// Opening a pull request is a review request, not a merge, so the default adds
+// no gate in front of the gate GitHub already provides.
+check('auto never gates routine', requiresSignoff('auto', 'routine') === false);
+check('auto never gates elevated', requiresSignoff('auto', 'elevated') === false);
+check('elevated mode lets routine through', requiresSignoff('elevated', 'routine') === false);
+check('elevated mode gates elevated', requiresSignoff('elevated', 'elevated') === true);
+check('always gates routine', requiresSignoff('always', 'routine') === true);
+check('always gates elevated', requiresSignoff('always', 'elevated') === true);
+
+// Scope is still computed under auto, so the PR body can explain the change.
+const autoScope = decideScope(breaking, { semverBump: 'major' } as any, 'routine');
+check('scope still computed when ungated', autoScope.scope === 'elevated');
 
 await rm(codeRepo, { recursive: true, force: true });
 

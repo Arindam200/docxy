@@ -8,7 +8,7 @@ Every push to `main` wakes five specialists. One classifies what changed. One
 traces which docs and downstream code the change actually touches. Two draft the
 edits — reference docs and release notes, in deliberately different voices. The
 last reviews their work before a human sees any of it. Everything is validated
-before review, and **nothing opens a pull request without explicit sign-off.**
+before review, and **nothing is ever merged without a human reading it.**
 
 ---
 
@@ -65,8 +65,9 @@ this project builds.
                     └──────────┬───────────┘
                                ▼
                     ┌──────────────────────┐
-                    │    Approval gate     │  routine = 1 sign-off
-                    │                      │  elevated = 2, different people
+                    │    Approval mode     │  auto     = open the PR
+                    │                      │  elevated = gate breaking changes
+                    │                      │  always   = gate everything
                     └──────────┬───────────┘
                                ▼
                         pull request
@@ -126,19 +127,30 @@ Validation runs **against the working copy on disk**, not a remote sandbox, so i
 needs no third-party account. TrueForge's own sandbox can be switched on with
 `DOCXY_USE_HARNESS_SKILLS=true` if you'd rather run it there.
 
-### 3. Graduated approval, and no silent timeout
+### 3. The pull request is the gate — a second one is opt-in
 
-- **Routine** — a docs-only fix needs one sign-off.
-- **Elevated** — anything classified breaking, touching documented public API, or
-  proposing a major bump needs **two sign-offs from two different people**. The
-  same reviewer signing twice is rejected.
+Opening a pull request is not shipping. It is a request for review, and merging
+it is a decision a human still has to make. So by default docxy opens the PR as
+soon as the proposal validates, and your normal review is the control.
+
+Some teams want a look before the proposal is visible at all. That is a mode,
+not the default:
+
+| `DOCXY_APPROVAL_MODE` | Behaviour |
+|---|---|
+| `auto` *(default)* | Open the pull request as soon as it validates |
+| `elevated` | Gate breaking changes, public-API changes, and major bumps; everything else opens straight away |
+| `always` | Gate every proposal, however routine |
+
+When a proposal *is* gated, the graduated rules apply:
+
+- **Routine** — one sign-off.
+- **Elevated** — **two sign-offs from two different people**. The same reviewer
+  signing twice is rejected.
 - The Coordinator also proposes a scope, and the **stricter of the two wins**: a
   model may escalate, never relax.
 - **Nothing expires.** A request nobody answers stays pending and is reported
   stale. It never auto-approves and never auto-discards.
-
-In CI this maps onto a protected GitHub environment, so GitHub itself holds the
-job open until a human clicks approve — see [`.github/workflows/docxy.yml`](.github/workflows/docxy.yml).
 
 ---
 
@@ -194,9 +206,16 @@ npx tsx src/cli.ts doctor     # harness, key, repo, and per-role model check
 npx tsx src/cli.ts run HEAD
 ```
 
-The pipeline stops at the approval gate and tells you exactly how to proceed.
+On the default `auto` mode the pipeline validates the proposal and opens the
+pull request, printing the URL. Review it like any other PR.
 
-### 5. Review and approve
+The proposal is written to a branch **in a throwaway git worktree** — your
+checkout, index, and current branch are never touched.
+
+### 5. If you turned the gate on
+
+Under `DOCXY_APPROVAL_MODE=elevated` or `always`, the run stops before opening
+anything and tells you how to proceed:
 
 ```bash
 npx tsx src/cli.ts serve      # timeline UI on http://localhost:4317
@@ -209,9 +228,7 @@ npx tsx src/cli.ts approve <run-id> --by "your name"
 npx tsx src/cli.ts deny    <run-id> --by "your name" --reason "why"
 ```
 
-Once fully approved, the proposal is written to a branch **in a throwaway git
-worktree** — your checkout, index, and current branch are never touched — and a
-pull request is opened.
+The pull request opens once the request is fully signed off.
 
 ---
 
@@ -225,7 +242,7 @@ pull request is opened.
 | `run [commit]` | Run the pipeline (default `HEAD`) |
 | `runs` | List recent runs |
 | `show <run-id>` | Show one run in detail (`--json` for the full record) |
-| `approve <run-id> --by NAME` | Sign off; opens the PR once fully approved |
+| `approve <run-id> --by NAME` | Sign off a gated run; opens the PR once fully approved |
 | `deny <run-id> --by NAME --reason TEXT` | Reject the proposal |
 | `serve` | Timeline UI and approval server |
 | `reset [--sessions] [--knowledge]` | Clear accumulated state for this repo |

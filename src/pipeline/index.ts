@@ -28,7 +28,7 @@ import { RunStore } from './store.js';
 import { applyChangelogEntry, applyDocEdits } from './apply.js';
 import type { ProposedFile } from '../types.js';
 import { validateProposal } from '../validate/index.js';
-import { createApprovalRequest, decideScope } from '../approval/gate.js';
+import { createApprovalRequest, decideScope, requiresSignoff } from '../approval/gate.js';
 
 export interface PipelineHooks {
   onRunUpdate?: (run: RunRecord) => void;
@@ -331,9 +331,21 @@ export async function runPipeline(
       return { run, proposedFiles };
     }
 
+    // Scope is recorded on every run: it explains the change in the pull request
+    // body even when nothing gated it.
     const { scope, rationale } = decideScope(classification, changelog, verdict.scope);
-    run.approval = createApprovalRequest(run.id, scope, rationale, verdict.summary);
-    run.status = 'awaiting-approval';
+    run.scope = scope;
+    run.scopeRationale = rationale;
+
+    if (requiresSignoff(config.approval.mode, scope)) {
+      run.approval = createApprovalRequest(run.id, scope, rationale, verdict.summary);
+      run.status = 'awaiting-approval';
+    } else {
+      // No pre-PR gate. The caller opens the pull request, and its review is the
+      // control — nothing is merged by opening it.
+      run.summary = verdict.summary;
+      run.status = 'ready';
+    }
     await persist();
 
     return { run, proposedFiles };
