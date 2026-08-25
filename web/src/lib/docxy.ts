@@ -153,6 +153,51 @@ export interface LogsPage {
   kinds: string[];
 }
 
+export interface RoleStats {
+  role: RoleName;
+  runs: number;
+  failed: number;
+  failures: Partial<Record<RoleFailure, number>>;
+  reuseRate?: number;
+  medianMs?: number;
+  p95Ms?: number;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd?: number;
+}
+
+export interface RunPoint {
+  id: string;
+  startedAt: string;
+  status: RunStatus;
+  shortSha: string;
+  subject: string;
+  durationMs?: number;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd?: number;
+  confidence?: number;
+}
+
+/** `GET /api/observability` — cross-run aggregates, derived on read. */
+export interface ObservabilityReport {
+  window: { runs: number; from?: string; to?: string };
+  outcomes: Partial<Record<RunStatus, number>>;
+  successRate?: number;
+  totals: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    costUsd?: number;
+    costPerRunUsd?: number;
+    medianRunMs?: number;
+  };
+  inputBreakdown: Record<string, number>;
+  roles: RoleStats[];
+  staleDocs: Array<{ path: string; edits: number; runs: number }>;
+  series: RunPoint[];
+}
+
 export interface Integration {
   id: string;
   name: string;
@@ -227,4 +272,8 @@ export function fetchLogs(params: {
 
 export function fetchIntegrations(): Promise<{ integrations: Integration[] } | null> {
   return get<{ integrations: Integration[] }>("/api/integrations");
+}
+
+export function fetchObservability(limit = 50): Promise<ObservabilityReport | null> {
+  return get<ObservabilityReport>(`/api/observability?limit=${limit}`);
 }

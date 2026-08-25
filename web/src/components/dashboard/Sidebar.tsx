@@ -9,6 +9,7 @@ import {
   LuGithub,
   LuHouse,
   LuLayers,
+  LuActivity,
   LuPlug,
   LuZap,
 } from "react-icons/lu";
@@ -26,6 +27,7 @@ const NAV: Array<{ href: string; label: string; icon: ReactNode }> = [
   { href: "/dashboard/tracking", label: "Tracking", icon: <LuLayers /> },
   { href: "/dashboard/instructions", label: "Instructions", icon: <LuBot /> },
   { href: "/dashboard/activity", label: "Activity", icon: <LuZap /> },
+  { href: "/dashboard/observability", label: "Observability", icon: <LuActivity /> },
   { href: "/dashboard/integrations", label: "Integrations", icon: <LuPlug /> },
 ];
 

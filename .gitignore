@@ -13,3 +13,4 @@ dist/
 
 # Claude Code scratch worktrees, created per session.
 .claude/worktrees/
+.gstack/

@@ -29,6 +29,11 @@ export default defineConfig({
   schema: './src/db/schema.ts',
   out: './drizzle',
   schemaFilter: ['public'],
+  // Pinned explicitly. Both sides share one database, and drizzle-kit decides
+  // what to apply by comparing journal timestamps against whatever it finds in
+  // this table — so a shared ledger makes each side's migrations look already
+  // applied to the other, and it reports success without running them.
+  migrations: { table: '__drizzle_migrations', schema: 'drizzle' },
   dbCredentials: { url: url ?? '' },
   strict: true,
   verbose: true,

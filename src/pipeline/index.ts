@@ -15,6 +15,7 @@ import { openDocsTree } from '../git/worktree.js';
 import { buildDocsOutline, readDocExcerpts, readRepoFile } from '../git/repo.js';
 import { resolveSession } from '../trueforge/session.js';
 import { runTurn } from '../trueforge/run.js';
+import { costOf, loadPrices, priceFor, round, type PriceTable } from '../trueforge/pricing.js';
 import {
   CHANGELOG_AUTHOR,
   CHANGE_ANALYST,
@@ -70,14 +71,28 @@ function abortedBy(err: unknown): boolean {
  * Roll the traces up onto the run, so the run list needs no per-role arithmetic
  * and a run that fails half way still reports what it spent getting there.
  */
-function rollUp(run: RunRecord): void {
+function rollUp(run: RunRecord, config: Config, prices: PriceTable): void {
   const totals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 };
+  let costUsd = 0;
+  let priced = false;
+
   for (const trace of run.traces) {
     totals.inputTokens += trace.usage?.inputTokens ?? 0;
     totals.outputTokens += trace.usage?.outputTokens ?? 0;
     totals.cacheReadTokens += trace.usage?.cacheReadTokens ?? 0;
+
+    // Roles can run on different models, so each is priced against its own.
+    const cost = costOf(trace.usage, priceFor(trace.model, config, prices));
+    if (cost !== undefined && trace.usage) {
+      trace.usage.costUsd = cost;
+      costUsd += cost;
+      priced = true;
+    }
   }
-  run.totals = totals;
+
+  // Left absent rather than zero when no rate was known: a run that cost
+  // nothing and a run nobody could price are different facts.
+  run.totals = priced ? { ...totals, costUsd: round(costUsd) } : totals;
 
   const end = run.finishedAt ? new Date(run.finishedAt) : new Date();
   run.durationMs = end.getTime() - new Date(run.startedAt).getTime();
@@ -110,8 +125,11 @@ export async function runPipeline(
     newSymbolCount: 0,
   };
 
+  // Once per run, cached for an hour, and empty if the endpoint is unreachable.
+  const prices = await loadPrices(config);
+
   const persist = async (): Promise<void> => {
-    rollUp(run);
+    rollUp(run, config, prices);
     await runs.save(run);
     hooks.onRunUpdate?.(run);
   };

@@ -139,6 +139,8 @@ export interface RoleUsage {
   cacheWriteTokens?: number;
   /** harness / instructions / messages / skills / tool_definitions */
   inputBreakdown?: Record<string, number>;
+  /** Priced from the account's own rates; absent when they are unknown. */
+  costUsd?: number;
 }
 
 export interface RoleTrace {

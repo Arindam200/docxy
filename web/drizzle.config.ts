@@ -31,6 +31,10 @@ export default defineConfig({
   schema: "./src/db/schema.ts",
   out: "./drizzle",
   schemaFilter: ["auth"],
+  // Its own ledger, separate from the pipeline's in the same database. Sharing
+  // one made drizzle-kit compare this migration's journal timestamp against the
+  // pipeline's, judge it already applied, and skip it while reporting success.
+  migrations: { table: "__drizzle_migrations_auth", schema: "drizzle" },
   dbCredentials: { url: url ?? "" },
   strict: true,
   verbose: true,

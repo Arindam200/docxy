@@ -8,6 +8,7 @@ import type { RunRecord } from '../types.js';
 import { PACKAGE_ROOT } from '../paths.js';
 import { createStores, storageBackend } from '../pipeline/stores.js';
 import { appStatus, verifyWebhook } from '../github/app.js';
+import { buildReport } from './observability.js';
 import { rebuildProposedFiles, runPipeline } from '../pipeline/index.js';
 import { ApprovalError, deny, describeGate, signOff, staleness } from '../approval/gate.js';
 import { openPullRequest } from '../github/pr.js';
@@ -175,6 +176,18 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
       total: filtered.length,
       kinds: [...new Set(entries.map((entry) => entry.kind))].sort(),
     });
+  });
+
+  /**
+   * Cross-run aggregates: reliability per role, spend, and what goes stale.
+   *
+   * Derived on read rather than stored. Runs are the source of truth and the
+   * window is small enough that recomputing costs less than keeping a second
+   * copy of the same numbers correct.
+   */
+  app.get('/api/observability', async (c) => {
+    const limit = Math.min(Number(c.req.query('limit') ?? 50) || 50, 200);
+    return c.json(buildReport(await runs.list(limit)));
   });
 
   app.get('/api/runs/:id', async (c) => {

@@ -8,21 +8,10 @@ import { authReady, githubConfigured, googleConfigured, missingEnv } from "@/lib
 import { safeNext } from "@/lib/redirect";
 
 export const metadata: Metadata = {
-  title: "Sign in · Docxy",
+  title: "Sign up · Docxy",
 };
 
-/** OAuth failures come back on the query string rather than in the response. */
-const ERRORS: Record<string, string> = {
-  unconfigured:
-    "That provider is not configured on this deployment yet. Sign in with an email and password instead.",
-  access_denied: "The sign-in was cancelled before it finished. Please try again.",
-  state_mismatch: "That sign-in attempt expired or was tampered with. Please try again.",
-  no_email: "That account did not share an email address, which Docxy requires.",
-  account_not_linked:
-    "An account already exists for that email with a different sign-in method. Use the one you signed up with.",
-};
-
-export default async function LoginPage({
+export default async function SignupPage({
   searchParams,
 }: {
   searchParams: Promise<{ error?: string; next?: string }>;
@@ -30,30 +19,30 @@ export default async function LoginPage({
   const params = await searchParams;
   const next = safeNext(params.next);
   const error = params.error
-    ? (ERRORS[params.error] ?? "Something went wrong signing you in. Please try again.")
+    ? "That sign-up could not be completed. Please try again."
     : undefined;
 
   return (
     <AuthShell
-      eyebrow="Welcome back"
-      title="Sign in to Docxy"
-      lede="One account for every run, approval, and instruction."
+      eyebrow="New here"
+      title="Create your Docxy account"
+      lede="Connect a repo, push code, review the PR. That's the whole onboarding."
       error={error}
       alt={
         <>
-          Don&apos;t have an account?{" "}
+          Already have an account?{" "}
           <Link
-            href={`/signup?next=${encodeURIComponent(next)}`}
+            href={`/login?next=${encodeURIComponent(next)}`}
             className="font-medium text-foreground underline decoration-rule underline-offset-4 hover:text-accent hover:decoration-accent"
           >
-            Sign up
+            Sign in
           </Link>
         </>
       }
     >
       {authReady() ? (
         <CredentialsForm
-          mode="signin"
+          mode="signup"
           next={next}
           google={googleConfigured()}
           github={githubConfigured()}
@@ -61,6 +50,9 @@ export default async function LoginPage({
       ) : (
         <SetupNotice missing={missingEnv()} />
       )}
+      <p className="text-center text-xs leading-relaxed text-muted">
+        Your name, email, and avatar are used only to identify your reviews and sign-offs.
+      </p>
     </AuthShell>
   );
 }
