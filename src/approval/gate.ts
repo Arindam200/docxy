@@ -15,11 +15,16 @@ import type {
  * The Coordinator also proposes a scope. We take the stricter of the two: a
  * model is allowed to escalate, never to relax.
  */
+export interface ScopeDecision {
+  scope: ApprovalScope;
+  rationale: string;
+}
+
 export function decideScope(
   classification: Classification,
   changelog: ChangelogProposal,
   coordinatorScope: ApprovalScope | undefined,
-): { scope: ApprovalScope; rationale: string } {
+): ScopeDecision {
   const reasons: string[] = [];
 
   if (classification.kind === 'breaking') reasons.push('the change is classified breaking');
@@ -62,13 +67,22 @@ export function createApprovalRequest(
 
 export class ApprovalError extends Error {}
 
+export interface SignOffResult {
+  approved: boolean;
+}
+
+export interface StalenessReport {
+  stale: boolean;
+  waitingMinutes: number;
+}
+
 /**
  * Record one sign-off. Returns whether the request is now fully approved.
  *
  * A single reviewer cannot satisfy an elevated request twice — that would make
  * the second sign-off decorative.
  */
-export function signOff(request: ApprovalRequest, by: string): { approved: boolean } {
+export function signOff(request: ApprovalRequest, by: string): SignOffResult {
   if (request.status === 'denied') throw new ApprovalError('This request was already denied.');
   if (request.status === 'approved') return { approved: true };
   if (request.signoffs.some((s) => s.by === by)) {
@@ -101,7 +115,7 @@ export function deny(request: ApprovalRequest, by: string, reason: string): void
 export function staleness(
   request: ApprovalRequest,
   config: Config,
-): { stale: boolean; waitingMinutes: number } {
+): StalenessReport {
   const waitingMinutes = Math.floor(
     (Date.now() - new Date(request.createdAt).getTime()) / 60_000,
   );

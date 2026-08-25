@@ -22,7 +22,8 @@ export class SessionStore {
   private async read(): Promise<SessionMap> {
     if (this.cache) return this.cache;
     try {
-      this.cache = JSON.parse(await readFile(this.file, 'utf8')) as SessionMap;
+      const parsed: SessionMap = JSON.parse(await readFile(this.file, 'utf8'));
+      this.cache = parsed;
     } catch {
       this.cache = {};
     }
@@ -43,7 +44,7 @@ export class SessionStore {
   async set(role: RoleName, sessionId: string): Promise<void> {
     const map = await this.read();
     const key = repoKey(this.config.repoPath);
-    map[key] = { ...(map[key] ?? {}), [role]: sessionId };
+    map[key] = { ...map[key], [role]: sessionId };
     await this.write(map);
   }
 

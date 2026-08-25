@@ -9,6 +9,17 @@ import { checkLinks } from './links.js';
 
 const exec = promisify(execFile);
 
+interface CommandFailure {
+  stdout?: string;
+  stderr?: string;
+  message?: string;
+}
+
+/** A rejected command promise may carry captured output; anything else is opaque. */
+function withCommandOutput<T>(value: T): value is T & CommandFailure {
+  return typeof value === 'object' && value !== null;
+}
+
 async function runCommand(
   name: string,
   command: string,
@@ -18,18 +29,18 @@ async function runCommand(
     return { name, status: 'skipped', detail: 'no command configured' };
   }
   try {
-    const { stdout, stderr } = await exec(command, {
+    const { stdout, stderr } = await exec(command, [], {
       cwd,
       shell: true,
       timeout: 10 * 60 * 1000,
       maxBuffer: 32 * 1024 * 1024,
-    } as never);
+    });
     const tail = `${stdout}${stderr}`.trim().split('\n').slice(-8).join('\n');
     return { name, status: 'pass', detail: tail || 'exited 0' };
-  } catch (err) {
-    const e = err as { stdout?: string; stderr?: string; message?: string };
-    const output = `${e.stdout ?? ''}${e.stderr ?? ''}`.trim();
-    const tail = (output || e.message || 'command failed').split('\n').slice(-15).join('\n');
+  } catch (cause) {
+    const e = withCommandOutput(cause) ? cause : undefined;
+    const output = `${e?.stdout ?? ''}${e?.stderr ?? ''}`.trim();
+    const tail = (output || e?.message || 'command failed').split('\n').slice(-15).join('\n');
     return { name, status: 'fail', detail: tail };
   }
 }

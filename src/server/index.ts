@@ -12,6 +12,8 @@ import { ApprovalError, deny, describeGate, signOff, staleness } from '../approv
 import { openPullRequest } from '../github/pr.js';
 
 /** Fan-out for server-sent events, so the timeline updates while a run is live. */
+type ServerEventPayload = RunRecord | { role: string; event: { at: string; kind: string; text: string } } | { message: string };
+
 class Broadcaster {
   private readonly clients = new Set<(chunk: string) => void>();
 
@@ -20,7 +22,7 @@ class Broadcaster {
     return () => this.clients.delete(send);
   }
 
-  publish(event: string, data: unknown): void {
+  publish(event: string, data: ServerEventPayload): void {
     const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
     for (const send of this.clients) {
       try {
@@ -32,12 +34,30 @@ class Broadcaster {
   }
 }
 
+export interface CreatedServer {
+  app: Hono;
+  bus: Broadcaster;
+}
+
 export interface ServerHandle {
   close: () => void;
   port: number;
 }
 
-export function createServer(client: TrueForge, config: Config): { app: Hono; bus: Broadcaster } {
+interface RunRequestBody {
+  commit?: string;
+}
+
+interface ApproveRequestBody {
+  by?: string;
+}
+
+interface DenyRequestBody {
+  by?: string;
+  reason?: string;
+}
+
+export function createServer(client: TrueForge, config: Config): CreatedServer {
   const app = new Hono();
   const runs = new RunStore(config);
   const bus = new Broadcaster();
@@ -93,15 +113,15 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
 
   app.post('/api/runs', async (c) => {
     if (activeRun) return c.json({ error: 'A run is already in progress.' }, 409);
-    const body = (await c.req.json().catch(() => ({}))) as { commit?: string };
+    const body: RunRequestBody = await c.req.json().catch(() => ({}));
     const commit = body.commit || 'HEAD';
 
     const promise = runPipeline(client, config, commit, {
       onRunUpdate: (run) => bus.publish('run', run),
       onRoleEvent: (role, event) => bus.publish('role', { role, event }),
     })
-      .catch((err: unknown) => {
-        bus.publish('error', { message: err instanceof Error ? err.message : String(err) });
+      .catch((cause) => {
+        bus.publish('error', { message: cause instanceof Error ? cause.message : String(cause) });
       })
       .finally(() => {
         activeRun = null;
@@ -115,7 +135,7 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
     const run = await runs.load(c.req.param('id'));
     if (!run?.approval) return c.json({ error: 'No such run, or it has no approval request.' }, 404);
 
-    const body = (await c.req.json().catch(() => ({}))) as { by?: string };
+    const body: ApproveRequestBody = await c.req.json().catch(() => ({}));
     const by = (body.by || '').trim();
     if (!by) return c.json({ error: 'A reviewer name is required to sign off.' }, 400);
 
@@ -155,7 +175,7 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
     const run = await runs.load(c.req.param('id'));
     if (!run?.approval) return c.json({ error: 'No such run, or it has no approval request.' }, 404);
 
-    const body = (await c.req.json().catch(() => ({}))) as { by?: string; reason?: string };
+    const body: DenyRequestBody = await c.req.json().catch(() => ({}));
     const by = (body.by || '').trim();
     const reason = (body.reason || '').trim();
     if (!by || !reason) return c.json({ error: 'Both a reviewer name and a reason are required.' }, 400);

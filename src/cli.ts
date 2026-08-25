@@ -22,7 +22,12 @@ const c = {
   cyan: (s: string) => `\x1b[36m${s}\x1b[0m`,
 };
 
-function parseFlags(argv: string[]): { positional: string[]; flags: Record<string, string> } {
+interface ParsedFlags {
+  positional: string[];
+  flags: Record<string, string>;
+}
+
+function parseFlags(argv: string[]): ParsedFlags {
   const positional: string[] = [];
   const flags: Record<string, string> = {};
   for (let i = 0; i < argv.length; i += 1) {
@@ -413,11 +418,11 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err: unknown) => {
-  if (err instanceof ApprovalError) {
-    console.error(`\n${c.red('✗')} ${err.message}`);
+main().catch((cause) => {
+  if (cause instanceof ApprovalError) {
+    console.error(`\n${c.red('✗')} ${cause.message}`);
   } else {
-    console.error(`\n${c.red('✗')} ${err instanceof Error ? err.message : String(err)}`);
+    console.error(`\n${c.red('✗')} ${cause instanceof Error ? cause.message : String(cause)}`);
   }
   process.exitCode = 1;
 });

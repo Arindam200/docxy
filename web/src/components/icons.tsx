@@ -13,7 +13,7 @@ import {
  * Nebius and TrueForge have no Simple Icons entry, so their own favicons are
  * vendored under public/brand instead of hotlinked.
  */
-export const brandIcons: Record<string, ReactNode> = {
+const brandIconsLiteral = {
   GitHub: <SiGithub size={20} color="#24292e" />,
   "GitHub Actions": <SiGithubactions size={20} color="#2088FF" />,
   Claude: <SiClaude size={20} color="#D97757" />,
@@ -28,4 +28,6 @@ export const brandIcons: Record<string, ReactNode> = {
   "Markdown & MDX": <SiMarkdown size={20} color="#18181b" />,
   "Keep a Changelog": <SiKeepachangelog size={20} color="#E05735" />,
   "Semantic Versioning": <SiSemver size={20} color="#3F4551" />,
-};
+} satisfies Record<string, ReactNode>;
+
+export const brandIcons = brandIconsLiteral;

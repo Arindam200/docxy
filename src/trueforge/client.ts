@@ -2,11 +2,12 @@ import { TrueForge } from '@truefoundry/trueforge-sdk';
 import type { Config } from '../config.js';
 
 export function createClient(config: Config): TrueForge {
-  return new TrueForge({
+  const options: TrueForge.Options = {
     baseUrl: config.trueforge.baseUrl,
     timeoutInSeconds: config.trueforge.timeoutInSeconds,
-    ...(config.trueforge.token ? { token: config.trueforge.token } : {}),
-  });
+  };
+  if (config.trueforge.token) options.token = config.trueforge.token;
+  return new TrueForge(options);
 }
 
 export class TrueForgeUnreachableError extends Error {

@@ -13,6 +13,11 @@ export interface KnowledgeMap {
 
 const EMPTY: KnowledgeMap = { symbols: {}, processedCommits: [], updatedAt: '' };
 
+/** Model-supplied sections may be junk; only trimmed non-empty strings are kept. */
+function isNonEmptyText<T>(value: T): value is T & string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
 /**
  * The symbol-to-doc-section map, persisted per repository and updated
  * incrementally. This is what turns a second run on the same repo into a
@@ -28,7 +33,7 @@ export class KnowledgeStore {
 
   async load(): Promise<KnowledgeMap> {
     try {
-      const parsed = JSON.parse(await readFile(this.file, 'utf8')) as Partial<KnowledgeMap>;
+      const parsed: Partial<KnowledgeMap> = JSON.parse(await readFile(this.file, 'utf8'));
       return {
         symbols: parsed.symbols ?? {},
         processedCommits: parsed.processedCommits ?? [],
@@ -57,7 +62,7 @@ export class KnowledgeStore {
       const existing = new Set(map.symbols[symbol] ?? []);
       const before = existing.size;
       for (const section of sections) {
-        if (typeof section === 'string' && section.trim()) existing.add(section.trim());
+        if (isNonEmptyText(section)) existing.add(section.trim());
       }
       // "added" counts newly learned mappings, whether a brand-new symbol or a
       // new section for one already known.

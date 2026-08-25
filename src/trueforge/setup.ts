@@ -19,11 +19,20 @@ interface CustomProviderManifest {
   }>;
 }
 
-async function readJson(res: Response): Promise<unknown> {
+interface ModelProviderList {
+  data?: Array<{ name?: string }>;
+}
+
+interface NebiusModelList {
+  data?: Array<{ id?: string }>;
+}
+
+async function readJson<T>(res: Response): Promise<T | string | null> {
   const text = await res.text();
   if (!text) return null;
   try {
-    return JSON.parse(text);
+    const parsed: T = JSON.parse(text);
+    return parsed;
   } catch {
     return text;
   }
@@ -59,9 +68,9 @@ export async function registerNebiusProvider(
   };
 
   const existing = await client.fetch('/api/v1/settings/model-providers');
-  const listed = (await readJson(existing)) as { data?: Array<{ name?: string }> } | null;
+  const listed = await readJson<ModelProviderList>(existing);
   const alreadyThere =
-    Array.isArray(listed?.data) &&
+    isPresent(listed) && Array.isArray(listed.data) &&
     listed.data.some((p) => p?.name === config.nebius.providerName);
 
   const method = alreadyThere ? 'PUT' : 'POST';
@@ -91,6 +100,11 @@ export async function listAvailableModels(client: TrueForge): Promise<string[]> 
   return data.map((model) => model.name);
 }
 
+/** The provider list endpoint answers with JSON or a plain-text error body. */
+function isPresent<T>(value: T | string | null): value is T {
+  return typeof value === 'string' ? false : value !== null;
+}
+
 /**
  * Ask Nebius directly which model ids the account can serve. Used by
  * `docxy models` so the defaults can be checked against reality.
@@ -104,6 +118,6 @@ export async function listNebiusModels(config: Config): Promise<string[]> {
   if (!res.ok) {
     throw new Error(`Nebius /models returned HTTP ${res.status}: ${await res.text()}`);
   }
-  const body = (await res.json()) as { data?: Array<{ id?: string }> };
+  const body: NebiusModelList = JSON.parse(await res.text());
   return (body.data ?? []).map((m) => m.id ?? '').filter(Boolean).sort();
 }

@@ -8,6 +8,7 @@ import { decideScope, createApprovalRequest, signOff, deny, ApprovalError } from
 import { openDocsTree, resolveBaseRef } from '../src/git/worktree.js';
 import { listDocs, readRepoFile } from '../src/git/repo.js';
 import { prBaseBranch } from '../src/config.js';
+import type { Classification, ChangelogProposal } from '../src/types.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -97,13 +98,15 @@ const cl3 = await applyChangelogEntry(repo, 'NEW.md',
 check('changelog creates Unreleased block', cl3.after.includes('## [Unreleased]') && cl3.after.includes('First entry'));
 
 // --- approval gate -------------------------------------------------------
-const breaking = { kind: 'breaking', surface: 'public-api', summary: '', changedSymbols: [],
-  breakingRationale: '', confidence: 0.9 } as any;
-const chore = { kind: 'chore', surface: 'internal', summary: '', changedSymbols: [],
-  breakingRationale: '', confidence: 0.9 } as any;
-check('breaking is elevated', decideScope(breaking, { semverBump: 'major' } as any, 'routine').scope === 'elevated');
-check('chore is routine', decideScope(chore, { semverBump: 'none' } as any, 'routine').scope === 'routine');
-check('coordinator can escalate', decideScope(chore, { semverBump: 'none' } as any, 'elevated').scope === 'elevated');
+const breaking: Classification = { kind: 'breaking', surface: 'public-api', summary: '', changedSymbols: [],
+  breakingRationale: '', confidence: 0.9 };
+const chore: Classification = { kind: 'chore', surface: 'internal', summary: '', changedSymbols: [],
+  breakingRationale: '', confidence: 0.9 };
+const majorBump: ChangelogProposal = { entry: '', section: 'Changed', semverBump: 'major', bumpRationale: '' };
+const noneBump: ChangelogProposal = { entry: '', section: 'Fixed', semverBump: 'none', bumpRationale: '' };
+check('breaking is elevated', decideScope(breaking, majorBump, 'routine').scope === 'elevated');
+check('chore is routine', decideScope(chore, noneBump, 'routine').scope === 'routine');
+check('coordinator can escalate', decideScope(chore, noneBump, 'elevated').scope === 'elevated');
 
 const req = createApprovalRequest('run1', 'elevated', 'because', 'summary');
 check('elevated needs two', req.requiredSignoffs === 2);

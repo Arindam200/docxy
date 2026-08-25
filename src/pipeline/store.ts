@@ -22,7 +22,8 @@ export class RunStore {
 
   async load(id: string): Promise<RunRecord | null> {
     try {
-      return JSON.parse(await readFile(this.file(id), 'utf8')) as RunRecord;
+      const parsed: RunRecord = JSON.parse(await readFile(this.file(id), 'utf8'));
+      return parsed;
     } catch {
       return null;
     }
@@ -39,7 +40,8 @@ export class RunStore {
     const runs: RunRecord[] = [];
     for (const name of names.filter((n) => n.endsWith('.json'))) {
       try {
-        runs.push(JSON.parse(await readFile(join(this.dir, name), 'utf8')) as RunRecord);
+        const record: RunRecord = JSON.parse(await readFile(join(this.dir, name), 'utf8'));
+        runs.push(record);
       } catch {
         // skip a corrupt record rather than failing the listing
       }

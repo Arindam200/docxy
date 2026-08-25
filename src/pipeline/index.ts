@@ -72,11 +72,11 @@ export async function runPipeline(
     commit: { sha: diff.sha, shortSha: diff.shortSha, subject: diff.subject },
     startedAt: new Date().toISOString(),
     status: 'running',
-    ...(docsTree.branch ? { docsBranch: docsTree.branch } : {}),
     traces: [],
     priorSymbolCount: Object.keys(priorMap.symbols).length,
     newSymbolCount: 0,
   };
+  if (docsTree.branch) run.docsBranch = docsTree.branch;
 
   const persist = async (): Promise<void> => {
     await runs.save(run);

@@ -56,17 +56,19 @@ function skills(config: Config, pack?: string): TrueForgeApi.Skill[] | undefined
   return [{ name: pack }];
 }
 
+function withSkills(spec: TrueForgeApi.AgentSpec, pack?: TrueForgeApi.Skill[]): TrueForgeApi.AgentSpec {
+  if (pack) spec.skills = pack;
+  return spec;
+}
+
 export const CHANGE_ANALYST: RoleDefinition = {
   name: 'change-analyst',
   title: 'Change Analyst',
   job: 'Classifies the diff and extracts the plain-language what and why',
   skillPack: 'breaking-change-policy',
-  spec: (config) => ({
+  spec: (config) => withSkills({
     model: { name: config.models['change-analyst'], params: { temperature: 0.1, maxTokens: 4000 } },
     config: runtime(config),
-    ...(skills(config, 'breaking-change-policy')
-      ? { skills: skills(config, 'breaking-change-policy') }
-      : {}),
     instructions: buildInstructions({
       skillPack: 'breaking-change-policy',
       persona: `
@@ -95,7 +97,7 @@ call in terms of what happens to a consumer who upgrades without changing code.`
 - \`breakingRationale\`: string — one or two sentences framed around the consumer
 - \`confidence\`: number between 0 and 1`,
     }),
-  }),
+  }, skills(config, 'breaking-change-policy')),
 };
 
 export const IMPACT_MAPPER: RoleDefinition = {
@@ -103,10 +105,9 @@ export const IMPACT_MAPPER: RoleDefinition = {
   title: 'Impact Mapper',
   job: 'Traces which docs and downstream code the change actually touches',
   skillPack: 'impact-map-hints',
-  spec: (config) => ({
+  spec: (config) => withSkills({
     model: { name: config.models['impact-mapper'], params: { temperature: 0.1, maxTokens: 6000 } },
     config: runtime(config, { subagents: true }),
-    ...(skills(config, 'impact-map-hints') ? { skills: skills(config, 'impact-map-hints') } : {}),
     instructions: buildInstructions({
       skillPack: 'impact-map-hints',
       persona: `
@@ -134,7 +135,7 @@ in the docs outline verbatim. Do not propose edits.`,
 - \`symbolIndex\`: object mapping each changed symbol to an array of "path#Heading Text" strings
 - \`notes\`: string — what you reused from the prior map, and anything you could not confirm`,
     }),
-  }),
+  }, skills(config, 'impact-map-hints')),
 };
 
 export const DOCS_UPDATER: RoleDefinition = {
@@ -142,10 +143,9 @@ export const DOCS_UPDATER: RoleDefinition = {
   title: 'Docs Updater',
   job: 'Drafts the specific edits to the affected doc sections',
   skillPack: 'docs-style',
-  spec: (config) => ({
+  spec: (config) => withSkills({
     model: { name: config.models['docs-updater'], params: { temperature: 0.2, maxTokens: 8000 } },
     config: runtime(config),
-    ...(skills(config, 'docs-style') ? { skills: skills(config, 'docs-style') } : {}),
     instructions: buildInstructions({
       skillPack: 'docs-style',
       persona: `
@@ -173,7 +173,7 @@ with a reason. An honest no-op is a correct answer.`,
   - for \`mode: "append"\`, set \`find\` to an empty string; \`replace\` is appended to the end of the file
 - \`skipped\`: array of { \`path\`: string, \`reason\`: string }`,
     }),
-  }),
+  }, skills(config, 'docs-style')),
 };
 
 export const CHANGELOG_AUTHOR: RoleDefinition = {
@@ -181,13 +181,12 @@ export const CHANGELOG_AUTHOR: RoleDefinition = {
   title: 'Changelog Author',
   job: 'Writes one user-facing entry and proposes a semver bump',
   skillPack: 'changelog-voice',
-  spec: (config) => ({
+  spec: (config) => withSkills({
     model: {
       name: config.models['changelog-author'],
       params: { temperature: 0.3, maxTokens: 2000 },
     },
     config: runtime(config),
-    ...(skills(config, 'changelog-voice') ? { skills: skills(config, 'changelog-voice') } : {}),
     instructions: buildInstructions({
       skillPack: 'changelog-voice',
       persona: `
@@ -209,7 +208,7 @@ without exception.`,
 - \`semverBump\`: one of "major" | "minor" | "patch" | "none"
 - \`bumpRationale\`: string — one sentence referencing the classification`,
     }),
-  }),
+  }, skills(config, 'changelog-voice')),
 };
 
 export const COORDINATOR: RoleDefinition = {

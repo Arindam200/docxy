@@ -172,6 +172,8 @@ export async function openPullRequest(
 
     const body = buildPrBody(run);
     if (await hasGhCli()) {
+      const env = { ...process.env };
+      if (config.github.token) env.GH_TOKEN = config.github.token;
       const { stdout } = await exec(
         'gh',
         [
@@ -181,7 +183,7 @@ export async function openPullRequest(
           '--title', subject,
           '--body', body,
         ],
-        { cwd: worktree, env: { ...process.env, ...(config.github.token ? { GH_TOKEN: config.github.token } : {}) } },
+        { cwd: worktree, env },
       );
       const url = stdout.trim().split('\n').find((l) => l.startsWith('http')) ?? stdout.trim();
       return { url, branch };
@@ -223,7 +225,7 @@ async function openViaApi(
   if (!res.ok) {
     throw new Error(`GitHub API returned HTTP ${res.status}: ${await res.text()}`);
   }
-  const created = (await res.json()) as { html_url?: string };
+  const created: { html_url?: string } = JSON.parse(await res.text());
   return created.html_url ?? `https://github.com/${repo}/pulls`;
 }
 

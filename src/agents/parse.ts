@@ -70,7 +70,7 @@ export function extractJson<T>(role: string, raw: string): T {
 
   for (const candidate of candidates) {
     try {
-      return JSON.parse(candidate) as T;
+      return JSON.parse(candidate);
     } catch {
       // try the next candidate
     }
@@ -83,9 +83,13 @@ export function extractJson<T>(role: string, raw: string): T {
   );
 }
 
+function isRawConfidence(value: number | string): value is number {
+  return typeof value === 'number';
+}
+
 /** Clamp a model-supplied confidence into 0..1 without throwing on junk. */
-export function normalizeConfidence(value: unknown, fallback = 0.5): number {
-  const n = typeof value === 'number' ? value : Number.parseFloat(String(value));
+export function normalizeConfidence(value: number | string, fallback = 0.5): number {
+  const n = isRawConfidence(value) ? value : Number.parseFloat(String(value));
   if (!Number.isFinite(n)) return fallback;
   // A model asked for 0-1 sometimes answers on a 0-100 scale. Only read values
   // that are plausibly percentages that way; 1 < n < 10 is far more likely a

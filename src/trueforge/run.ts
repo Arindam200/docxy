@@ -20,16 +20,18 @@ export interface TurnResult {
   error?: string;
 }
 
-type AnyEvent = Record<string, any>;
+function isStringContent(
+  content: TrueForgeApi.ModelMessageEventContent | null | undefined,
+): content is string {
+  return typeof content === 'string';
+}
 
-function textOf(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((part: any) => (part && part.type === 'text' ? String(part.text ?? '') : ''))
-      .join('');
-  }
-  return '';
+function textOf(content: TrueForgeApi.ModelMessageEventContent | null | undefined): string {
+  if (isStringContent(content)) return content;
+  if (!content) return '';
+  return content
+    .map((part) => (part.type === 'text' ? String(part.text ?? '') : ''))
+    .join('');
 }
 
 /** Guard against an agent that keeps asking; each resume costs another round trip. */
@@ -57,7 +59,7 @@ export async function runTurn(
 ): Promise<TurnResult> {
   const { onEvent, autoApproveHarnessTools = true } = options;
 
-  const events = new Map<string, AnyEvent>();
+  const events = new Map<string, TrueForgeApi.TurnStreamingEvent>();
   const trace: TraceEvent[] = [];
   const subthreads = new Set<string>();
   const usage = { inputTokens: 0, outputTokens: 0 };
@@ -72,12 +74,12 @@ export async function runTurn(
   };
 
   let input: TrueForgeApi.TurnInputItem[] = [
-    { type: 'user.message', content: prompt } as TrueForgeApi.TurnInputItem,
+    { type: 'user.message', content: prompt },
   ];
 
   for (let resume = 0; resume <= MAX_RESUMES; resume += 1) {
-    const pendingApprovals: AnyEvent[] = [];
-    const pendingResponses: AnyEvent[] = [];
+    const pendingApprovals: TrueForgeApi.ToolApprovalRequiredEvent[] = [];
+    const pendingResponses: TrueForgeApi.ToolResponseRequiredEvent[] = [];
 
     const stream = await client.sessions.createTurnStream(
       sessionId,
@@ -85,12 +87,10 @@ export async function runTurn(
       options.signal ? { abortSignal: options.signal } : undefined,
     );
 
-    for await (const { data } of stream.withMetadata()) {
-      const event = data as AnyEvent;
-
-      if (isEventDelta(event as any)) {
+    for await (const { data: event } of stream.withMetadata()) {
+      if (isEventDelta(event)) {
         const base = events.get(event.id);
-        if (base) mergeEventDelta(base as any, event as any);
+        if (base) mergeEventDelta(base, event);
         continue;
       }
       if (event.id) events.set(event.id, event);
@@ -108,7 +108,7 @@ export async function runTurn(
           break;
 
         case 'thread.done':
-          if (event.state?.status === 'error' && event.state?.error) {
+          if (event.state.status === 'error' && event.state.error) {
             errorMessage ??= String(event.state.error);
           }
           if (event.threadId && event.threadId !== 'main') {
@@ -148,13 +148,14 @@ export async function runTurn(
           emit('mcp', 'an MCP server needs authorization');
           break;
 
-        case 'turn.done':
-          status = event.state?.status ?? 'unknown';
-          if (status === 'error' && event.state?.message) {
+        case 'turn.done': {
+          status = event.state.status;
+          if (event.state.status === 'error' && event.state.message) {
             errorMessage = String(event.state.message);
             emit('error', errorMessage);
           }
           break;
+        }
 
         default:
           break;
@@ -174,7 +175,7 @@ export async function runTurn(
           approval: autoApproveHarnessTools
             ? { status: 'allow' }
             : { status: 'deny', reason: 'Docxy gates changes at the pull request, not here.' },
-        } as TrueForgeApi.TurnInputItem);
+        });
       }
     }
 
@@ -189,7 +190,7 @@ export async function runTurn(
           content:
             'No human is attached to this run. Proceed with your best judgement and ' +
             'record any uncertainty in the confidence field of your output.',
-        } as TrueForgeApi.TurnInputItem);
+        });
       }
     }
 
@@ -199,18 +200,20 @@ export async function runTurn(
   }
 
   const text = [...events.values()]
-    .filter((e) => e.type === 'model.message' && (e.threadId ?? 'main') === 'main')
+    .filter((e): e is TrueForgeApi.ModelMessageEvent => e.type === 'model.message')
+    .filter((e) => (e.threadId ?? 'main') === 'main')
     .map((e) => textOf(e.content))
     .join('\n')
     .trim();
 
-  return {
-    ...(turnId ? { turnId } : {}),
+  const result: TurnResult = {
     text,
     events: trace,
     subthreads: [...subthreads],
     status,
     usage,
-    ...(errorMessage ? { error: errorMessage } : {}),
   };
+  if (turnId) result.turnId = turnId;
+  if (errorMessage) result.error = errorMessage;
+  return result;
 }

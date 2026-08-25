@@ -120,7 +120,7 @@ export async function readCommitDiff(repoPath: string, ref: string): Promise<Com
     files.push({
       path,
       status,
-      ...(previousPath ? { previousPath } : {}),
+      previousPath,
       additions: count.additions,
       deletions: count.deletions,
       patch,
