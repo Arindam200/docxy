@@ -12,6 +12,7 @@ import {
   runEvents,
   runFiles,
   runOutputs,
+  runRoleBodies,
   runRoles,
   runs,
 } from './schema.js';
@@ -46,6 +47,11 @@ export class PgRunStore implements RunStorage {
         priorSymbolCount: run.priorSymbolCount,
         newSymbolCount: run.newSymbolCount,
         pullRequestUrl: run.pullRequestUrl ?? null,
+        durationMs: run.durationMs ?? null,
+        inputTokens: run.totals?.inputTokens ?? 0,
+        outputTokens: run.totals?.outputTokens ?? 0,
+        cacheReadTokens: run.totals?.cacheReadTokens ?? 0,
+        costUsd: run.totals?.costUsd?.toString() ?? null,
         startedAt: new Date(run.startedAt),
         finishedAt: run.finishedAt ? new Date(run.finishedAt) : null,
       };
@@ -93,11 +99,25 @@ export class PgRunStore implements RunStorage {
         sessionId: trace.sessionId,
         turnId: trace.turnId ?? null,
         reusedSession: trace.reusedSession,
+        model: trace.model ?? null,
         error: trace.error ?? null,
+        failure: trace.failure ?? null,
+        durationMs: trace.durationMs ?? null,
+        usage: trace.usage ?? null,
         startedAt: new Date(trace.startedAt),
         finishedAt: trace.finishedAt ? new Date(trace.finishedAt) : null,
       })),
     );
+
+    // Bodies go in their own table; only roles that actually have one get a row.
+    const bodies = rows
+      .filter(({ trace }) => trace.prompt !== undefined || trace.rawOutput !== undefined)
+      .map(({ id, trace }) => ({
+        roleId: id,
+        prompt: trace.prompt ?? null,
+        rawOutput: trace.rawOutput ?? null,
+      }));
+    if (bodies.length > 0) await tx.insert(runRoleBodies).values(bodies);
 
     const events = rows.flatMap(({ id, trace }) =>
       trace.events.map((event, ordinal) => ({
@@ -168,6 +188,7 @@ export class PgRunStore implements RunStorage {
         .innerJoin(projects, eq(projects.id, runs.projectId))
         .where(eq(runs.id, id))
         .limit(1),
+      { bodies: true },
     );
     return record ?? null;
   }
@@ -196,9 +217,14 @@ export class PgRunStore implements RunStorage {
    *
    * Children are fetched with one query each over the full id set rather than
    * per run: listing 50 runs is six queries, not three hundred.
+   *
+   * `bodies` is off for listings. Prompts and raw outputs are the two largest
+   * fields on a run and nothing in a list renders them, which is the reason
+   * they sit in their own table at all.
    */
   private async hydrate(
     rows: Array<{ run: typeof runs.$inferSelect; repoPath: string }>,
+    options: { bodies: boolean } = { bodies: false },
   ): Promise<RunRecord[]> {
     if (rows.length === 0) return [];
 
@@ -215,7 +241,7 @@ export class PgRunStore implements RunStorage {
     const roleIds = roleRows.map((role) => role.id);
     const approvalIds = approvalRows.map((approval) => approval.id);
 
-    const [eventRows, signoffRows] = await Promise.all([
+    const [eventRows, signoffRows, bodyRows] = await Promise.all([
       roleIds.length > 0
         ? db
             .select()
@@ -230,8 +256,12 @@ export class PgRunStore implements RunStorage {
             .where(inArray(approvalSignoffs.approvalId, approvalIds))
             .orderBy(asc(approvalSignoffs.at))
         : Promise.resolve([]),
+      options.bodies && roleIds.length > 0
+        ? db.select().from(runRoleBodies).where(inArray(runRoleBodies.roleId, roleIds))
+        : Promise.resolve([]),
     ]);
 
+    const bodiesByRole = new Map(bodyRows.map((body) => [body.roleId, body]));
     const eventsByRole = groupBy(eventRows, (event) => event.roleId);
     const signoffsByApproval = groupBy(signoffRows, (signoff) => signoff.approvalId);
     const rolesByRun = groupBy(roleRows, (role) => role.runId);
@@ -247,21 +277,30 @@ export class PgRunStore implements RunStorage {
       // SAFETY: `role` and `status` are free-text columns holding domain unions.
       // Only this store writes them, always from a `RoleTrace`, so a value that
       // is not a member could only come from a hand-edited row.
-      const traces: RoleTrace[] = (rolesByRun.get(run.id) ?? []).map((role) => ({
-        role: role.role as RoleName,
-        sessionId: role.sessionId,
-        turnId: role.turnId ?? undefined,
-        startedAt: role.startedAt.toISOString(),
-        finishedAt: role.finishedAt?.toISOString(),
-        status: role.status as RoleTrace['status'],
-        events: (eventsByRole.get(role.id) ?? []).map((event) => ({
-          at: event.at.toISOString(),
-          kind: event.kind,
-          text: event.text,
-        })),
-        error: role.error ?? undefined,
-        reusedSession: role.reusedSession,
-      }));
+      const traces: RoleTrace[] = (rolesByRun.get(run.id) ?? []).map((role) => {
+        const body = bodiesByRole.get(role.id);
+        return {
+          role: role.role as RoleName,
+          sessionId: role.sessionId,
+          turnId: role.turnId ?? undefined,
+          startedAt: role.startedAt.toISOString(),
+          finishedAt: role.finishedAt?.toISOString(),
+          status: role.status as RoleTrace['status'],
+          events: (eventsByRole.get(role.id) ?? []).map((event) => ({
+            at: event.at.toISOString(),
+            kind: event.kind,
+            text: event.text,
+          })),
+          error: role.error ?? undefined,
+          reusedSession: role.reusedSession,
+          model: role.model ?? undefined,
+          failure: role.failure ?? undefined,
+          durationMs: role.durationMs ?? undefined,
+          usage: role.usage ?? undefined,
+          prompt: body?.prompt ?? undefined,
+          rawOutput: body?.rawOutput ?? undefined,
+        };
+      });
 
       const proposedFiles: ProposedFile[] = files.map((file) => ({
         path: file.path,
@@ -316,6 +355,13 @@ export class PgRunStore implements RunStorage {
         error: run.error ?? undefined,
         priorSymbolCount: run.priorSymbolCount,
         newSymbolCount: run.newSymbolCount,
+        durationMs: run.durationMs ?? undefined,
+        totals: {
+          inputTokens: run.inputTokens,
+          outputTokens: run.outputTokens,
+          cacheReadTokens: run.cacheReadTokens,
+          costUsd: run.costUsd ? Number(run.costUsd) : undefined,
+        },
       };
     });
   }

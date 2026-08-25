@@ -5,6 +5,7 @@ import { listAvailableModels, listNebiusModels, registerNebiusProvider } from '.
 import { runPipeline, rebuildProposedFiles } from './pipeline/index.js';
 import { createStores, type RunStorage } from './pipeline/stores.js';
 import { closeDb } from './db/index.js';
+import { appStatus } from './github/app.js';
 
 /** `serve` returns while the server keeps running, so it must not close the pool. */
 let holdOpen = false;
@@ -197,10 +198,18 @@ async function main(): Promise<void> {
       } catch (err) {
         console.log(`${c.red('✗')} ${err instanceof Error ? err.message : String(err)}`);
       }
+      const github = appStatus();
       console.log(
-        config.github.token
-          ? `${c.green('✓')} GitHub token present`
-          : `${c.yellow('!')} no GitHub token — PR creation falls back to the gh CLI`,
+        github.configured
+          ? `${c.green('✓')} GitHub App ${github.slug} — pull requests open as ${c.bold(`${github.slug}[bot]`)}`
+          : `${c.red('✗')} GitHub App not configured — pull requests cannot be opened\n` +
+            `  ${c.dim(`missing: ${github.missing.join(', ')}`)}\n` +
+            `  ${c.dim('see guides/GITHUB-APP.md')}`,
+      );
+      console.log(
+        github.webhookSecretSet
+          ? `${c.green('✓')} webhook secret set — pushes can trigger runs`
+          : `${c.yellow('!')} no GITHUB_WEBHOOK_SECRET — /webhook refuses deliveries`,
       );
 
       console.log(`\n${c.bold('Docs')}`);

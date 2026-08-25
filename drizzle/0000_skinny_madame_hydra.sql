@@ -78,6 +78,12 @@ CREATE TABLE "run_outputs" (
 	"validation" jsonb
 );
 --> statement-breakpoint
+CREATE TABLE "run_role_bodies" (
+	"role_id" uuid PRIMARY KEY NOT NULL,
+	"prompt" text,
+	"raw_output" text
+);
+--> statement-breakpoint
 CREATE TABLE "run_roles" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"run_id" uuid NOT NULL,
@@ -87,7 +93,11 @@ CREATE TABLE "run_roles" (
 	"session_id" text NOT NULL,
 	"turn_id" text,
 	"reused_session" boolean DEFAULT false NOT NULL,
+	"model" text,
 	"error" text,
+	"failure" text,
+	"duration_ms" integer,
+	"usage" jsonb,
 	"started_at" timestamp with time zone NOT NULL,
 	"finished_at" timestamp with time zone
 );
@@ -104,6 +114,11 @@ CREATE TABLE "runs" (
 	"prior_symbol_count" integer DEFAULT 0 NOT NULL,
 	"new_symbol_count" integer DEFAULT 0 NOT NULL,
 	"pull_request_url" text,
+	"duration_ms" integer,
+	"input_tokens" integer DEFAULT 0 NOT NULL,
+	"output_tokens" integer DEFAULT 0 NOT NULL,
+	"cache_read_tokens" integer DEFAULT 0 NOT NULL,
+	"cost_usd" text,
 	"started_at" timestamp with time zone NOT NULL,
 	"finished_at" timestamp with time zone
 );
@@ -116,6 +131,7 @@ ALTER TABLE "knowledge_symbols" ADD CONSTRAINT "knowledge_symbols_project_id_pro
 ALTER TABLE "run_events" ADD CONSTRAINT "run_events_role_id_run_roles_id_fk" FOREIGN KEY ("role_id") REFERENCES "public"."run_roles"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "run_files" ADD CONSTRAINT "run_files_run_id_runs_id_fk" FOREIGN KEY ("run_id") REFERENCES "public"."runs"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "run_outputs" ADD CONSTRAINT "run_outputs_run_id_runs_id_fk" FOREIGN KEY ("run_id") REFERENCES "public"."runs"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "run_role_bodies" ADD CONSTRAINT "run_role_bodies_role_id_run_roles_id_fk" FOREIGN KEY ("role_id") REFERENCES "public"."run_roles"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "run_roles" ADD CONSTRAINT "run_roles_run_id_runs_id_fk" FOREIGN KEY ("run_id") REFERENCES "public"."runs"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "runs" ADD CONSTRAINT "runs_project_id_projects_id_fk" FOREIGN KEY ("project_id") REFERENCES "public"."projects"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 CREATE UNIQUE INDEX "agent_sessions_project_role" ON "agent_sessions" USING btree ("project_id","role");--> statement-breakpoint

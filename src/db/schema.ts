@@ -30,6 +30,8 @@ import type {
   Classification,
   DocsProposal,
   ImpactMap,
+  RoleFailure,
+  RoleUsage,
   RunStatus,
   ValidationReport,
 } from '../types.js';
@@ -88,6 +90,13 @@ export const runs = pgTable(
     priorSymbolCount: integer('prior_symbol_count').default(0).notNull(),
     newSymbolCount: integer('new_symbol_count').default(0).notNull(),
     pullRequestUrl: text('pull_request_url'),
+    durationMs: integer('duration_ms'),
+    /** Rolled up from the roles, so the run list needs no join to show totals. */
+    inputTokens: integer('input_tokens').default(0).notNull(),
+    outputTokens: integer('output_tokens').default(0).notNull(),
+    cacheReadTokens: integer('cache_read_tokens').default(0).notNull(),
+    /** Numeric as text. Never a float for money. */
+    costUsd: text('cost_usd'),
     startedAt: timestamp('started_at', { withTimezone: true }).notNull(),
     finishedAt: timestamp('finished_at', { withTimezone: true }),
   },
@@ -125,12 +134,35 @@ export const runRoles = pgTable(
     sessionId: text('session_id').notNull(),
     turnId: text('turn_id'),
     reusedSession: boolean('reused_session').default(false).notNull(),
+    /** Which model actually ran; roles can be pointed at different ones. */
+    model: text('model'),
     error: text('error'),
+    /** harness-error | parse-error | timeout | aborted */
+    failure: text('failure').$type<RoleFailure>(),
+    durationMs: integer('duration_ms'),
+    /** Token counts plus the harness's own input-side breakdown. */
+    usage: jsonb('usage').$type<RoleUsage>(),
     startedAt: timestamp('started_at', { withTimezone: true }).notNull(),
     finishedAt: timestamp('finished_at', { withTimezone: true }),
   },
   (t) => [index('run_roles_run_ordinal').on(t.runId, t.ordinal)],
 );
+
+/**
+ * The verbatim prompt and raw model output, split out deliberately.
+ *
+ * These are the two largest fields on a run and are read only when someone
+ * opens a single role. Keeping them out of `run_roles` is what lets the run
+ * list stay a cheap query, and what lets retention drop bodies past N days
+ * while the run and role rows survive.
+ */
+export const runRoleBodies = pgTable('run_role_bodies', {
+  roleId: uuid('role_id')
+    .references(() => runRoles.id, { onDelete: 'cascade' })
+    .primaryKey(),
+  prompt: text('prompt'),
+  rawOutput: text('raw_output'),
+});
 
 export const runEvents = pgTable(
   'run_events',
@@ -240,6 +272,7 @@ export const schema = {
   runs,
   runOutputs,
   runRoles,
+  runRoleBodies,
   runEvents,
   runFiles,
   approvals,

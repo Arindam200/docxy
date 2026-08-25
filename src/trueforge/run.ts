@@ -7,6 +7,21 @@ export interface TraceEvent {
   text: string;
 }
 
+/**
+ * Token counts for one turn.
+ *
+ * `inputBreakdown` splits the input side into the harness's own categories —
+ * `harness`, `instructions`, `messages`, `skills`, `tool_definitions` — which is
+ * what makes it possible to show what the skill packs actually cost per run.
+ */
+export interface TurnUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  inputBreakdown: Record<string, number>;
+}
+
 export interface TurnResult {
   turnId?: string;
   /** Concatenated assistant text from the root (`main`) thread. */
@@ -15,12 +30,46 @@ export interface TurnResult {
   /** Subagent threads the harness spawned during this turn. */
   subthreads: string[];
   status: string;
-  usage: { inputTokens: number; outputTokens: number };
+  usage: TurnUsage;
   /** Set when the harness ended the turn in an error state. */
   error?: string;
 }
 
 type AnyEvent = Record<string, any>;
+
+/**
+ * Read a count that may arrive in either casing.
+ *
+ * The stream is consumed as a raw event rather than through the SDK's
+ * deserializer, so usage fields arrive in their wire form (`input_tokens`) and
+ * not the typed camelCase shape (`inputTokens`). Reading only one of the two is
+ * how every run recorded 0 in / 0 out.
+ */
+function count(source: Record<string, unknown> | undefined, ...keys: string[]): number {
+  if (!source) return 0;
+  for (const key of keys) {
+    const value = source[key];
+    if (value !== undefined && value !== null) return Number(value) || 0;
+  }
+  return 0;
+}
+
+/** Fold one `model.message` event's usage into the running totals. */
+function addUsage(totals: TurnUsage, raw: Record<string, unknown> | undefined): void {
+  if (!raw) return;
+
+  totals.inputTokens += count(raw, 'inputTokens', 'input_tokens');
+  totals.outputTokens += count(raw, 'outputTokens', 'output_tokens');
+  totals.cacheReadTokens += count(raw, 'cacheReadTokens', 'cache_read_tokens');
+  totals.cacheWriteTokens += count(raw, 'cacheWriteTokens', 'cache_write_tokens');
+
+  const breakdown = raw['inputTokensBreakdown'] ?? raw['input_tokens_breakdown'];
+  if (breakdown && typeof breakdown === 'object') {
+    for (const [key, value] of Object.entries(breakdown as Record<string, unknown>)) {
+      totals.inputBreakdown[key] = (totals.inputBreakdown[key] ?? 0) + (Number(value) || 0);
+    }
+  }
+}
 
 function textOf(content: unknown): string {
   if (typeof content === 'string') return content;
@@ -60,7 +109,13 @@ export async function runTurn(
   const events = new Map<string, AnyEvent>();
   const trace: TraceEvent[] = [];
   const subthreads = new Set<string>();
-  const usage = { inputTokens: 0, outputTokens: 0 };
+  const usage: TurnUsage = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    inputBreakdown: {},
+  };
   let turnId: string | undefined;
   let status = 'unknown';
   let errorMessage: string | undefined;
@@ -121,10 +176,7 @@ export async function runTurn(
           break;
 
         case 'model.message': {
-          if (event.usage) {
-            usage.inputTokens += Number(event.usage.inputTokens ?? 0);
-            usage.outputTokens += Number(event.usage.outputTokens ?? 0);
-          }
+          addUsage(usage, event.usage);
           for (const call of event.toolCalls ?? []) {
             const name = call?.toolInfo?.name ?? call?.function?.name ?? 'tool';
             emit('tool', `called ${name}`);

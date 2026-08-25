@@ -8,10 +8,24 @@ export const metadata: Metadata = {
 
 export const dynamic = "force-dynamic";
 
-/** Only same-origin paths, so `?next=` cannot be used as an open redirect. */
+/**
+ * Only same-origin paths, so `?next=` cannot be used as an open redirect.
+ *
+ * A single leading slash is not enough on its own: `//evil.com` and `/\evil.com`
+ * are both read as protocol-relative URLs by browsers, so the second character
+ * has to be rejected too. Resolving against a throwaway origin then confirms
+ * nothing else in the value escapes it.
+ */
 function safeNext(value: string | undefined): string {
-  if (!value || !value.startsWith("/") || value.startsWith("//")) return "/dashboard";
-  return value;
+  if (!value || !/^\/[^/\\]/.test(value)) return "/dashboard";
+
+  try {
+    const resolved = new URL(value, "http://localhost");
+    if (resolved.origin !== "http://localhost") return "/dashboard";
+    return `${resolved.pathname}${resolved.search}${resolved.hash}`;
+  } catch {
+    return "/dashboard";
+  }
 }
 
 export default async function LoginPage({

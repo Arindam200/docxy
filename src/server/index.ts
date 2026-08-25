@@ -7,6 +7,7 @@ import type { Config } from '../config.js';
 import type { RunRecord } from '../types.js';
 import { PACKAGE_ROOT } from '../paths.js';
 import { createStores, storageBackend } from '../pipeline/stores.js';
+import { appStatus, verifyWebhook } from '../github/app.js';
 import { rebuildProposedFiles, runPipeline } from '../pipeline/index.js';
 import { ApprovalError, deny, describeGate, signOff, staleness } from '../approval/gate.js';
 import { openPullRequest } from '../github/pr.js';
@@ -106,7 +107,8 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
     });
   });
 
-  app.get('/api/runs', async (c) => {    const list = await runs.list(50);
+  app.get('/api/runs', async (c) => {
+    const list = await runs.list(50);
     return c.json(
       list.map((run) => ({
         id: run.id,
@@ -117,8 +119,62 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
         scope: run.approval?.scope,
         gate: describeGate(run, config),
         pullRequestUrl: run.pullRequestUrl,
+        durationMs: run.durationMs,
+        totals: run.totals,
+        // One dot per role, in pipeline order. The whole run at a glance, and
+        // the reason a listing does not need to fetch role bodies.
+        roles: run.traces.map((trace) => ({
+          role: trace.role,
+          status: trace.status,
+          failure: trace.failure,
+          durationMs: trace.durationMs,
+        })),
       })),
     );
+  });
+
+  /**
+   * Every role event across recent runs, newest first.
+   *
+   * The events already exist per role; this flattens them into one stream so
+   * the dashboard can show a log without opening runs one at a time. Filtering
+   * happens here rather than in the browser because the tail is what people
+   * want and shipping every event to filter client-side would defeat the limit.
+   */
+  app.get('/api/logs', async (c) => {
+    const limit = Math.min(Number(c.req.query('limit') ?? 200) || 200, 1000);
+    const kind = c.req.query('kind');
+    const role = c.req.query('role');
+    const runId = c.req.query('run');
+
+    const list = runId ? [await runs.load(runId)].filter((r) => r !== null) : await runs.list(50);
+
+    const entries = list.flatMap((run) =>
+      run.traces.flatMap((trace) =>
+        trace.events.map((event) => ({
+          at: event.at,
+          kind: event.kind,
+          text: event.text,
+          role: trace.role,
+          runId: run.id,
+          commit: run.commit.shortSha,
+          subject: run.commit.subject,
+          /** `error` events are the ones worth surfacing on their own. */
+          level: event.kind === 'error' ? 'error' : 'info',
+        })),
+      ),
+    );
+
+    const filtered = entries.filter(
+      (entry) => (!kind || entry.kind === kind) && (!role || entry.role === role),
+    );
+    filtered.sort((a, b) => b.at.localeCompare(a.at));
+
+    return c.json({
+      entries: filtered.slice(0, limit),
+      total: filtered.length,
+      kinds: [...new Set(entries.map((entry) => entry.kind))].sort(),
+    });
   });
 
   app.get('/api/runs/:id', async (c) => {
@@ -137,12 +193,17 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
     return c.json(files.map((f) => ({ path: f.path, before: f.before, after: f.after })));
   });
 
-  app.post('/api/runs', async (c) => {
-    if (activeRun) return c.json({ error: 'A run is already in progress.' }, 409);
-    const body = (await c.req.json().catch(() => ({}))) as { commit?: string };
-    const commit = body.commit || 'HEAD';
+  /**
+   * Start a run, unless one is already going.
+   *
+   * One writer per repository: two runs on the same repo drive the same
+   * long-lived harness sessions concurrently, and the symbol map cannot absorb
+   * that. Returns false when a run is already in flight.
+   */
+  const startRun = (commit: string): boolean => {
+    if (activeRun) return false;
 
-    const promise = runPipeline(client, config, commit, {
+    activeRun = runPipeline(client, config, commit, {
       onRunUpdate: (run) => bus.publish('run', run),
       onRoleEvent: (role, event) => bus.publish('role', { role, event }),
     })
@@ -153,8 +214,147 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
         activeRun = null;
       });
 
-    activeRun = promise;
+    return true;
+  };
+
+  app.post('/api/runs', async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { commit?: string };
+    const commit = body.commit || 'HEAD';
+    if (!startRun(commit)) return c.json({ error: 'A run is already in progress.' }, 409);
     return c.json({ started: true, commit });
+  });
+
+  /**
+   * GitHub push webhook.
+   *
+   * GitHub gives a delivery about ten seconds before it times out, and a
+   * five-role run takes minutes — so this answers immediately and does the work
+   * afterwards. A delivery that is not a default-branch push is acknowledged and
+   * ignored rather than rejected, which keeps GitHub from retrying it.
+   */
+  app.post('/webhook', async (c) => {
+    const raw = Buffer.from(await c.req.arrayBuffer());
+    const secret = process.env.GITHUB_WEBHOOK_SECRET ?? '';
+
+    if (!secret) {
+      return c.json({ error: 'GITHUB_WEBHOOK_SECRET is not set; refusing to accept webhooks.' }, 503);
+    }
+    if (!verifyWebhook(raw, c.req.header('x-hub-signature-256'), secret)) {
+      return c.json({ error: 'bad signature' }, 401);
+    }
+
+    const event = c.req.header('x-github-event');
+    const delivery = c.req.header('x-github-delivery') ?? 'unknown';
+    if (event !== 'push') return c.json({ ok: true, ignored: event ?? 'no event header' });
+
+    // SAFETY: the HMAC above proves this body came from GitHub with our secret,
+    // and every field below is read as optional and checked before use.
+    const payload = JSON.parse(raw.toString('utf8')) as {
+      ref?: string;
+      after?: string;
+      repository?: { default_branch?: string; full_name?: string };
+    };
+
+    const defaultBranch = payload.repository?.default_branch;
+    if (!defaultBranch || payload.ref !== `refs/heads/${defaultBranch}`) {
+      return c.json({ ok: true, ignored: 'not the default branch' });
+    }
+
+    const commit = payload.after ?? 'HEAD';
+    if (!startRun(commit)) {
+      return c.json({ ok: true, ignored: 'a run is already in progress', delivery });
+    }
+
+    bus.publish('webhook', { delivery, commit, repository: payload.repository?.full_name });
+    return c.json({ ok: true, queued: delivery, commit });
+  });
+
+  /**
+   * What docxy is wired up to, and what is missing.
+   *
+   * Every integration reports the same shape so the dashboard can render them
+   * uniformly, and each one that is not connected says which variables would
+   * connect it rather than only that it is off.
+   */
+  app.get('/api/integrations', async (c) => {
+    const github = appStatus();
+
+    let harnessReachable = false;
+    try {
+      const res = await fetch(`${config.trueforge.baseUrl}/healthz`, {
+        signal: AbortSignal.timeout(3000),
+      });
+      harnessReachable = res.ok;
+    } catch {
+      harnessReachable = false;
+    }
+
+    return c.json({
+      integrations: [
+        {
+          id: 'trueforge',
+          name: 'TrueForge',
+          category: 'harness',
+          summary: 'Runs the five agents and owns their long-lived sessions.',
+          connected: harnessReachable,
+          required: true,
+          detail: config.trueforge.baseUrl,
+          missing: harnessReachable
+            ? []
+            : ['Start it with `npx @truefoundry/trueforge@latest`, or set TRUEFORGE_BASE_URL.'],
+          docs: 'guides/DEPLOY.md',
+        },
+        {
+          id: 'nebius',
+          name: 'Nebius Token Factory',
+          category: 'models',
+          summary: 'Serves every model the roles run on.',
+          connected: Boolean(config.nebius.apiKey),
+          required: true,
+          detail: config.nebius.baseUrl,
+          missing: config.nebius.apiKey ? [] : ['NEBIUS_API_KEY'],
+          docs: 'README.md',
+        },
+        {
+          id: 'neon',
+          name: 'Neon Postgres',
+          category: 'storage',
+          summary:
+            storageBackend() === 'postgres'
+              ? 'Runs, sessions, and the symbol map are in Postgres.'
+              : 'Runs, sessions, and the symbol map are JSON files in .docxy/.',
+          connected: storageBackend() === 'postgres',
+          required: false,
+          detail: storageBackend() === 'postgres' ? 'postgres' : `${config.stateDir} (files)`,
+          missing: storageBackend() === 'postgres' ? [] : ['DATABASE_URL'],
+          docs: 'guides/DATABASE.md',
+        },
+        {
+          id: 'github-app',
+          name: 'GitHub App',
+          category: 'source',
+          summary: github.configured
+            ? `Pull requests are opened by ${github.slug}[bot].`
+            : 'Required to open pull requests. Docxy publishes only as the App.',
+          connected: github.configured,
+          required: true,
+          detail: github.configured ? `${github.slug}[bot]` : 'not configured',
+          missing: github.missing,
+          docs: 'guides/GITHUB-APP.md',
+        },
+        {
+          id: 'github-webhook',
+          name: 'Push webhook',
+          category: 'source',
+          summary: 'Starts a run when someone pushes to the default branch.',
+          connected: github.webhookSecretSet,
+          required: false,
+          detail: github.webhookSecretSet ? 'POST /webhook' : 'not accepting deliveries',
+          missing: github.webhookSecretSet ? [] : ['GITHUB_WEBHOOK_SECRET'],
+          docs: 'guides/GITHUB-APP.md',
+        },
+      ],
+    });
   });
 
   app.post('/api/runs/:id/approve', async (c) => {

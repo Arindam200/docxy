@@ -7,21 +7,13 @@ import { prBaseBranch, type Config } from '../config.js';
 import { resolveBaseRef } from '../git/worktree.js';
 import type { RunRecord } from '../types.js';
 import type { ProposedFile } from '../types.js';
+import { installationToken, readAppCredentials, scrubToken } from './app.js';
 
 const exec = promisify(execFile);
 
 async function git(cwd: string, args: string[]): Promise<string> {
   const { stdout } = await exec('git', args, { cwd, maxBuffer: 32 * 1024 * 1024 });
   return stdout.trim();
-}
-
-async function hasGhCli(): Promise<boolean> {
-  try {
-    await exec('gh', ['--version']);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 export function buildPrBody(run: RunRecord): string {
@@ -123,11 +115,31 @@ export async function openPullRequest(
     );
   }
 
+  // The App is the only way docxy publishes. Pushing through the local
+  // credential helper or a personal token would put a human's name on a machine
+  // proposal, which is exactly the thing the bot identity exists to prevent —
+  // so this fails here rather than silently authoring the PR as whoever ran it.
+  const app = readAppCredentials();
+  if (!app) {
+    throw new Error(
+      'The docxy GitHub App is not configured, so there is no identity to open a ' +
+        'pull request as. Set GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_PATH, and ' +
+        'GITHUB_APP_INSTALLATION_ID — guides/GITHUB-APP.md walks through registering ' +
+        'the App and finding all three.',
+    );
+  }
+
   const base = prBaseBranch(config);
   const baseRef = await resolveBaseRef(config.repoPath, base);
 
   const branch = `docxy/${run.commit.shortSha}-${run.id.slice(0, 8)}`;
   const worktree = await mkdtemp(join(tmpdir(), 'docxy-wt-'));
+
+  const repo = config.github.repo ?? (await inferRepo(config.repoPath));
+  // Minted here, at the moment it is used. An installation token lives an hour
+  // and the approval gate can wait days, so one stored on the run record would
+  // be long dead by the time a reviewer signs off.
+  const appToken = await installationToken(app, [repoName(repo)]);
 
   try {
     // Detached at the resolved tip: the base branch may already be checked out
@@ -146,9 +158,9 @@ export async function openPullRequest(
     const subject = `docs: update for ${run.commit.shortSha} — ${run.commit.subject}`.slice(0, 100);
     await git(worktree, [
       '-c',
-      'user.name=Docxy',
+      `user.name=${app.slug}[bot]`,
       '-c',
-      'user.email=docxy@users.noreply.github.com',
+      `user.email=${app.botEmail}`,
       'commit',
       '-m',
       subject,
@@ -159,36 +171,29 @@ export async function openPullRequest(
     ]);
 
     try {
-      await git(worktree, ['push', '-u', 'origin', branch]);
+      // A tokenized remote rather than `origin`, so the push is the App's and
+      // not whatever the local credential helper would have supplied.
+      await git(worktree, [
+        'push',
+        `https://x-access-token:${appToken}@github.com/${repo}.git`,
+        `HEAD:refs/heads/${branch}`,
+      ]);
     } catch (err) {
+      // The token is in the command line, so it is in git's error output too.
+      const detail = err instanceof Error ? err.message.split('\n').slice(-3).join(' ') : String(err);
       throw new Error(
-        `Could not push the branch "${branch}" to origin. The proposal is ` +
-          `committed on that branch locally, so nothing is lost — push it yourself ` +
-          `once the remote is reachable.\nGit said: ${
-            err instanceof Error ? err.message.split('\n').slice(-3).join(' ') : String(err)
-          }`,
+        scrubToken(
+          `Could not push the branch "${branch}". The proposal is committed on ` +
+            `that branch locally, so nothing is lost — push it yourself once the ` +
+            `remote is reachable.\nGit said: ${detail}`,
+        ),
       );
     }
 
+    // The installation token is what makes GitHub attribute the PR to the bot.
     const body = buildPrBody(run);
-    if (await hasGhCli()) {
-      const { stdout } = await exec(
-        'gh',
-        [
-          'pr', 'create',
-          '--base', base,
-          '--head', branch,
-          '--title', subject,
-          '--body', body,
-        ],
-        { cwd: worktree, env: { ...process.env, ...(config.github.token ? { GH_TOKEN: config.github.token } : {}) } },
-      );
-      const url = stdout.trim().split('\n').find((l) => l.startsWith('http')) ?? stdout.trim();
-      return { url, branch };
-    }
-
     return {
-      url: await openViaApi(config, branch, subject, body, base),
+      url: await createPullRequest(repo, appToken, branch, subject, body, base),
       branch,
     };
   } finally {
@@ -197,26 +202,25 @@ export async function openPullRequest(
   }
 }
 
-async function openViaApi(
-  config: Config,
+/**
+ * Open the pull request. The token decides the author: an installation token
+ * makes it the App, a personal token makes it whoever owns that token.
+ */
+async function createPullRequest(
+  repo: string,
+  token: string,
   branch: string,
   title: string,
   body: string,
   base: string,
 ): Promise<string> {
-  if (!config.github.token) {
-    throw new Error(
-      'Cannot open a pull request: neither the gh CLI nor GITHUB_TOKEN is available. ' +
-        `The branch "${branch}" has been pushed — open the PR manually.`,
-    );
-  }
-  const repo = config.github.repo ?? (await inferRepo(config.repoPath));
   const res = await fetch(`https://api.github.com/repos/${repo}/pulls`, {
     method: 'POST',
     headers: {
-      authorization: `Bearer ${config.github.token}`,
+      authorization: `Bearer ${token}`,
       accept: 'application/vnd.github+json',
       'content-type': 'application/json',
+      'user-agent': 'docxy',
     },
     body: JSON.stringify({ title, body, head: branch, base }),
   });
@@ -225,6 +229,13 @@ async function openViaApi(
   }
   const created = (await res.json()) as { html_url?: string };
   return created.html_url ?? `https://github.com/${repo}/pulls`;
+}
+
+/** The `name` half of `owner/name`, which is what the token endpoint wants. */
+function repoName(repo: string): string {
+  const name = repo.split('/')[1];
+  if (!name) throw new Error(`Expected a repository as "owner/name", got "${repo}".`);
+  return name;
 }
 
 async function inferRepo(repoPath: string): Promise<string> {

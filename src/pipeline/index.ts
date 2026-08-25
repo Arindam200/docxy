@@ -6,6 +6,7 @@ import type {
   Classification,
   DocsProposal,
   ImpactMap,
+  RoleFailure,
   RoleTrace,
   RunRecord,
 } from '../types.js';
@@ -49,6 +50,39 @@ export interface PipelineResult {
   proposedFiles: ProposedFile[];
 }
 
+/**
+ * Prompts and raw outputs are recorded verbatim, and a diff-heavy prompt can be
+ * large. This bounds a single field rather than the record as a whole; the tail
+ * is where truncation shows, and the head is what explains a bad answer.
+ */
+const BODY_LIMIT = 100_000;
+
+function truncate(text: string): string {
+  if (text.length <= BODY_LIMIT) return text;
+  return `${text.slice(0, BODY_LIMIT)}\n\n… truncated, ${text.length - BODY_LIMIT} more characters`;
+}
+
+function abortedBy(err: unknown): boolean {
+  return err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError');
+}
+
+/**
+ * Roll the traces up onto the run, so the run list needs no per-role arithmetic
+ * and a run that fails half way still reports what it spent getting there.
+ */
+function rollUp(run: RunRecord): void {
+  const totals = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 };
+  for (const trace of run.traces) {
+    totals.inputTokens += trace.usage?.inputTokens ?? 0;
+    totals.outputTokens += trace.usage?.outputTokens ?? 0;
+    totals.cacheReadTokens += trace.usage?.cacheReadTokens ?? 0;
+  }
+  run.totals = totals;
+
+  const end = run.finishedAt ? new Date(run.finishedAt) : new Date();
+  run.durationMs = end.getTime() - new Date(run.startedAt).getTime();
+}
+
 export async function runPipeline(
   client: TrueForge,
   config: Config,
@@ -77,6 +111,7 @@ export async function runPipeline(
   };
 
   const persist = async (): Promise<void> => {
+    rollUp(run);
     await runs.save(run);
     hooks.onRunUpdate?.(run);
   };
@@ -85,13 +120,18 @@ export async function runPipeline(
   /** Run one role to completion, recording a trace entry either way. */
   const invoke = async <T>(role: RoleDefinition, prompt: string): Promise<T> => {
     const session = await resolveSession(client, config, sessions, role);
+    const startedAt = new Date();
     const trace: RoleTrace = {
       role: role.name,
       sessionId: session.id,
-      startedAt: new Date().toISOString(),
+      startedAt: startedAt.toISOString(),
       status: 'running',
       events: [],
       reusedSession: session.reused,
+      // Captured up front so a role that never returns still shows what it was
+      // asked and which model was meant to answer.
+      prompt: truncate(prompt),
+      model: config.models[role.name],
     };
     run.traces.push(trace);
     trace.events.push({
@@ -103,6 +143,15 @@ export async function runPipeline(
     });
     await persist();
 
+    /** Stamp the outcome onto the trace. Runs on every path, success or not. */
+    const finish = (status: RoleTrace['status'], failure?: RoleFailure): void => {
+      const finishedAt = new Date();
+      trace.status = status;
+      trace.finishedAt = finishedAt.toISOString();
+      trace.durationMs = finishedAt.getTime() - startedAt.getTime();
+      if (failure) trace.failure = failure;
+    };
+
     try {
       const result = await runTurn(client, session.id, prompt, {
         onEvent: (event) => {
@@ -111,26 +160,54 @@ export async function runPipeline(
           hooks.onRunUpdate?.(run);
         },
       });
+
       if (result.turnId) trace.turnId = result.turnId;
+      // Recorded before anything can throw. The raw text is the field that
+      // explains a failure — a `max_tokens breached` error has as often meant a
+      // repetition loop as a budget that was too small — and it is what makes a
+      // successful run auditable rather than merely rendered.
+      trace.rawOutput = truncate(result.text);
+      trace.usage = {
+        inputTokens: result.usage.inputTokens,
+        outputTokens: result.usage.outputTokens,
+        cacheReadTokens: result.usage.cacheReadTokens,
+        cacheWriteTokens: result.usage.cacheWriteTokens,
+        inputBreakdown: result.usage.inputBreakdown,
+      };
+
       if (result.error) {
+        finish('failed', 'harness-error');
+        await persist();
         throw new Error(
           `[${role.title}] the harness ended the turn in an error state: ${result.error}`,
         );
       }
-      const parsed = extractJson<T>(role.title, result.text);
-      trace.status = 'done';
-      trace.finishedAt = new Date().toISOString();
+
+      let parsed: T;
+      try {
+        parsed = extractJson<T>(role.title, result.text);
+      } catch (cause) {
+        finish('failed', 'parse-error');
+        trace.error = cause instanceof Error ? cause.message : String(cause);
+        await persist();
+        throw cause;
+      }
+
+      finish('done');
       trace.events.push({
-        at: trace.finishedAt,
+        at: trace.finishedAt as string,
         kind: 'result',
-        text: `produced ${result.text.length} characters (${result.usage.inputTokens} in / ${result.usage.outputTokens} out tokens)`,
+        text:
+          `produced ${result.text.length} characters ` +
+          `(${result.usage.inputTokens} in / ${result.usage.outputTokens} out tokens)`,
       });
       await persist();
       return parsed;
     } catch (err) {
-      trace.status = 'failed';
-      trace.finishedAt = new Date().toISOString();
-      trace.error = err instanceof Error ? err.message : String(err);
+      // Already stamped by one of the branches above unless the failure came
+      // from the harness call itself.
+      if (trace.status === 'running') finish('failed', abortedBy(err) ? 'aborted' : 'harness-error');
+      trace.error ??= err instanceof Error ? err.message : String(err);
       await persist();
       throw err;
     }
@@ -195,7 +272,7 @@ export async function runPipeline(
       (await readRepoFile(docsTree.path, config.docs.changelogPath)) ??
       '(no changelog file yet — propose the first entry)';
 
-    const [docs, changelog] = await Promise.all([
+    const [docsResult, changelogResult] = await Promise.allSettled([
       impactedPaths.length === 0
         ? Promise.resolve<DocsProposal>({ edits: [], skipped: [] })
         : invoke<DocsProposal>(
@@ -243,11 +320,27 @@ export async function runPipeline(
       ),
     ]);
 
-    docs.edits = docs.edits ?? [];
-    docs.skipped = docs.skipped ?? [];
-    run.docs = docs;
-    run.changelog = changelog;
+    // Settled, not `all`. These two roles run in parallel and fail
+    // independently, and `Promise.all` rejected on the first failure — throwing
+    // away the other role's finished work before it could be recorded. Three of
+    // four roles had done correct work in every failed run, and none of it was
+    // visible. Record what succeeded, then decide whether the run can continue.
+    if (docsResult.status === 'fulfilled') {
+      const proposal = docsResult.value;
+      proposal.edits = proposal.edits ?? [];
+      proposal.skipped = proposal.skipped ?? [];
+      run.docs = proposal;
+    }
+    if (changelogResult.status === 'fulfilled') {
+      run.changelog = changelogResult.value;
+    }
     await persist();
+
+    if (docsResult.status === 'rejected') throw docsResult.reason;
+    if (changelogResult.status === 'rejected') throw changelogResult.reason;
+
+    const docs = docsResult.value;
+    const changelog = changelogResult.value;
 
     // 4. Validation -----------------------------------------------------------
     const applied = await applyDocEdits(docsTree.path, docs);
