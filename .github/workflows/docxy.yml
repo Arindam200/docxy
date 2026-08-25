@@ -1,0 +1,162 @@
+name: docxy
+
+# Every push to main wakes the pipeline. The proposal is drafted and validated in
+# one job; opening the pull request happens in a second job gated on a protected
+# environment, so GitHub itself enforces the human sign-off.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: "Commit to document (default: the pushed commit)"
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  # Branch the docs live on and that pull requests target. Must already exist.
+  DOCXY_DOCS_BRANCH: ${{ vars.DOCXY_DOCS_BRANCH || 'docs' }}
+  # Point at a long-lived harness to get session reuse across commits. Without it
+  # the workflow boots a throwaway harness per run, which works but starts every
+  # role from a cold session, losing the accumulated repo knowledge each time.
+  TRUEFORGE_BASE_URL: ${{ vars.TRUEFORGE_BASE_URL }}
+  TRUEFORGE_TOKEN: ${{ secrets.TRUEFORGE_TOKEN }}
+
+jobs:
+  propose:
+    name: Draft and validate
+    runs-on: ubuntu-latest
+    outputs:
+      run-id: ${{ steps.pipeline.outputs.run-id }}
+      status: ${{ steps.pipeline.outputs.status }}
+      scope: ${{ steps.pipeline.outputs.scope }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The pipeline diffs against the first parent; the docs branch is
+          # fetched separately by the pipeline itself, so no full history needed.
+          fetch-depth: 2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # Carries the symbol map and session ids between runs. Best-effort by
+      # design, and concurrent runs can race it. Move this to a real datastore
+      # before more than one repository depends on it.
+      - name: Restore accumulated state
+        uses: actions/cache@v4
+        with:
+          path: .docxy
+          key: docxy-state-${{ github.run_id }}
+          restore-keys: |
+            docxy-state-
+
+      - name: Start a throwaway harness
+        if: env.TRUEFORGE_BASE_URL == ''
+        run: |
+          npx --yes @truefoundry/trueforge@latest > "$RUNNER_TEMP/trueforge.log" 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8790/api/v1/capabilities > /dev/null; then
+              echo "harness is up"; exit 0
+            fi
+            sleep 2
+          done
+          echo "harness did not start in time"; cat "$RUNNER_TEMP/trueforge.log"; exit 1
+
+      - name: Register Nebius Token Factory
+        env:
+          NEBIUS_API_KEY: ${{ secrets.NEBIUS_API_KEY }}
+        run: npx tsx src/cli.ts setup
+
+      - name: Check the docs branch is reachable
+        run: npx tsx src/cli.ts doctor
+
+      - name: Run the pipeline
+        id: pipeline
+        env:
+          NEBIUS_API_KEY: ${{ secrets.NEBIUS_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          COMMIT="${{ inputs.commit || github.sha }}"
+          npx tsx src/cli.ts run "$COMMIT" | tee "$RUNNER_TEMP/run.txt"
+
+          RUN_ID=$(npx tsx src/cli.ts runs --json | node -e \
+            'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const r=JSON.parse(s)[0];console.log(r?r.id:"")})')
+          if [ -z "$RUN_ID" ]; then
+            echo "the pipeline recorded no run"; exit 1
+          fi
+          echo "run-id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+          npx tsx src/cli.ts show "$RUN_ID" --json > run.json
+          node -e '
+            const fs = require("fs");
+            const run = JSON.parse(fs.readFileSync("run.json", "utf8"));
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `status=${run.status}\n`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `scope=${run.approval?.scope ?? "none"}\n`);
+          '
+
+      - name: Write the job summary
+        if: always()
+        run: |
+          {
+            echo "## docxy"
+            echo
+            sed 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/run.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Every path here is workspace-relative: mixing in an absolute path makes
+      # upload-artifact resolve a different common root, and the layout stops
+      # matching what the publish job expects on download.
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: docxy-run
+          path: |
+            .docxy/
+            run.json
+          include-hidden-files: true
+
+  publish:
+    name: Open the pull request
+    needs: propose
+    if: needs.propose.outputs.status == 'awaiting-approval'
+    runs-on: ubuntu-latest
+    # Protected environment: configure required reviewers on it in repo settings.
+    # GitHub holds this job until a human approves, and never auto-approves it.
+    #
+    # An elevated run needs two distinct sign-offs. Set this environment's
+    # required reviewers to 2 and enable "prevent self-review" so the gate below
+    # cannot be satisfied by one person.
+    environment: docxy-approval
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: docxy-run
+
+      - name: Record the approval and open the pull request
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "docxy"
+          git config user.email "docxy@users.noreply.github.com"
+          # --expect-pr makes a sign-off that does not open a pull request fail
+          # the job, instead of exiting green with nothing published.
+          npx tsx src/cli.ts approve "${{ needs.propose.outputs.run-id }}" \
+            --by "${{ github.actor }} (via the docxy-approval environment)" \
+            --expect-pr

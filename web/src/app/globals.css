@@ -1,0 +1,65 @@
+@import "tailwindcss";
+
+/*
+ * The page commits to a single light look on purpose: hairline dashed rules on
+ * white, a zinc scale, and exactly one accent. No dark-mode variant.
+ */
+:root {
+  --background: #ffffff;
+  --foreground: #18181b;
+  /* Sampled from the logo mark, so the page and the icon agree. */
+  --accent: #2179fc;
+  /* Same hue, darkened to 6.3:1 on white. For small white-on-blue text,
+     where the logo blue only reaches 4.0:1 and would fail AA. */
+  --accent-deep: #0357d3;
+  --rule: #c4c4cc;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-accent: var(--accent);
+  --color-accent-deep: var(--accent-deep);
+  --color-rule: var(--rule);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+}
+
+/* The dashed hairline that separates every section. */
+.rule-h {
+  height: 1px;
+  background-image: repeating-linear-gradient(
+    to right,
+    var(--rule) 0px,
+    var(--rule) 5px,
+    transparent 5px,
+    transparent 11px
+  );
+}
+
+/* The same hairline, running vertically down the page gutters. */
+.rule-v {
+  width: 1px;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    var(--rule) 0px,
+    var(--rule) 5px,
+    transparent 5px,
+    transparent 11px
+  );
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
