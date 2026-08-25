@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Docxy</title>
+<style>
+  :root {
+    --bg: #fbfaf8; --panel: #ffffff; --border: #e5e1da; --ink: #1c1a17;
+    --muted: #6b6459; --accent: #9a5b2c; --accent-soft: #f3e7dc;
+    --ok: #2f6b45; --warn: #8a6d1f; --bad: #a03428;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14120f; --panel: #1c1a17; --border: #322e28; --ink: #ece7df;
+      --muted: #9a9187; --accent: #d99a63; --accent-soft: #2a2119;
+      --ok: #6fbf8c; --warn: #d4b45c; --bad: #e0796c;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #14120f; --panel: #1c1a17; --border: #322e28; --ink: #ece7df;
+    --muted: #9a9187; --accent: #d99a63; --accent-soft: #2a2119;
+    --ok: #6fbf8c; --warn: #d4b45c; --bad: #e0796c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+    padding: 20px 28px; border-bottom: 1px solid var(--border);
+  }
+  header h1 { margin: 0; font-size: 20px; letter-spacing: -0.01em; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  header .spacer { flex: 1; }
+  main { display: grid; grid-template-columns: 300px 1fr; min-height: calc(100vh - 62px); }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  aside { border-right: 1px solid var(--border); padding: 16px; overflow-y: auto; }
+  section.detail { padding: 24px 28px; overflow-y: auto; }
+  button {
+    font: inherit; padding: 7px 13px; border-radius: 7px; cursor: pointer;
+    border: 1px solid var(--border); background: var(--panel); color: var(--ink);
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  input[type=text] {
+    font: inherit; padding: 7px 10px; border-radius: 7px;
+    border: 1px solid var(--border); background: var(--panel); color: var(--ink); width: 100%;
+  }
+  .run {
+    padding: 10px 12px; border: 1px solid var(--border); border-radius: 9px;
+    margin-bottom: 8px; cursor: pointer; background: var(--panel);
+  }
+  .run:hover { border-color: var(--accent); }
+  .run[aria-selected="true"] { border-color: var(--accent); background: var(--accent-soft); }
+  .run .sha { font-family: var(--mono); font-size: 12px; color: var(--accent); }
+  .run .subject {
+    font-size: 13px; margin-top: 2px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .pill {
+    display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--muted); text-transform: lowercase;
+  }
+  .pill.running { color: var(--warn); border-color: var(--warn); }
+  .pill.awaiting-approval { color: var(--accent); border-color: var(--accent); }
+  .pill.done, .pill.approved { color: var(--ok); border-color: var(--ok); }
+  .pill.failed, .pill.denied { color: var(--bad); border-color: var(--bad); }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 11px; padding: 16px 18px; margin-bottom: 16px;
+  }
+  .card h3 { margin: 0 0 10px; font-size: 14px; letter-spacing: .02em; text-transform: uppercase; color: var(--muted); }
+  .role { display: grid; grid-template-columns: 20px 1fr; gap: 12px; }
+  .rail { display: flex; flex-direction: column; align-items: center; }
+  .dot { width: 11px; height: 11px; border-radius: 50%; background: var(--border); margin-top: 6px; flex: none; }
+  .dot.done { background: var(--ok); } .dot.running { background: var(--warn); } .dot.failed { background: var(--bad); }
+  .line { width: 2px; flex: 1; background: var(--border); margin: 4px 0; }
+  .role-body { padding-bottom: 18px; }
+  .role-title { font-weight: 600; }
+  .role-job { color: var(--muted); font-size: 13px; }
+  .events { margin-top: 8px; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .events div { padding: 1px 0; }
+  .reused { color: var(--accent); font-weight: 600; }
+  pre {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px; overflow-x: auto; font-family: var(--mono); font-size: 12.5px; margin: 0;
+  }
+  .check { display: flex; gap: 8px; padding: 3px 0; font-size: 13.5px; align-items: baseline; }
+  .check .name { font-family: var(--mono); font-size: 12px; min-width: 150px; }
+  .kv { display: grid; grid-template-columns: 150px 1fr; gap: 4px 12px; font-size: 14px; }
+  .kv dt { color: var(--muted); } .kv dd { margin: 0; }
+  .empty { color: var(--muted); padding: 40px 0; text-align: center; }
+  .gate { border-color: var(--accent); background: var(--accent-soft); }
+  .gate .actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; align-items: center; }
+  .diffline { display: block; padding: 0 6px; }
+  .diffline.add { background: color-mix(in srgb, var(--ok) 18%, transparent); }
+  .diffline.del { background: color-mix(in srgb, var(--bad) 18%, transparent); }
+  .err { color: var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Docxy</h1>
+  <span class="sub" id="repo"></span>
+  <span class="spacer"></span>
+  <input type="text" id="commit" placeholder="commit ref (default HEAD)" style="width:220px">
+  <button class="primary" id="run">Run pipeline</button>
+</header>
+<main>
+  <aside>
+    <div style="font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:10px">Runs</div>
+    <div id="runs"></div>
+  </aside>
+  <section class="detail" id="detail">
+    <div class="empty">Select a run, or start one.</div>
+  </section>
+</main>
+<script>
+const ROLES = [
+  ['change-analyst', 'Change Analyst', 'Classifies the diff and extracts the what and why'],
+  ['impact-mapper', 'Impact Mapper', 'Traces which docs and downstream code the change touches'],
+  ['docs-updater', 'Docs Updater', 'Drafts the specific edits to affected sections'],
+  ['changelog-author', 'Changelog Author', 'Writes the user-facing entry and semver bump'],
+  ['coordinator', 'Coordinator', 'Reviews the work and writes the human-facing summary'],
+];
+
+let selectedId = null;
+let runsCache = [];
+
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function api(path, options) {
+  const res = await fetch(path, options);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+  return body;
+}
+
+async function loadConfig() {
+  try {
+    const cfg = await api('/api/config');
+    document.getElementById('repo').textContent = cfg.repoPath + '  ·  ' + cfg.provider;
+  } catch {}
+}
+
+async function loadRuns() {
+  runsCache = await api('/api/runs');
+  const el = document.getElementById('runs');
+  if (runsCache.length === 0) {
+    el.innerHTML = '<div class="empty" style="font-size:13px">No runs yet.</div>';
+    return;
+  }
+  el.innerHTML = runsCache.map((r) => `
+    <div class="run" data-id="${r.id}" aria-selected="${r.id === selectedId}">
+      <div><span class="sha">${esc(r.commit.shortSha)}</span>
+        <span class="pill ${esc(r.status)}" style="float:right">${esc(r.status)}</span></div>
+      <div class="subject">${esc(r.commit.subject)}</div>
+    </div>`).join('');
+  el.querySelectorAll('.run').forEach((node) => {
+    node.addEventListener('click', () => selectRun(node.dataset.id));
+  });
+}
+
+async function selectRun(id) {
+  selectedId = id;
+  await loadRuns();
+  await renderDetail();
+}
+
+function renderRoleTimeline(run) {
+  const byName = Object.fromEntries((run.traces || []).map((t) => [t.role, t]));
+  return ROLES.map(([name, title, job], i) => {
+    const trace = byName[name];
+    const status = trace ? trace.status : 'pending';
+    const events = trace ? trace.events.slice(-6) : [];
+    const reused = trace && trace.reusedSession;
+    return `
+      <div class="role">
+        <div class="rail">
+          <div class="dot ${esc(status)}"></div>
+          ${i < ROLES.length - 1 ? '<div class="line"></div>' : ''}
+        </div>
+        <div class="role-body">
+          <div class="role-title">${esc(title)}
+            ${reused ? '<span class="reused" title="This role reused its session from an earlier commit">· session reused</span>' : ''}
+          </div>
+          <div class="role-job">${esc(job)}</div>
+          ${trace ? `<div class="events">${events.map((e) => `<div>${esc(e.kind)} — ${esc(e.text)}</div>`).join('')}</div>` : ''}
+          ${trace && trace.error ? `<div class="events err">${esc(trace.error)}</div>` : ''}
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function renderDiff(before, after) {
+  const a = before.split('\n'), b = after.split('\n');
+  const out = [];
+  let i = 0, j = 0;
+  while (i < a.length || j < b.length) {
+    if (i < a.length && j < b.length && a[i] === b[j]) {
+      if (out.length && out[out.length-1].t === 'ctx' && out[out.length-1].run > 2) { i++; j++; continue; }
+      out.push({ t: 'ctx', s: a[i], run: 1 }); i++; j++;
+    } else if (j < b.length && !a.includes(b[j])) {
+      out.push({ t: 'add', s: b[j] }); j++;
+    } else if (i < a.length && !b.includes(a[i])) {
+      out.push({ t: 'del', s: a[i] }); i++;
+    } else { i++; j++; }
+  }
+  return out.slice(0, 400).map((l) =>
+    `<span class="diffline ${l.t === 'add' ? 'add' : l.t === 'del' ? 'del' : ''}">${
+      l.t === 'add' ? '+' : l.t === 'del' ? '-' : ' '}${esc(l.s)}</span>`).join('');
+}
+
+async function renderDetail() {
+  const el = document.getElementById('detail');
+  if (!selectedId) { el.innerHTML = '<div class="empty">Select a run, or start one.</div>'; return; }
+
+  const run = await api('/api/runs/' + selectedId);
+  const c = run.classification, im = run.impact, d = run.docs, cl = run.changelog, v = run.validation;
+  const parts = [];
+
+  parts.push(`<div class="card">
+    <h3>Commit</h3>
+    <dl class="kv">
+      <dt>sha</dt><dd style="font-family:var(--mono)">${esc(run.commit.shortSha)}</dd>
+      <dt>subject</dt><dd>${esc(run.commit.subject)}</dd>
+      <dt>status</dt><dd><span class="pill ${esc(run.status)}">${esc(run.status)}</span></dd>
+      <dt>session memory</dt><dd>${run.priorSymbolCount} symbol(s) carried in, ${run.newSymbolCount} new mapping(s) learned</dd>
+    </dl>
+    ${run.error ? `<div class="err" style="margin-top:10px">${esc(run.error)}</div>` : ''}
+    ${run.pullRequestUrl ? `<div style="margin-top:10px">Pull request: <a href="${esc(run.pullRequestUrl)}" target="_blank">${esc(run.pullRequestUrl)}</a></div>` : ''}
+  </div>`);
+
+  parts.push(`<div class="card"><h3>Pipeline</h3>${renderRoleTimeline(run)}</div>`);
+
+  if (c) parts.push(`<div class="card"><h3>Classification</h3>
+    <dl class="kv">
+      <dt>kind</dt><dd>${esc(c.kind)}</dd>
+      <dt>surface</dt><dd>${esc(c.surface)}</dd>
+      <dt>confidence</dt><dd>${Math.round((c.confidence||0)*100)}%</dd>
+      <dt>symbols</dt><dd style="font-family:var(--mono);font-size:12.5px">${(c.changedSymbols||[]).map(esc).join(', ') || '—'}</dd>
+    </dl>
+    <p style="margin:10px 0 0">${esc(c.summary)}</p>
+    <p style="margin:6px 0 0;color:var(--muted)">${esc(c.breakingRationale)}</p></div>`);
+
+  if (im) parts.push(`<div class="card"><h3>Impact map</h3>
+    ${(im.docs||[]).length ? (im.docs||[]).map((x) =>
+      `<div style="padding:4px 0"><span style="font-family:var(--mono);font-size:12.5px">${esc(x.path)}</span>
+       <span style="color:var(--muted)"> § ${esc(x.section)} · ${Math.round((x.confidence||0)*100)}%</span>
+       <div style="color:var(--muted);font-size:13px">${esc(x.reason)}</div></div>`).join('')
+      : '<div style="color:var(--muted)">No documentation affected.</div>'}
+    ${im.notes ? `<p style="margin:10px 0 0;color:var(--muted);font-size:13px">${esc(im.notes)}</p>` : ''}</div>`);
+
+  if (cl) parts.push(`<div class="card"><h3>Changelog</h3>
+    <div><code>${esc(cl.section)}</code> — ${esc(cl.entry)}</div>
+    <div style="margin-top:6px;color:var(--muted)">Bump <strong>${esc(cl.semverBump)}</strong> — ${esc(cl.bumpRationale)}</div></div>`);
+
+  if (v) parts.push(`<div class="card"><h3>Validation</h3>
+    ${v.checks.map((k) => `<div class="check">
+      <span>${k.status === 'pass' ? '✅' : k.status === 'fail' ? '❌' : '⏭️'}</span>
+      <span class="name">${esc(k.name)}</span>
+      <span style="color:var(--muted)">${esc((k.detail||'').split('\n')[0])}</span></div>`).join('')}</div>`);
+
+  if (d && (d.edits||[]).length) {
+    const files = await api('/api/runs/' + selectedId + '/files').catch(() => []);
+    parts.push(`<div class="card"><h3>Proposed edits</h3>
+      ${files.map((f) => `<div style="margin-bottom:14px">
+        <div style="font-family:var(--mono);font-size:12.5px;margin-bottom:6px">${esc(f.path)}</div>
+        <pre>${renderDiff(f.before, f.after)}</pre></div>`).join('')}</div>`);
+  }
+
+  if (run.approval) {
+    const a = run.approval;
+    const stale = run.approvalStaleness || {};
+    const open = a.status === 'pending';
+    parts.push(`<div class="card gate"><h3>Approval gate</h3>
+      <dl class="kv">
+        <dt>scope</dt><dd>${esc(a.scope)}</dd>
+        <dt>sign-offs</dt><dd>${a.signoffs.length} / ${a.requiredSignoffs}${a.signoffs.length ? ' — ' + a.signoffs.map((s)=>esc(s.by)).join(', ') : ''}</dd>
+        <dt>status</dt><dd><span class="pill ${esc(a.status)}">${esc(a.status)}</span>${stale.stale ? ` <span class="err">stale — waiting ${stale.waitingMinutes} min, still pending</span>` : ''}</dd>
+      </dl>
+      <p style="margin:10px 0 0;color:var(--muted)">${esc(a.scopeRationale)}</p>
+      <div style="margin-top:10px;white-space:pre-wrap">${esc(a.summary)}</div>
+      ${a.deniedReason ? `<div class="err" style="margin-top:10px">${esc(a.deniedReason)}</div>` : ''}
+      ${open ? `<div class="actions">
+        <input type="text" id="by" placeholder="your name" style="max-width:180px">
+        <input type="text" id="why" placeholder="reason (required to deny)" style="max-width:260px">
+        <button class="primary" id="approve">Approve</button>
+        <button id="denybtn">Deny</button>
+      </div><div class="err" id="gateErr" style="margin-top:8px"></div>` : ''}
+    </div>`);
+  }
+
+  el.innerHTML = parts.join('');
+
+  const approve = document.getElementById('approve');
+  if (approve) {
+    approve.addEventListener('click', async () => {
+      const by = document.getElementById('by').value.trim();
+      const err = document.getElementById('gateErr');
+      err.textContent = '';
+      approve.disabled = true;
+      try {
+        const out = await api(`/api/runs/${selectedId}/approve`, {
+          method: 'POST', headers: {'content-type':'application/json'},
+          body: JSON.stringify({ by }),
+        });
+        if (!out.approved) err.textContent = out.message;
+      } catch (e) { err.textContent = e.message; }
+      approve.disabled = false;
+      await loadRuns(); await renderDetail();
+    });
+    document.getElementById('denybtn').addEventListener('click', async () => {
+      const by = document.getElementById('by').value.trim();
+      const reason = document.getElementById('why').value.trim();
+      const err = document.getElementById('gateErr');
+      err.textContent = '';
+      try {
+        await api(`/api/runs/${selectedId}/deny`, {
+          method: 'POST', headers: {'content-type':'application/json'},
+          body: JSON.stringify({ by, reason }),
+        });
+      } catch (e) { err.textContent = e.message; }
+      await loadRuns(); await renderDetail();
+    });
+  }
+}
+
+document.getElementById('run').addEventListener('click', async () => {
+  const btn = document.getElementById('run');
+  btn.disabled = true;
+  try {
+    await api('/api/runs', {
+      method: 'POST', headers: {'content-type':'application/json'},
+      body: JSON.stringify({ commit: document.getElementById('commit').value.trim() || 'HEAD' }),
+    });
+  } catch (e) { alert(e.message); }
+  btn.disabled = false;
+});
+
+const events = new EventSource('/api/events');
+events.addEventListener('run', async (e) => {
+  const run = JSON.parse(e.data);
+  if (!selectedId) selectedId = run.id;
+  await loadRuns();
+  if (run.id === selectedId) await renderDetail();
+});
+events.addEventListener('error', () => {});
+
+loadConfig();
+loadRuns();
+</script>
+</body>
+</html>
