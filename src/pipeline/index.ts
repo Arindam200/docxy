@@ -12,7 +12,7 @@ import type {
 import { readCommitDiff, renderDiffForPrompt } from '../git/diff.js';
 import { openDocsTree } from '../git/worktree.js';
 import { buildDocsOutline, readDocExcerpts, readRepoFile } from '../git/repo.js';
-import { SessionStore, resolveSession } from '../trueforge/session.js';
+import { resolveSession } from '../trueforge/session.js';
 import { runTurn } from '../trueforge/run.js';
 import {
   CHANGELOG_AUTHOR,
@@ -23,8 +23,8 @@ import {
   type RoleDefinition,
 } from '../agents/roles.js';
 import { extractJson, normalizeConfidence } from '../agents/parse.js';
-import { KnowledgeStore, renderKnowledgeMap } from './state.js';
-import { RunStore } from './store.js';
+import { renderKnowledgeMap } from './state.js';
+import { createStores } from './stores.js';
 import { applyChangelogEntry, applyDocEdits } from './apply.js';
 import type { ProposedFile } from '../types.js';
 import { validateProposal } from '../validate/index.js';
@@ -55,9 +55,7 @@ export async function runPipeline(
   commitRef: string,
   hooks: PipelineHooks = {},
 ): Promise<PipelineResult> {
-  const sessions = new SessionStore(config);
-  const knowledge = new KnowledgeStore(config);
-  const runs = new RunStore(config);
+  const { runs, sessions, knowledge } = createStores(config);
 
   const diff = await readCommitDiff(config.repoPath, commitRef);
   const priorMap = await knowledge.load();

@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
@@ -6,7 +6,7 @@ import type { TrueForge } from '@truefoundry/trueforge-sdk';
 import type { Config } from '../config.js';
 import type { RunRecord } from '../types.js';
 import { PACKAGE_ROOT } from '../paths.js';
-import { RunStore } from '../pipeline/store.js';
+import { createStores, storageBackend } from '../pipeline/stores.js';
 import { rebuildProposedFiles, runPipeline } from '../pipeline/index.js';
 import { ApprovalError, deny, describeGate, signOff, staleness } from '../approval/gate.js';
 import { openPullRequest } from '../github/pr.js';
@@ -39,7 +39,7 @@ export interface ServerHandle {
 
 export function createServer(client: TrueForge, config: Config): { app: Hono; bus: Broadcaster } {
   const app = new Hono();
-  const runs = new RunStore(config);
+  const { runs, knowledge: knowledgeStore } = createStores(config);
   const bus = new Broadcaster();
   /** Guards against two runs racing on the same commit. */
   let activeRun: Promise<unknown> | null = null;
@@ -56,11 +56,57 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
       provider: config.nebius.providerName,
       models: config.models,
       validationEnabled: config.validation.enabled,
+      storage: storageBackend(),
     }),
   );
 
-  app.get('/api/runs', async (c) => {
-    const list = await runs.list(50);
+  /** Free-form standing instructions the Docs Updater and Changelog Author read. */
+  const instructionsFile = (): string => join(config.stateDir, 'instructions.md');
+
+  app.get('/api/instructions', async (c) => {
+    try {
+      const text = await readFile(instructionsFile(), 'utf8');
+      return c.json({ instructions: text, updatedAt: null });
+    } catch {
+      return c.json({ instructions: '', updatedAt: null });
+    }
+  });
+
+  app.put('/api/instructions', async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { instructions?: string };
+    if (typeof body.instructions !== 'string') {
+      return c.json({ error: 'A string body field `instructions` is required.' }, 400);
+    }
+    if (body.instructions.length > 20_000) {
+      return c.json({ error: 'Instructions are capped at 20,000 characters.' }, 413);
+    }
+    await mkdir(config.stateDir, { recursive: true });
+    const updatedAt = new Date().toISOString();
+    await writeFile(instructionsFile(), body.instructions, 'utf8');
+    bus.publish('instructions', { updatedAt });
+    return c.json({ instructions: body.instructions, updatedAt });
+  });
+
+  /** What the pipeline is watching for this repository. */
+  app.get('/api/tracking', async (c) => {
+    const knowledge = await knowledgeStore.load();
+    // Doc paths are derived from the symbol map: every section the Impact
+    // Mapper has ever linked a symbol to is, by definition, tracked.
+    const trackedDocs = [...new Set(Object.values(knowledge.symbols).flat())].sort();
+    return c.json({
+      repoPath: config.repoPath,
+      docsBranch: config.docs.branch,
+      docsRoots: config.docs.roots,
+      changelogPath: config.docs.changelogPath,
+      trackedDocs,
+      symbolCount: Object.keys(knowledge.symbols).length,
+      symbols: knowledge.symbols,
+      processedCommits: knowledge.processedCommits.length,
+      knowledgeUpdatedAt: knowledge.updatedAt,
+    });
+  });
+
+  app.get('/api/runs', async (c) => {    const list = await runs.list(50);
     return c.json(
       list.map((run) => ({
         id: run.id,

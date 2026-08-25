@@ -61,6 +61,12 @@ export function Navbar() {
 
         <div className="hidden md:flex items-center gap-3">
           <a
+            href="/dashboard"
+            className="text-sm text-zinc-600 hover:text-zinc-900 transition-colors"
+          >
+            Dashboard
+          </a>
+          <a
             href={site.repo}
             className="text-sm text-zinc-600 hover:text-zinc-900 transition-colors"
           >

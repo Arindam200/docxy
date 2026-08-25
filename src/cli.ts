@@ -3,9 +3,11 @@ import { loadConfig, prBaseBranch, ROLE_NAMES, type Config } from './config.js';
 import { createClient, assertReachable } from './trueforge/client.js';
 import { listAvailableModels, listNebiusModels, registerNebiusProvider } from './trueforge/setup.js';
 import { runPipeline, rebuildProposedFiles } from './pipeline/index.js';
-import { RunStore } from './pipeline/store.js';
-import { SessionStore } from './trueforge/session.js';
-import { KnowledgeStore } from './pipeline/state.js';
+import { createStores, type RunStorage } from './pipeline/stores.js';
+import { closeDb } from './db/index.js';
+
+/** `serve` returns while the server keeps running, so it must not close the pool. */
+let holdOpen = false;
 import { ApprovalError, deny, describeGate, signOff } from './approval/gate.js';
 import { openPullRequest } from './github/pr.js';
 import { startServer } from './server/index.js';
@@ -68,7 +70,7 @@ ${c.bold('Options')}
 `);
 }
 
-function summarizeRun(run: Awaited<ReturnType<RunStore['load']>>, config: Config): void {
+function summarizeRun(run: Awaited<ReturnType<RunStorage['load']>>, config: Config): void {
   if (!run) return;
   console.log(`\n${c.bold(run.commit.shortSha)} ${run.commit.subject}`);
   console.log(`${c.dim('run')} ${run.id}`);
@@ -269,7 +271,7 @@ async function main(): Promise<void> {
     }
 
     case 'runs': {
-      const store = new RunStore(config);
+      const store = createStores(config).runs;
       const list = await store.list(20);
       if (flags.json) {
         console.log(JSON.stringify(list, null, 2));
@@ -296,7 +298,7 @@ async function main(): Promise<void> {
     case 'show': {
       const id = positional[0];
       if (!id) throw new Error('Usage: docxy show <run-id>');
-      const store = new RunStore(config);
+      const store = createStores(config).runs;
       const run = (await store.load(id)) ?? (await store.list(200)).find((r) => r.id.startsWith(id));
       if (!run) throw new Error(`No run found matching "${id}".`);
       if (flags.json) {
@@ -312,7 +314,7 @@ async function main(): Promise<void> {
       const by = flags.by;
       if (!id || !by) throw new Error('Usage: docxy approve <run-id> --by "your name"');
 
-      const store = new RunStore(config);
+      const store = createStores(config).runs;
       const run = (await store.load(id)) ?? (await store.list(200)).find((r) => r.id.startsWith(id));
       if (!run?.approval) throw new Error(`No pending approval found for "${id}".`);
 
@@ -364,7 +366,7 @@ async function main(): Promise<void> {
       if (!id || !by || !reason) {
         throw new Error('Usage: docxy deny <run-id> --by "your name" --reason "why"');
       }
-      const store = new RunStore(config);
+      const store = createStores(config).runs;
       const run = (await store.load(id)) ?? (await store.list(200)).find((r) => r.id.startsWith(id));
       if (!run?.approval) throw new Error(`No pending approval found for "${id}".`);
       deny(run.approval, by, reason);
@@ -376,6 +378,7 @@ async function main(): Promise<void> {
     }
 
     case 'serve': {
+      holdOpen = true;
       const client = createClient(config);
       await assertReachable(client, config);
       const handle = startServer(client, config);
@@ -388,11 +391,11 @@ async function main(): Promise<void> {
     case 'reset': {
       const all = !flags.sessions && !flags.knowledge;
       if (all || flags.sessions) {
-        await new SessionStore(config).clear();
+        await createStores(config).sessions.clear();
         console.log(`${c.green('✓')} cleared agent sessions for this repository`);
       }
       if (all || flags.knowledge) {
-        await new KnowledgeStore(config).reset();
+        await createStores(config).knowledge.reset();
         console.log(`${c.green('✓')} cleared the symbol map for this repository`);
       }
       return;
@@ -413,11 +416,15 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err: unknown) => {
-  if (err instanceof ApprovalError) {
-    console.error(`\n${c.red('✗')} ${err.message}`);
-  } else {
-    console.error(`\n${c.red('✗')} ${err instanceof Error ? err.message : String(err)}`);
-  }
-  process.exitCode = 1;
-});
+main()
+  .catch((err: unknown) => {
+    if (err instanceof ApprovalError) {
+      console.error(`\n${c.red('✗')} ${err.message}`);
+    } else {
+      console.error(`\n${c.red('✗')} ${err instanceof Error ? err.message : String(err)}`);
+    }
+    process.exitCode = 1;
+  })
+  // Every command but `serve` would otherwise hang on an open Neon pool
+  // instead of exiting.
+  .finally(() => (holdOpen ? undefined : closeDb()));

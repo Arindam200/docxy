@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import type { Config } from '../config.js';
+import type { KnowledgeStorage } from './stores.js';
 
 export interface KnowledgeMap {
   /** symbol -> ["docs/api.md#Configuration", ...] */
@@ -18,7 +19,7 @@ const EMPTY: KnowledgeMap = { symbols: {}, processedCommits: [], updatedAt: '' }
  * incrementally. This is what turns a second run on the same repo into a
  * cheaper one: the Impact Mapper is handed what it already learned.
  */
-export class KnowledgeStore {
+export class KnowledgeStore implements KnowledgeStorage {
   private readonly file: string;
 
   constructor(private readonly config: Config) {
