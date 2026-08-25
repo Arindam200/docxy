@@ -9,6 +9,24 @@ things that are not being captured at all.
 
 ---
 
+## Status
+
+Steps 1-9 have landed. Of §7's "later" list, two are in:
+
+| Item | Where |
+|---|---|
+| Per-role and per-run **cost** | `src/trueforge/pricing.ts` prices each role against the model it actually ran on; `rollUp()` in `src/pipeline/index.ts` writes `usage.costUsd` and `totals.costUsd`. Rates are read live from Nebius (`GET /v1/models?verbose=true`), cached for an hour, and absent rather than guessed when the endpoint is unreachable — an unpriced run shows tokens and no dollar figure. |
+| **Cross-run trends** | `GET /api/observability` (`src/server/observability.ts`) aggregates the window; `/dashboard/observability` renders it: success rate, median run, spend per run, the role that fails most and how, duration or token trend per run, the input split including what the skill packs cost, and the docs that go stale most often. Derived on read — no new capture, no second copy of the numbers to keep correct. |
+
+Still open from §7: **retention** (bodies in a side table, dropped past N days) and
+**export** beyond the existing `docxy show <run-id> --json`.
+
+Old records simply lack the newer fields, as designed — a run written before
+durations were captured reports `—` rather than `0`, and the trend chart falls
+back to the axis that has data.
+
+---
+
 ## 1. What is already recorded
 
 Every run is a JSON document in `.docxy/runs/<id>.json`. Per run:
