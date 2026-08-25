@@ -202,7 +202,7 @@ check('always gates routine', requiresSignoff('always', 'routine') === true);
 check('always gates elevated', requiresSignoff('always', 'elevated') === true);
 
 // Scope is still computed under auto, so the PR body can explain the change.
-const autoScope = decideScope(breaking, { semverBump: 'major' } as any, 'routine');
+const autoScope = decideScope(breaking, majorBump, 'routine');
 check('scope still computed when ungated', autoScope.scope === 'elevated');
 
 await rm(codeRepo, { recursive: true, force: true });
