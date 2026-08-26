@@ -68,6 +68,15 @@ export const agentSessions = pgTable(
     role: text('role').notNull(),
     sessionId: text('session_id').notNull(),
     specHash: text('spec_hash').notNull(),
+    /**
+     * Turns this session has carried.
+     *
+     * A session's transcript is an input that grows with every commit, and an
+     * overfull one is what breached the output budget on this repository. The
+     * count is what lets a session be retired on a schedule instead of only
+     * after it has already failed.
+     */
+    turns: integer('turns').default(0).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => [uniqueIndex('agent_sessions_project_role').on(t.projectId, t.role)],
@@ -137,8 +146,16 @@ export const runRoles = pgTable(
     /** Which model actually ran; roles can be pointed at different ones. */
     model: text('model'),
     error: text('error'),
-    /** harness-error | parse-error | timeout | aborted */
+    /** harness-error | parse-error | max-tokens | rate-limit | stalled | … */
     failure: text('failure').$type<RoleFailure>(),
+    /**
+     * Attempts spent, including the one that succeeded.
+     *
+     * Stored rather than derived: a role that succeeded on its third try looks
+     * identical to a clean first pass without it, which hides exactly the
+     * flakiness this column exists to make visible.
+     */
+    attempts: integer('attempts').default(1).notNull(),
     durationMs: integer('duration_ms'),
     /** Token counts plus the harness's own input-side breakdown. */
     usage: jsonb('usage').$type<RoleUsage>(),

@@ -35,7 +35,16 @@ export type RoleName =
   | "docs-updater"
   | "changelog-author";
 
-export type RoleFailure = "harness-error" | "parse-error" | "timeout" | "aborted";
+export type RoleFailure =
+  | "harness-error"
+  | "parse-error"
+  | "timeout"
+  | "aborted"
+  | "max-tokens"
+  | "context"
+  | "rate-limit"
+  | "cancelled"
+  | "stalled";
 
 export interface RunTotals {
   inputTokens: number;
@@ -50,6 +59,14 @@ export interface RoleDot {
   status: "running" | "done" | "failed";
   failure?: RoleFailure;
   durationMs?: number;
+  /** Attempts spent. Above 1 means the role failed and was retried. */
+  attempts?: number;
+}
+
+/** A role that failed without stopping the run. */
+export interface DegradedRole {
+  role: RoleName;
+  reason: string;
 }
 
 export interface RunSummary {
@@ -64,6 +81,8 @@ export interface RunSummary {
   durationMs?: number;
   totals?: RunTotals;
   roles?: RoleDot[];
+  degraded?: DegradedRole[];
+  error?: string;
 }
 
 export interface RoleUsage {
@@ -90,6 +109,7 @@ export interface RoleTrace {
   durationMs?: number;
   usage?: RoleUsage;
   failure?: RoleFailure;
+  attempts?: number;
 }
 
 export interface ValidationCheck {
@@ -132,8 +152,40 @@ export interface RunDetail extends RunSummary {
     summary: string;
   };
   error?: string;
+  /** Roles that failed without stopping the run. */
+  degraded?: DegradedRole[];
   priorSymbolCount: number;
   newSymbolCount: number;
+}
+
+/**
+ * A repository docxy is synced to.
+ *
+ * "Synced" means the GitHub App is installed on it — not that a checkout exists
+ * on whichever machine is serving this dashboard. `hasCheckout` reports the
+ * latter as the incidental detail it is.
+ */
+export interface SyncedRepo {
+  fullName: string;
+  defaultBranch: string;
+  url: string;
+  checkoutPath: string;
+  hasCheckout: boolean;
+  runCount: number;
+  lastRunAt?: string;
+  lastRunId?: string;
+  lastRunStatus?: RunStatus;
+  lastPullRequestUrl?: string;
+}
+
+export interface RepositoriesPage {
+  /** Whether the App is configured at all. Nothing can be synced without it. */
+  configured: boolean;
+  repositories: SyncedRepo[];
+  localRepoPath: string;
+  /** True when DOCXY_REPO_PATH pins runs to one directory. */
+  pinned: boolean;
+  error: string | null;
 }
 
 export interface LogEntry {
@@ -276,4 +328,8 @@ export function fetchIntegrations(): Promise<{ integrations: Integration[] } | n
 
 export function fetchObservability(limit = 50): Promise<ObservabilityReport | null> {
   return get<ObservabilityReport>(`/api/observability?limit=${limit}`);
+}
+
+export function fetchRepositories(): Promise<RepositoriesPage | null> {
+  return get<RepositoriesPage>("/api/repositories");
 }

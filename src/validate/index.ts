@@ -39,7 +39,12 @@ export interface ValidateInput {
   applied: ApplyResult;
   changelogFile: ProposedFile | null;
   classification: Classification;
-  changelog: ChangelogProposal;
+  /**
+   * Absent when the Changelog Author could not be recovered. A docs-only
+   * proposal is still worth validating and still worth landing; the semver
+   * check simply has nothing to compare against and reports itself skipped.
+   */
+  changelog: ChangelogProposal | undefined;
   /** Tree the docs were read from — where links resolve and the docs build runs. */
   docsPath: string;
   /**
@@ -111,22 +116,30 @@ export async function validateProposal(input: ValidateInput): Promise<Validation
   }
 
   // 3. Internal consistency between the two specialists' outputs.
-  const bumpOk = !(classification.kind === 'breaking' && changelog.semverBump !== 'major');
-  checks.push(
-    bumpOk
-      ? {
-          name: 'semver-consistency',
-          status: 'pass',
-          detail: `${classification.kind} -> ${changelog.semverBump}`,
-        }
-      : {
-          name: 'semver-consistency',
-          status: 'fail',
-          detail:
-            `The change is classified breaking but the proposed bump is ` +
-            `"${changelog.semverBump}". A breaking change requires a major bump.`,
-        },
-  );
+  if (!changelog) {
+    checks.push({
+      name: 'semver-consistency',
+      status: 'skipped',
+      detail: 'no changelog entry was produced, so there is no bump to check',
+    });
+  } else {
+    const bumpOk = !(classification.kind === 'breaking' && changelog.semverBump !== 'major');
+    checks.push(
+      bumpOk
+        ? {
+            name: 'semver-consistency',
+            status: 'pass',
+            detail: `${classification.kind} -> ${changelog.semverBump}`,
+          }
+        : {
+            name: 'semver-consistency',
+            status: 'fail',
+            detail:
+              `The change is classified breaking but the proposed bump is ` +
+              `"${changelog.semverBump}". A breaking change requires a major bump.`,
+          },
+    );
+  }
 
   // 4. Whatever the repo already uses to build docs and run tests.
   //

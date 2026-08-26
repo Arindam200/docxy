@@ -18,6 +18,12 @@
   --surface: #f7f7f8;
   --surface-2: #efeff1;
   --muted: #52525b;
+  /* Status, as tokens rather than literals: a dot or a badge has to survive
+     both grounds, and emerald-400 on white is not the same signal it is on
+     black. These are the AA-passing pair for each. */
+  --ok: #047857;
+  --warn: #b45309;
+  --danger: #b91c1c;
 }
 
 /*
@@ -36,6 +42,29 @@
   --surface: #101013;
   --surface-2: #161619;
   --muted: #9d9da8;
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --danger: #f87171;
+}
+
+/*
+ * The dashboard's theme switch. `.theme-dark` above is the default, so picking
+ * Light is an override rather than a second source of truth: one class on
+ * <html>, set before first paint, and every `bg-background` inside the scope
+ * resolves back to the light scale with no utility changes.
+ */
+html.theme-light .theme-dark {
+  --background: #ffffff;
+  --foreground: #18181b;
+  --accent: #2179fc;
+  --accent-deep: #0357d3;
+  --rule: #c4c4cc;
+  --surface: #f7f7f8;
+  --surface-2: #efeff1;
+  --muted: #52525b;
+  --ok: #047857;
+  --warn: #b45309;
+  --danger: #b91c1c;
 }
 
 @theme inline {
@@ -47,6 +76,9 @@
   --color-surface: var(--surface);
   --color-surface-2: var(--surface-2);
   --color-muted: var(--muted);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-danger: var(--danger);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }

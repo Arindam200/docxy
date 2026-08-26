@@ -35,7 +35,7 @@ export default async function LogsPage({
         <p className="text-xs text-muted tabular-nums">
           {entries.length} shown
           {logs && logs.total > entries.length ? ` of ${logs.total}` : ""}
-          {errors > 0 && <span className="ml-2 text-red-300">{errors} error</span>}
+          {errors > 0 && <span className="ml-2 text-danger">{errors} error</span>}
         </p>
       </PageHead>
 

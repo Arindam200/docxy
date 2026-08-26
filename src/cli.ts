@@ -15,6 +15,8 @@ import { startServer } from './server/index.js';
 import { isGitRepo, recentCommits } from './git/diff.js';
 import { openDocsTree } from './git/worktree.js';
 import { ROLES } from './agents/roles.js';
+import { readAppCredentials } from './github/app.js';
+import { installationRepositories, ensureCheckout } from './github/checkout.js';
 
 const c = {
   dim: (s: string) => `\x1b[2m${s}\x1b[0m`,
@@ -263,7 +265,19 @@ async function main(): Promise<void> {
 
       summarizeRun(run, config);
 
-      if (run.status === 'awaiting-approval') {
+      if (run.degraded && run.degraded.length > 0) {
+        console.log(`\n${c.yellow('▌')} ${c.bold('Some agents did not finish.')}`);
+        for (const item of run.degraded) {
+          console.log(`  ${c.dim(item.role.padEnd(18))} ${item.reason}`);
+        }
+        console.log(`  ${c.dim('The proposal went ahead with what the others produced.')}`);
+      }
+
+      if (run.pullRequestUrl) {
+        console.log(`\n${c.green('▌')} ${c.bold('Pull request opened.')}`);
+        console.log(`  ${run.pullRequestUrl}`);
+        if (run.error) console.log(`  ${c.yellow('Opened as a draft:')} ${run.error}`);
+      } else if (run.status === 'awaiting-approval') {
         console.log(`\n${c.yellow('▌')} ${c.bold('Waiting for human approval.')}`);
         console.log(`  ${run.approval!.scopeRationale}`);
         console.log(
@@ -272,9 +286,14 @@ async function main(): Promise<void> {
         console.log(`  ${c.bold('Deny:   ')} docxy deny ${run.id} --by "your name" --reason "..."`);
         console.log(`  ${c.bold('Review: ')} docxy serve  ${c.dim('(then open the timeline)')}`);
         console.log(
-          `\n  ${c.dim('Nothing opens a pull request until you say so. This request will not')}`,
+          `\n  ${c.dim('DOCXY_REQUIRE_APPROVAL is on, so nothing opens a pull request until')}`,
         );
-        console.log(`  ${c.dim('expire, auto-approve, or auto-discard.')}`);
+        console.log(`  ${c.dim('you say so. This request will not expire or auto-discard.')}`);
+      } else if (run.status === 'approved' && run.error) {
+        // Approved but unpublished: the proposal is sound and the push failed.
+        console.log(`\n${c.red('▌')} ${c.bold('The proposal is ready but was not published.')}`);
+        console.log(`  ${run.error}`);
+        console.log(`\n  ${c.dim(`Retry publishing with:  docxy approve ${run.id} --by "your name"`)}`);
       }
       return;
     }
@@ -388,12 +407,46 @@ async function main(): Promise<void> {
 
     case 'serve': {
       holdOpen = true;
-      const client = createClient(config);
-      await assertReachable(client, config);
-      const handle = startServer(client, config);
+
+      // Resolve the repository *before* the server starts, not per request.
+      // Runs, sessions, logs, and the symbol map all key on `repoPath`, so a
+      // config that changed per webhook would file a run under one project and
+      // list it under another — the dashboard would show nothing while the
+      // pipeline worked perfectly.
+      let serveConfig = config;
+      let pinned = true;
+      if (!process.env.DOCXY_REPO_PATH?.trim()) {
+        const credentials = readAppCredentials();
+        const repos = credentials ? await installationRepositories(credentials) : [];
+        if (repos[0]) {
+          pinned = false;
+          serveConfig = {
+            ...config,
+            repoPath: await ensureCheckout(repos[0].fullName, repos[0].defaultBranch),
+          };
+        }
+      }
+
+      const client = createClient(serveConfig);
+      await assertReachable(client, serveConfig);
+      const handle = startServer(client, serveConfig);
       console.log(`${c.bold('Docxy')} is on http://localhost:${handle.port}`);
-      console.log(`${c.dim('repository')} ${config.repoPath}`);
-      console.log(`${c.dim('harness')}    ${config.trueforge.baseUrl}`);
+      console.log(`${c.dim('harness')}    ${serveConfig.trueforge.baseUrl}`);
+
+      // Which repository a push will actually document. Without this the only
+      // way to find out is to push and see, and the answer differs depending on
+      // whether DOCXY_REPO_PATH is set — the exact thing worth being explicit
+      // about at boot.
+      console.log(
+        `${c.dim('repository')} ${serveConfig.repoPath}` +
+          (pinned ? ` ${c.dim('(pinned by DOCXY_REPO_PATH)')}` : ` ${c.dim('(from the App installation)')}`),
+      );
+      if (pinned && !process.env.DOCXY_REPO_PATH?.trim()) {
+        console.log(
+          `${c.red('!')} the GitHub App is not configured, or is installed on no repositories — ` +
+            `pushes will not be documented`,
+        );
+      }
       return;
     }
 

@@ -12,10 +12,15 @@ import { schema } from './schema.js';
  * drop-in for `pg`, so moving to a plain Postgres later costs one import.
  */
 
-// Node 22+ ships a global WebSocket; older runtimes need `ws` supplied.
-if (typeof globalThis.WebSocket === 'undefined') {
-  neonConfig.webSocketConstructor = ws;
-}
+// `ws`, always — not only when the global is missing.
+//
+// Node 22+ ships a global WebSocket built on undici, and the Neon driver does
+// not get along with it over a long-lived pool: the socket dies without a
+// message and every query behind it fails with an `ErrorEvent` carrying no
+// `message` to explain itself. `ws` is what the driver documents for Node, and
+// pinning it removes the difference between a query that works in a short
+// script and the same query failing in a server that has been up for an hour.
+neonConfig.webSocketConstructor = ws;
 
 export type Database = ReturnType<typeof drizzle<typeof schema>>;
 

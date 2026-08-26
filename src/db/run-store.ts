@@ -102,6 +102,7 @@ export class PgRunStore implements RunStorage {
         model: trace.model ?? null,
         error: trace.error ?? null,
         failure: trace.failure ?? null,
+        attempts: trace.attempts ?? 1,
         durationMs: trace.durationMs ?? null,
         usage: trace.usage ?? null,
         startedAt: new Date(trace.startedAt),
@@ -193,16 +194,22 @@ export class PgRunStore implements RunStorage {
     return record ?? null;
   }
 
-  async list(limit = 50): Promise<RunRecord[]> {
+  async list(limit = 50, repoPaths?: string[]): Promise<RunRecord[]> {
     const db = getDb();
-    const project = await projectId(db, this.config.repoPath);
+
+    // Resolving each path creates the project row if it is new, which is
+    // correct: a repository the App is installed on is one docxy is synced to
+    // whether or not it has run yet, and an empty listing is the honest answer
+    // rather than a missing one.
+    const paths = repoPaths && repoPaths.length > 0 ? repoPaths : [this.config.repoPath];
+    const ids = await Promise.all(paths.map((path) => projectId(db, path)));
 
     return this.hydrate(
       await db
         .select({ run: runs, repoPath: projects.key })
         .from(runs)
         .innerJoin(projects, eq(projects.id, runs.projectId))
-        .where(eq(runs.projectId, project))
+        .where(inArray(runs.projectId, [...new Set(ids)]))
         .orderBy(desc(runs.startedAt))
         .limit(limit),
     );
@@ -295,6 +302,7 @@ export class PgRunStore implements RunStorage {
           reusedSession: role.reusedSession,
           model: role.model ?? undefined,
           failure: role.failure ?? undefined,
+          attempts: role.attempts,
           durationMs: role.durationMs ?? undefined,
           usage: role.usage ?? undefined,
           prompt: body?.prompt ?? undefined,

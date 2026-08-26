@@ -9,6 +9,8 @@ import { openDocsTree, resolveBaseRef } from '../src/git/worktree.js';
 import { listDocs, readRepoFile } from '../src/git/repo.js';
 import { prBaseBranch } from '../src/config.js';
 import { costOf, priceFor } from '../src/trueforge/pricing.js';
+import { classifyTurnError } from '../src/trueforge/run.js';
+import { planRetry } from '../src/pipeline/retry.js';
 import type { RoleName } from '../src/config.js';
 import type { DocEdit, RoleTrace, RunRecord } from '../src/types.js';
 import { buildReport } from '../src/server/observability.js';
@@ -35,6 +37,43 @@ catch { check('throws on garbage', true); }
 check('confidence percent', normalizeConfidence(85) === 0.85);
 check('confidence clamp', normalizeConfidence(2) === 1);
 check('confidence junk', normalizeConfidence('abc', 0.4) === 0.4);
+
+// --- turn failure classification -----------------------------------------
+check('max_tokens is named', classifyTurnError('max_tokens breached') === 'max-tokens');
+check('finish reason length is a budget failure',
+  classifyTurnError('the model stopped at its output budget (finish reason: length)') === 'max-tokens');
+check('context overflow is its own kind',
+  classifyTurnError('This model\'s maximum context length is 262144 tokens') === 'context');
+check('rate limits are named', classifyTurnError('HTTP 429 Too Many Requests') === 'rate-limit');
+check('dropped sockets are transient', classifyTurnError('socket hang up') === 'transient');
+check('server timeouts are transient',
+  classifyTurnError('the harness cancelled the turn (server-execution-timeout)') === 'transient');
+check('anything else stays generic', classifyTurnError('the provider said no') === 'harness');
+
+// --- retry policy --------------------------------------------------------
+{
+  const budget = planRetry('max-tokens', 1, 3);
+  check('a budget failure retries', budget.retry);
+  check('a budget failure drops the session', budget.freshSession);
+  check('a budget failure asks for brevity', (budget.nudge ?? '').includes('output budget'));
+
+  const parse = planRetry('parse-error', 1, 3, '{ not json');
+  check('the first parse repair stays in-session', parse.retry && !parse.freshSession);
+  check('the parse repair shows the model its own output',
+    (parse.nudge ?? '').includes('{ not json'));
+  check('the second parse repair rotates the session',
+    planRetry('parse-error', 2, 3, '').freshSession);
+
+  const transient = planRetry('transient', 1, 3);
+  check('a transient failure keeps the session', transient.retry && !transient.freshSession);
+  check('backoff grows with the attempt',
+    planRetry('transient', 2, 4).delayMs > transient.delayMs);
+  check('rate limits back off further than a dropped socket',
+    planRetry('rate-limit', 1, 3).delayMs > transient.delayMs);
+
+  check('the last attempt does not retry', !planRetry('max-tokens', 3, 3).retry);
+  check('a single-attempt budget never retries', !planRetry('transient', 1, 1).retry);
+}
 
 // --- apply ---------------------------------------------------------------
 const repo = await mkdtemp(join(tmpdir(), 'chron-test-'));

@@ -126,10 +126,21 @@ that matter for a deployment:
 |---|---|
 | `TRUEFORGE_BASE_URL` | The harness. Defaults to localhost, which is wrong once deployed. |
 | `NEBIUS_API_KEY` | Model access. |
-| `DOCXY_PROJECT_KEY` | **Set this.** Sessions and the symbol map key on it, and it defaults to the checkout path — which is a fresh temp directory on every hosted run. Leave it unset and every commit silently starts from cold sessions and an empty map. Use `owner/repo`. |
-| `PORT` | Set by the platform. Read automatically. |
-| `DOCXY_APPROVAL_MODE` | `auto` (default) opens the PR straight away; `elevated` gates breaking changes; `always` gates everything. |
+| `DOCXY_REPO_PATH` | **Give each repository a stable checkout directory.** Sessions and the symbol map key on this path, and it defaults to the working directory. Clone to a fresh temp directory every run and each commit silently starts from cold sessions and an empty map. |
+| `DOCXY_PORT` | The server's port, default `4317`. |
+| `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY_PATH`, `GITHUB_APP_INSTALLATION_ID` | Required. `openPullRequest()` refuses to run without all three — there is no personal-token fallback. |
+| `GITHUB_WEBHOOK_SECRET` | Required, or `POST /webhook` answers 503 to everything. |
 | `DOCXY_DOCS_BRANCH` | Only if docs live on their own branch. |
+| `DOCXY_APPROVAL_STALE_MINUTES` | Minutes before a pending request is *reported* stale. It is never auto-resolved. |
+
+> There is no `DOCXY_APPROVAL_MODE`, and no way to switch the approval gate off.
+> Every run stops for sign-off; `decideScope()` in `src/approval/gate.ts` only
+> decides whether that takes one reviewer or two. An earlier version of this
+> table listed an `auto` mode that opens the pull request straight away — it does
+> not exist.
+>
+> There is no `DOCXY_PROJECT_KEY` either. `grep -rhno 'DOCXY_[A-Z_]*'
+> --include='*.ts' src/ | sed 's/.*://' | sort -u` prints the real list.
 
 ---
 

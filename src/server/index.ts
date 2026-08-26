@@ -8,8 +8,16 @@ import type { RunRecord } from '../types.js';
 import { PACKAGE_ROOT } from '../paths.js';
 import { createStores, storageBackend } from '../pipeline/stores.js';
 import { appStatus, verifyWebhook } from '../github/app.js';
+import { stat } from 'node:fs/promises';
 import { buildReport } from './observability.js';
 import { rebuildProposedFiles, runPipeline } from '../pipeline/index.js';
+import {
+  checkoutPathFor,
+  ensureCheckout,
+  installationRepositories,
+  type InstalledRepo,
+} from '../github/checkout.js';
+import { readAppCredentials } from '../github/app.js';
 import { ApprovalError, deny, describeGate, signOff, staleness } from '../approval/gate.js';
 import { openPullRequest } from '../github/pr.js';
 
@@ -34,6 +42,12 @@ class Broadcaster {
   }
 }
 
+async function exists(path: string): Promise<boolean> {
+  return stat(path)
+    .then(() => true)
+    .catch(() => false);
+}
+
 export interface ServerHandle {
   close: () => void;
   port: number;
@@ -45,6 +59,57 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
   const bus = new Broadcaster();
   /** Guards against two runs racing on the same commit. */
   let activeRun: Promise<unknown> | null = null;
+
+  /**
+   * Close out runs abandoned by a previous process.
+   *
+   * `activeRun` lives in memory, so any run still marked `running` when this
+   * server starts belongs to a process that is gone — killed, crashed, or
+   * redeployed mid-pipeline. Left alone it sits in the dashboard spinning
+   * forever, which reads as "still working" when the truth is "nobody is
+   * working on this". Marked failed, with the reason, it reads as what it is.
+   */
+  const reapAbandonedRuns = async (): Promise<void> => {
+    try {
+      const paths = await syncedRepoPaths();
+      for (const run of await runs.list(200, paths)) {
+        if (run.status !== 'running') continue;
+        run.status = 'failed';
+        run.error =
+          'The server restarted while this run was in flight, so it was abandoned. ' +
+          'Nothing was published. Start it again from Activity.';
+        run.finishedAt = new Date().toISOString();
+        for (const trace of run.traces) {
+          if (trace.status !== 'running') continue;
+          trace.status = 'failed';
+          trace.failure = 'aborted';
+          trace.finishedAt = run.finishedAt;
+        }
+        await runs.save(run);
+        bus.publish('run', run);
+      }
+    } catch (err) {
+      // Housekeeping. A storage hiccup here must not stop the server booting.
+      console.error(
+        `could not reap abandoned runs: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  };
+
+  /**
+   * Anything a route throws becomes JSON, not an empty 500.
+   *
+   * The dashboard reads every endpoint through one `fetch` that returns null on
+   * a non-2xx, so a thrown route rendered as "offline" — indistinguishable from
+   * the server being down, and with the actual cause only in a terminal nobody
+   * was watching. A dropped database connection is the common case and it is
+   * worth naming.
+   */
+  app.onError((err, c) => {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`${c.req.method} ${c.req.path} failed: ${message}`);
+    return c.json({ error: message }, 500);
+  });
 
   app.get('/', async (c) => {
     const html = await readFile(join(PACKAGE_ROOT, 'src/server/public/index.html'), 'utf8');
@@ -108,8 +173,137 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
     });
   });
 
+  /**
+   * The repositories docxy is synced to.
+   *
+   * The GitHub App installation is the authority, not a local path. A checkout
+   * on this machine is an implementation detail — it appears and disappears
+   * with the server's disk — whereas "the App is installed on this repository"
+   * is the fact that survives a redeploy, and it is the thing a user actually
+   * did. Repositories are listed from the installation and *annotated* with
+   * whether a checkout happens to exist, rather than the other way round.
+   *
+   * Cached for a minute: the dashboard polls, the list only changes when
+   * somebody clicks something on github.com, and the API has a rate limit.
+   */
+  let repoCache: { at: number; value: InstalledRepo[] } | null = null;
+
+  const installedRepos = async (): Promise<InstalledRepo[]> => {
+    const credentials = readAppCredentials();
+    if (!credentials) return [];
+    if (repoCache && Date.now() - repoCache.at < 60_000) return repoCache.value;
+    const value = await installationRepositories(credentials);
+    repoCache = { at: Date.now(), value };
+    return value;
+  };
+
+  /**
+   * Every repository path whose runs belong on this dashboard.
+   *
+   * The configured path is always included — a developer pointing
+   * `DOCXY_REPO_PATH` at a working tree is still using docxy — and so is the
+   * managed checkout of each installed repository, because that is where a
+   * webhook-driven run actually happened. Without this the dashboard showed
+   * only the directory the server started in, and every webhook run was
+   * invisible.
+   */
+  const syncedRepoPaths = async (): Promise<string[]> => {
+    try {
+      const installed = await installedRepos();
+      return [...new Set([config.repoPath, ...installed.map((r) => checkoutPathFor(r.fullName))])];
+    } catch {
+      // The dashboard degrades to the local repository rather than to nothing.
+      return [config.repoPath];
+    }
+  };
+
+  // Deferred to here only because it needs `syncedRepoPaths`; it runs once, at
+  // startup, and nothing waits on it.
+  void reapAbandonedRuns();
+
+  app.get('/api/repositories', async (c) => {
+    let credentials;
+    try {
+      credentials = readAppCredentials();
+    } catch (err) {
+      return c.json({
+        configured: false,
+        repositories: [],
+        localRepoPath: config.repoPath,
+        pinned: Boolean(process.env.DOCXY_REPO_PATH?.trim()),
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    if (!credentials) {
+      return c.json({
+        configured: false,
+        repositories: [],
+        localRepoPath: config.repoPath,
+        pinned: Boolean(process.env.DOCXY_REPO_PATH?.trim()),
+        error:
+          'The GitHub App is not configured, so docxy cannot tell which repositories ' +
+          'it is installed on. Set GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_PATH, and ' +
+          'GITHUB_APP_INSTALLATION_ID — guides/GITHUB-APP.md walks through all three.',
+      });
+    }
+
+    let installed: InstalledRepo[];
+    try {
+      installed = await installedRepos();
+    } catch (err) {
+      return c.json({
+        configured: true,
+        repositories: [],
+        localRepoPath: config.repoPath,
+        pinned: Boolean(process.env.DOCXY_REPO_PATH?.trim()),
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    const pinned = Boolean(process.env.DOCXY_REPO_PATH?.trim());
+    const recent = await runs.list(200, await syncedRepoPaths());
+
+    const repositories = await Promise.all(
+      installed.map(async (repo) => {
+        const checkoutPath = checkoutPathFor(repo.fullName);
+        // Matched on the managed checkout. The configured path only counts when
+        // exactly one repository is installed — with several, attributing the
+        // same local runs to all of them would be a guess dressed as a fact.
+        const owned = recent.filter(
+          (run) =>
+            run.repoPath === checkoutPath ||
+            (installed.length === 1 && run.repoPath === config.repoPath),
+        );
+        const last = owned[0];
+        return {
+          fullName: repo.fullName,
+          defaultBranch: repo.defaultBranch,
+          url: `https://github.com/${repo.fullName}`,
+          checkoutPath,
+          /** Whether the commits have been fetched here yet. Not what "synced" means. */
+          hasCheckout: await exists(checkoutPath),
+          runCount: owned.length,
+          lastRunAt: last?.startedAt,
+          lastRunId: last?.id,
+          lastRunStatus: last?.status,
+          lastPullRequestUrl: owned.find((run) => run.pullRequestUrl)?.pullRequestUrl,
+        };
+      }),
+    );
+
+    return c.json({
+      configured: true,
+      repositories,
+      localRepoPath: config.repoPath,
+      /** True when DOCXY_REPO_PATH overrides the installation's own checkout. */
+      pinned,
+      error: null,
+    });
+  });
+
   app.get('/api/runs', async (c) => {
-    const list = await runs.list(50);
+    const list = await runs.list(50, await syncedRepoPaths());
     return c.json(
       list.map((run) => ({
         id: run.id,
@@ -122,6 +316,9 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
         pullRequestUrl: run.pullRequestUrl,
         durationMs: run.durationMs,
         totals: run.totals,
+        /** Roles that failed without stopping the run, so a list can say so. */
+        degraded: run.degraded,
+        error: run.error,
         // One dot per role, in pipeline order. The whole run at a glance, and
         // the reason a listing does not need to fetch role bodies.
         roles: run.traces.map((trace) => ({
@@ -129,6 +326,9 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
           status: trace.status,
           failure: trace.failure,
           durationMs: trace.durationMs,
+          // A role that needed three tries looks identical to a clean one
+          // without this, which hides exactly the flakiness worth seeing.
+          attempts: trace.attempts,
         })),
       })),
     );
@@ -148,7 +348,9 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
     const role = c.req.query('role');
     const runId = c.req.query('run');
 
-    const list = runId ? [await runs.load(runId)].filter((r) => r !== null) : await runs.list(50);
+    const list = runId
+      ? [await runs.load(runId)].filter((r) => r !== null)
+      : await runs.list(50, await syncedRepoPaths());
 
     const entries = list.flatMap((run) =>
       run.traces.flatMap((trace) =>
@@ -187,7 +389,7 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
    */
   app.get('/api/observability', async (c) => {
     const limit = Math.min(Number(c.req.query('limit') ?? 50) || 50, 200);
-    return c.json(buildReport(await runs.list(limit)));
+    return c.json(buildReport(await runs.list(limit, await syncedRepoPaths())));
   });
 
   app.get('/api/runs/:id', async (c) => {
@@ -213,15 +415,29 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
    * long-lived harness sessions concurrently, and the symbol map cannot absorb
    * that. Returns false when a run is already in flight.
    */
-  const startRun = (commit: string): boolean => {
+  const startRun = (commit: string, prepare?: () => Promise<Config>): boolean => {
     if (activeRun) return false;
 
-    activeRun = runPipeline(client, config, commit, {
-      onRunUpdate: (run) => bus.publish('run', run),
-      onRoleEvent: (role, event) => bus.publish('role', { role, event }),
-    })
+    // `prepare` runs inside the same promise as the pipeline rather than before
+    // it, because the caller has already answered GitHub and cannot await
+    // anything: cloning a repository plus a five-role run is far past the ten
+    // seconds a delivery is given. It also decides which checkout the run uses,
+    // so a webhook can document the repository it names rather than whichever
+    // directory the server happened to start in.
+    activeRun = (async () => {
+      const runConfig = prepare ? await prepare() : config;
+      return runPipeline(client, runConfig, commit, {
+        onRunUpdate: (run) => bus.publish('run', run),
+        onRoleEvent: (role, event) => bus.publish('role', { role, event }),
+      });
+    })()
       .catch((err: unknown) => {
-        bus.publish('error', { message: err instanceof Error ? err.message : String(err) });
+        const message = err instanceof Error ? err.message : String(err);
+        // Also to stderr: a failure before the first role has no run record to
+        // attach to, so the event bus is the only place it would otherwise go —
+        // and nobody is watching an SSE stream at push time.
+        console.error(`run for ${commit.slice(0, 7)} failed: ${message}`);
+        bus.publish('error', { commit, message });
       })
       .finally(() => {
         activeRun = null;
@@ -274,7 +490,26 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
     }
 
     const commit = payload.after ?? 'HEAD';
-    if (!startRun(commit)) {
+    const repository = payload.repository?.full_name;
+    if (!repository) {
+      return c.json({ ok: true, ignored: 'payload carried no repository' });
+    }
+
+    // The delivery names a commit the checkout has probably never seen — it was
+    // authored wherever the pusher was, not here. Sync it first or the run dies
+    // in `resolveCommit` before any role starts.
+    //
+    // An explicit DOCXY_REPO_PATH still wins, so a developer can point the
+    // server at a working tree they are editing. With nothing set, the
+    // repository named in the payload is the one documented: that is the one
+    // the App was installed on, which is the only thing that survives the
+    // server being restarted somewhere else.
+    const pinned = process.env.DOCXY_REPO_PATH?.trim() ? config.repoPath : undefined;
+    const started = startRun(commit, async () => ({
+      ...config,
+      repoPath: await ensureCheckout(repository, defaultBranch, commit, pinned),
+    }));
+    if (!started) {
       return c.json({ ok: true, ignored: 'a run is already in progress', delivery });
     }
 
