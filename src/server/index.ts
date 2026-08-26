@@ -20,6 +20,7 @@ import {
 import { readAppCredentials } from '../github/app.js';
 import { ApprovalError, deny, signOff, staleness } from '../approval/gate.js';
 import { openPullRequest } from '../github/pr.js';
+import { resolveCommit } from '../git/diff.js';
 
 /** Fan-out for server-sent events, so the timeline updates while a run is live. */
 class Broadcaster {
@@ -532,6 +533,10 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
    * twice means one run, not two. Checking only the queue was not enough — a
    * run leaves the queue the moment it starts, so a redelivery arriving
    * mid-run found nothing to match.
+   *
+   * `commit` must already be a resolved SHA. Deduplication is only as good as
+   * the identity it compares, and a symbolic ref is not one: `HEAD` matches
+   * `HEAD` however far the branch moved in between. Callers resolve first.
    */
   const enqueueRun = (
     repoKey: string,
@@ -563,7 +568,19 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
 
   app.post('/api/runs', async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as { commit?: string; force?: boolean };
-    const commit = body.commit || 'HEAD';
+    const ref = body.commit || 'HEAD';
+
+    // Resolved before the queue ever sees it. The queue deduplicates on this
+    // string, and `HEAD` is not the name of one commit: two clicks either side
+    // of a push both said `HEAD`, the second matched the first, and the newer
+    // commit was answered "accepted" without being queued or ever documented.
+    let commit: string;
+    try {
+      commit = await resolveCommit(config.repoPath, ref);
+    } catch {
+      return c.json({ error: `Nothing in ${config.repoPath} resolves to "${ref}".` }, 400);
+    }
+
     const result = enqueueRun(config.repoPath, commit, 'api', undefined, body.force === true);
     if (!result.accepted) return c.json({ error: result.reason }, 503);
     return c.json({ started: true, commit, queued: result.queued, depth: result.depth });
@@ -605,10 +622,18 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
       return c.json({ ok: true, ignored: 'not the default branch' });
     }
 
-    const commit = payload.after ?? 'HEAD';
+    const commit = payload.after;
     const repository = payload.repository?.full_name;
     if (!repository) {
       return c.json({ ok: true, ignored: 'payload carried no repository' });
+    }
+    // Falling back to `HEAD` here used to look harmless. It is the one string
+    // the queue cannot deduplicate on, and it names a different commit in every
+    // checkout — including one this delivery has not synced yet. A push event
+    // without `after` is not a push this can identify, and it is acknowledged
+    // rather than rejected so GitHub stops redelivering it.
+    if (!commit) {
+      return c.json({ ok: true, ignored: 'payload named no commit' });
     }
 
     // The delivery names a commit the checkout has probably never seen — it was
@@ -826,6 +851,14 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
       },
     );
   });
+
+  // Fire and forget, at construction, because it was written and then never
+  // called: a run the previous process abandoned spins in the dashboard as
+  // "still working" until something says otherwise, and nothing did. Not
+  // awaited — the server must accept its first request whether or not the
+  // store is reachable — and its own catch keeps a storage hiccup from taking
+  // the boot down with it.
+  void reapAbandonedRuns();
 
   return { app, bus };
 }

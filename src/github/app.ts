@@ -45,6 +45,22 @@ function appJwt(appId: string, pem: string): string {
  * finished behind it, and lost the pull request to one `fetch failed` — the
  * proposal survived, but somebody then had to notice and republish it by hand.
  */
+/** Back off, but not past a caller that has already given up. */
+async function sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw new Error('The request was cancelled.');
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(new Error('The request was cancelled.'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 async function githubFetch(
   url: string,
   init: RequestInit,
@@ -52,13 +68,19 @@ async function githubFetch(
 ): Promise<Response> {
   let last: Error = new Error('never attempted');
 
+  const caller = init.signal ?? undefined;
+
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    // Without a timeout a hung connection blocks until the platform's own,
+    // which is minutes and long past useful. Composed with the caller's rather
+    // than replacing it: the signature takes a whole `RequestInit`, so a caller
+    // that passes a signal means it — and overwriting it left a run's deadline
+    // unable to cancel the request it was waiting on.
+    const timeout = AbortSignal.timeout(20_000);
     try {
       const response = await fetch(url, {
         ...init,
-        // Without this a hung connection blocks until the platform's own
-        // timeout, which is minutes and long past useful.
-        signal: AbortSignal.timeout(20_000),
+        signal: caller ? AbortSignal.any([caller, timeout]) : timeout,
       });
       // 5xx and 429 are GitHub having a moment; anything else is an answer.
       if (response.status < 500 && response.status !== 429) return response;
@@ -66,9 +88,12 @@ async function githubFetch(
       last = new Error(`HTTP ${response.status}`);
     } catch (cause) {
       last = cause instanceof Error ? cause : new Error(String(cause));
+      // A caller cancelling is a decision, not a fault. Retrying it would work
+      // around the thing that asked for the work to stop.
+      if (caller?.aborted) throw last;
       if (attempt === attempts) break;
     }
-    await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** (attempt - 1)));
+    await sleepUnlessAborted(500 * 2 ** (attempt - 1), caller);
   }
 
   throw new Error(

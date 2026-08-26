@@ -36,6 +36,9 @@ its own stage below.
 
 ### 1.1 Install
 
+docxy runs from a checkout, not from a published package. Clone it and install
+its dependencies — this is the copy every later stage runs from.
+
 ```bash
 git clone https://github.com/Arindam200/docxy.git
 cd docxy
@@ -109,7 +112,7 @@ Or point it at your own:
 npx tsx src/cli.ts run HEAD --repo /path/to/your/repo
 ```
 
-You will see each role start and finish. At the end docxy prints the
+You see each role start and finish. At the end docxy prints the
 classification, the proposed edits, and the changelog entry.
 
 **Without a GitHub App configured, that is where it stops** — the proposal is
@@ -402,16 +405,16 @@ kept.
 Every variable, with its default and what it is for, is documented in
 [`.env.example`](../.env.example). The ones worth knowing early:
 
-| Variable | Default | What it does |
-|---|---|---|
-| `NEBIUS_API_KEY` | — | Required. Serves every model |
-| `DOCXY_REQUIRE_APPROVAL` | `false` | Hold proposals behind a human sign-off |
-| `DOCXY_REPO_PATH` | the current directory | Which repository to document |
-| `DOCXY_DOCS_BRANCH` | unset | Keep docs on their own branch |
-| `DATABASE_URL` | unset | Postgres instead of JSON files |
-| `DOCXY_ROLE_MAX_ATTEMPTS` | `3` | Attempts per role before it gives up |
-| `DOCXY_SESSION_MAX_TURNS` | `12` | Turns before a session is retired |
-| `DOCXY_PORT` | `4317` | API server port |
+| Variable | Type | Default | Description |
+|---|---|---|---|
+| `NEBIUS_API_KEY` | string | *required* | Serves every model. |
+| `DOCXY_REQUIRE_APPROVAL` | boolean | `false` | Hold proposals behind a human sign-off. |
+| `DOCXY_REPO_PATH` | path | the current directory | Which repository to document. |
+| `DOCXY_DOCS_BRANCH` | string | none | Keep docs on their own branch. |
+| `DATABASE_URL` | URL | none | Postgres instead of JSON files. |
+| `DOCXY_ROLE_MAX_ATTEMPTS` | integer | `3` | Attempts per role before it gives up. |
+| `DOCXY_SESSION_MAX_TURNS` | integer | `12` | Turns before a session is retired. |
+| `DOCXY_PORT` | integer | `4317` | API server port. |
 
 ---
 

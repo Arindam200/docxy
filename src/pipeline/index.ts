@@ -175,6 +175,17 @@ export async function runPipeline(
   const hooks: PipelineHooks = options;
   const { runs, sessions, knowledge } = createStores(config);
 
+  /**
+   * The whole run's budget, started at the door.
+   *
+   * It used to be created four awaits in — after the diff, the symbol map, the
+   * docs worktree, and the price table — so everything before that point was
+   * outside the budget it is named for. A repository slow to read could spend
+   * minutes there and still hand the agents a full clock, and the lane behind
+   * it waited for all of it.
+   */
+  const runDeadline = AbortSignal.timeout(config.agent.runTimeoutMs);
+
   const diff = await readCommitDiff(config.repoPath, commitRef);
   const priorMap = await knowledge.load();
 
@@ -238,10 +249,6 @@ export async function runPipeline(
 
   // Once per run, cached for an hour, and empty if the endpoint is unreachable.
   const prices = await loadPrices(config);
-
-  // Started when the run starts, so time spent on a role that had to be retried
-  // counts against the same budget as everything else.
-  const runDeadline = AbortSignal.timeout(config.agent.runTimeoutMs);
 
   /**
    * Serialized, coalescing, and never fatal.
@@ -516,7 +523,24 @@ export async function runPipeline(
 
       fresh = plan.freshSession;
       nudge = plan.nudge ?? '';
-      if (plan.delayMs > 0) await sleep(plan.delayMs);
+      if (plan.delayMs > 0) {
+        // Backing off spends the run's budget like everything else does. A
+        // rate-limited role that sleeps past the deadline has spent it
+        // sleeping, and waking to try again would only spend more — so this
+        // ends the same way an exhausted budget ends anywhere else.
+        try {
+          await sleep(plan.delayMs, runDeadline);
+        } catch {
+          lastError = new Error(
+            `[${role.title}] the run exceeded its ` +
+              `${Math.round(config.agent.runTimeoutMs / 1000)}s budget while backing off`,
+          );
+          finish('failed', 'timeout');
+          trace.error = lastError.message;
+          await persist();
+          throw lastError;
+        }
+      }
     }
 
     finish('failed', 'harness-error');

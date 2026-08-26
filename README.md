@@ -135,7 +135,7 @@ needs no third-party account. TrueForge's own sandbox can be switched on with
 By default a run signs itself off and opens the pull request. That is not an
 absence of review; it is review in the place teams already do it. Nothing merges
 without someone approving it on GitHub, and a pipeline that stops short of
-opening anything reviews nothing at all — it just goes quiet.
+opening anything reviews nothing at all — it goes quiet instead.
 
 What that default protects is the *quality* of what gets opened. A proposal the
 Coordinator rejected, or one that failed validation, still opens — as a **draft

@@ -13,6 +13,7 @@ import { RunStore } from '../src/pipeline/store.js';
 import { costOf, priceFor } from '../src/trueforge/pricing.js';
 import { classifyTurnError } from '../src/trueforge/run.js';
 import { renderDiffForPrompt } from '../src/git/diff.js';
+import { nextPage } from '../src/github/checkout.js';
 import type { CommitDiff, DiffFile } from '../src/types.js';
 import { planRetry } from '../src/pipeline/retry.js';
 import type { RoleName } from '../src/config.js';
@@ -77,6 +78,29 @@ check('confidence junk', normalizeConfidence('abc', 0.4) === 0.4);
   const keptSmall = renderDiffForPrompt(mixed);
   check('the smallest file survives a crowded diff',
     keptSmall.includes('x'.repeat(300)) && keptSmall.includes('src/api.ts'));
+
+  // The notice about dropped files is itself a rendering, and a commit that
+  // drops twenty thousand files would otherwise pay a line for every one —
+  // overflowing the context window on the explanation for why the diff was
+  // trimmed to protect it.
+  const deep = `gen/${'nested/'.repeat(15)}`;
+  const many = commitOf(
+    Array.from({ length: 20_000 }, (_, i) => file(`${deep}component-${i}.tsx`, 200)),
+  );
+  const manyRendered = renderDiffForPrompt(many);
+  check('a diff that drops thousands of files is still bounded',
+    manyRendered.length < 200_000, `got ${manyRendered.length}`);
+  check('the files past the manifest budget are counted, not listed',
+    manyRendered.includes('too many to list by name'));
+  check('the manifest still names the files it can',
+    manyRendered.includes('component-'));
+
+  // A release commit can paste a whole changelog into its message body.
+  const chatty = commitOf([file('src/api.ts', 100)]);
+  const rendered2 = renderDiffForPrompt({ ...chatty, body: 'y'.repeat(50_000) });
+  check('an enormous commit message body is truncated',
+    rendered2.length < 20_000 && rendered2.includes('message truncated'),
+    `got ${rendered2.length}`);
 }
 
 // --- turn failure classification -----------------------------------------
@@ -441,6 +465,20 @@ check('empty history has no rates',
   check('the current name wins over the retired one', reload() === false);
 
   process.env = before;
+}
+
+// --- installation pagination ---------------------------------------------
+// An installation past a hundred repositories is not an error, and the ones on
+// page two were silently absent from every listing that matters.
+{
+  const link =
+    '<https://api.github.com/installation/repositories?per_page=100&page=2>; rel="next", ' +
+    '<https://api.github.com/installation/repositories?per_page=100&page=5>; rel="last"';
+  check('the next page is followed',
+    nextPage(link) === 'https://api.github.com/installation/repositories?per_page=100&page=2');
+  check('the last page ends the walk',
+    nextPage('<https://api.github.com/x?page=1>; rel="prev"') === null);
+  check('no link header ends the walk', nextPage(null) === null);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

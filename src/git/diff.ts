@@ -21,6 +21,24 @@ const PATCH_BUDGET = 12_000;
  * documentation consequences.
  */
 const DIFF_BUDGET = 180_000;
+/**
+ * The share of the whole-diff budget the notice about dropped files may spend.
+ *
+ * Naming every dropped file costs a line each, and the commits that drop files
+ * are exactly the ones that drop thousands — so the notice explaining why the
+ * diff was trimmed could blow the context window the trim exists to protect.
+ * Reserved up front rather than added afterwards, and the list inside it is
+ * capped with a count, so the rendering has a real upper bound.
+ */
+const MANIFEST_BUDGET = 6_000;
+/**
+ * How much of a commit message body is worth carrying into the prompt.
+ *
+ * Bounded for the same reason as everything else here: a release commit can
+ * paste an entire changelog into its body, and a header is not the place to
+ * spend the budget the diff needs.
+ */
+const BODY_BUDGET = 4_000;
 /** ASCII unit separator — safe against any character a commit message may contain. */
 const SEP = '\x1f';
 
@@ -171,14 +189,14 @@ function renderFile(file: DiffFile): string {
  * generated ones keeps the hand-edited one. The originally-listed order is
  * restored afterwards: a diff should read in the order git reported it.
  */
-function withinBudget(files: DiffFile[]) {
+function withinBudget(files: DiffFile[], budget: number) {
   const rendered = files.map((file) => ({ file, size: renderFile(file).length + 2 }));
   const bySize = [...rendered].sort((a, b) => a.size - b.size);
 
   const keep = new Set<DiffFile>();
   let spent = 0;
   for (const { file, size } of bySize) {
-    if (spent + size > DIFF_BUDGET) continue;
+    if (spent + size > budget) continue;
     spent += size;
     keep.add(file);
   }
@@ -189,29 +207,61 @@ function withinBudget(files: DiffFile[]) {
   };
 }
 
+/**
+ * Name the files that did not fit, within a budget of its own.
+ *
+ * Every dropped file that can be named is named — a role that cannot see a file
+ * must not conclude the file was unchanged. But a commit that drops ten
+ * thousand files cannot have ten thousand lines about it either, so the list
+ * stops at the reserve and the remainder is reported as a count. A number is a
+ * worse answer than a name and a far better one than an overflowed prompt.
+ */
+function droppedManifest(dropped: DiffFile[]): string[] {
+  if (dropped.length === 0) return [];
+
+  const lines: string[] = [];
+  let spent = 0;
+  for (const file of dropped) {
+    const line = `  - ${file.path} [${file.status}] +${file.additions}/-${file.deletions}`;
+    if (spent + line.length + 1 > MANIFEST_BUDGET) break;
+    spent += line.length + 1;
+    lines.push(line);
+  }
+
+  const unnamed = dropped.length - lines.length;
+  if (unnamed > 0) lines.push(`  - … and ${unnamed} more, too many to list by name.`);
+
+  return [
+    '',
+    `NOTE: ${dropped.length} of these files were too large to include and are ` +
+      `listed below by name only. Treat them as changed but unread, and say so ` +
+      `in your output rather than assuming they are unaffected:`,
+    ...lines,
+  ];
+}
+
 /** Render a diff as the prompt payload handed to the agents. */
 export function renderDiffForPrompt(diff: CommitDiff): string {
-  const { kept, dropped } = withinBudget(diff.files);
+  // Chosen twice. The first pass asks what fits when nothing has to be
+  // explained; if that drops files, the explanation costs budget of its own,
+  // so the second pass chooses against what is actually left. Reserving the
+  // notice unconditionally would shrink every ordinary diff to pay for a notice
+  // it never prints.
+  const first = withinBudget(diff.files, DIFF_BUDGET);
+  const { kept, dropped } =
+    first.dropped.length === 0 ? first : withinBudget(diff.files, DIFF_BUDGET - MANIFEST_BUDGET);
+
+  const body = diff.body.slice(0, BODY_BUDGET);
+  const truncatedBody = body.length < diff.body.length ? `${body}\n… message truncated.` : body;
 
   const header = [
     `commit ${diff.sha}`,
     `author: ${diff.author}`,
     `date:   ${diff.date}`,
     `subject: ${diff.subject}`,
-    diff.body ? `\n${diff.body}\n` : '',
+    diff.body ? `\n${truncatedBody}\n` : '',
     `files changed: ${diff.files.length} (+${diff.totalAdditions} / -${diff.totalDeletions})`,
-    // Named, never silent. A role that cannot see a file must not conclude the
-    // file was unchanged, and a reader looking at a thin classification needs
-    // to know the diff was thinned before the model ever saw it.
-    ...(dropped.length > 0
-      ? [
-          '',
-          `NOTE: ${dropped.length} of these files were too large to include and are ` +
-            `listed below by name only. Treat them as changed but unread, and say so ` +
-            `in your output rather than assuming they are unaffected:`,
-          ...dropped.map((f) => `  - ${f.path} [${f.status}] +${f.additions}/-${f.deletions}`),
-        ]
-      : []),
+    ...droppedManifest(dropped),
   ].join('\n');
 
   return `${header}\n\n${kept.map(renderFile).join('\n\n')}`;
