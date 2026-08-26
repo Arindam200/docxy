@@ -407,7 +407,10 @@ async function main(): Promise<void> {
       console.log(`${c.green('✓')} Fully approved. Opening the pull request...`);
       const files = await rebuildProposedFiles(config, run);
       try {
-        const pr = await openPullRequest(config, run, files);
+        // The pipeline's own judgement, replayed. A proposal the Coordinator
+        // rejected or validation failed stays a draft that says why, however
+        // many days sat between the run and this sign-off.
+        const pr = await openPullRequest(config, run, files, run.publication);
         run.pullRequestUrl = pr.url;
         run.status = 'done';
         run.finishedAt = new Date().toISOString();

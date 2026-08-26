@@ -782,6 +782,11 @@ export async function runPipeline(
     const { scope, rationale } = decideScope(classification, changelog, verdict.scope);
     run.approval = createApprovalRequest(run.id, scope, rationale, verdict.summary);
 
+    // Decided here, where the verdict and the validation report are still in
+    // hand, and recorded on the run so whoever publishes it later replays this
+    // judgement rather than re-deriving it — or, as it was, losing it.
+    run.publication = { draft: concerns.length > 0, concerns };
+
     if (config.approval.required) {
       // The gate exists and somebody asked for it. Stop here; the server and the
       // CLI both know how to carry an approved run the rest of the way.
@@ -805,10 +810,7 @@ export async function runPipeline(
     await flush();
 
     try {
-      const pr = await openPullRequest(config, run, proposedFiles, {
-        draft: concerns.length > 0,
-        concerns,
-      });
+      const pr = await openPullRequest(config, run, proposedFiles, run.publication);
       run.pullRequestUrl = pr.url;
       run.status = 'done';
       run.error = concerns.length > 0 ? concerns.join(' | ') : undefined;

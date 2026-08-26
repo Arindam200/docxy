@@ -7,7 +7,9 @@ import { checkLinks } from '../src/validate/links.js';
 import { decideScope, createApprovalRequest, signOff, deny, ApprovalError } from '../src/approval/gate.js';
 import { openDocsTree, resolveBaseRef } from '../src/git/worktree.js';
 import { listDocs, readRepoFile } from '../src/git/repo.js';
-import { prBaseBranch } from '../src/config.js';
+import { loadConfig, prBaseBranch } from '../src/config.js';
+import type { Config } from '../src/config.js';
+import { RunStore } from '../src/pipeline/store.js';
 import { costOf, priceFor } from '../src/trueforge/pricing.js';
 import { classifyTurnError } from '../src/trueforge/run.js';
 import { renderDiffForPrompt } from '../src/git/diff.js';
@@ -369,6 +371,77 @@ const empty = buildReport([]);
 check('empty history has no rates',
   empty.window.runs === 0 && empty.successRate === undefined &&
   empty.totals.costUsd === undefined && empty.roles.length === 0);
+
+// --- run scoping ---------------------------------------------------------
+// A run id is printed in every dashboard URL, so naming one in a query must
+// narrow the listing rather than reach past the repository filter.
+{
+  const dir = await mkdtemp(join(tmpdir(), 'docxy-runs-'));
+  const store = new RunStore({ stateDir: dir } as Config);
+
+  const runIn = (id: string, repoPath: string): RunRecord => ({
+    id,
+    repoPath,
+    commit: { sha: `${id}0000`, shortSha: id.slice(0, 7), subject: 's' },
+    startedAt: '2026-08-01T00:00:00.000Z',
+    status: 'done',
+    traces: [
+      {
+        role: 'change-analyst',
+        sessionId: 's1',
+        startedAt: '2026-08-01T00:00:00.000Z',
+        status: 'done',
+        reusedSession: false,
+        events: [{ at: '2026-08-01T00:00:01.000Z', kind: 'note', text: 'hello' }],
+      },
+    ],
+    priorSymbolCount: 0,
+    newSymbolCount: 0,
+  });
+
+  const mine = runIn('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', '/repos/mine');
+  const theirs = runIn('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', '/repos/theirs');
+  await store.save(mine);
+  await store.save(theirs);
+
+  const scope = ['/repos/mine'];
+  const own = await store.logs({ limit: 50, runId: mine.id, repoPaths: scope });
+  check('a named run inside the scope is readable', own.entries.length === 1);
+  const other = await store.logs({ limit: 50, runId: theirs.id, repoPaths: scope });
+  check('a named run outside the scope returns nothing', other.entries.length === 0);
+  const listed = await store.logs({ limit: 50, repoPaths: scope });
+  check('an unnamed listing stays inside the scope',
+    listed.entries.every((entry) => entry.runId === mine.id));
+
+  await rm(dir, { recursive: true, force: true });
+}
+
+// --- the retired approval variable ---------------------------------------
+// DOCXY_APPROVAL_MODE stopped being read. A deployment that had asked for a
+// gate with it must not silently lose one, and the new name must still win.
+{
+  const before = { ...process.env };
+  const reload = () => loadConfig().approval.required;
+
+  delete process.env.DOCXY_REQUIRE_APPROVAL;
+  delete process.env.DOCXY_APPROVAL_MODE;
+  check('no approval setting means no gate', reload() === false);
+
+  process.env.DOCXY_APPROVAL_MODE = 'always';
+  check('a retired "always" still gates', reload() === true);
+
+  process.env.DOCXY_APPROVAL_MODE = 'elevated';
+  check('a retired "elevated" still gates', reload() === true);
+
+  process.env.DOCXY_APPROVAL_MODE = 'auto';
+  check('a retired "auto" asked for no gate and gets none', reload() === false);
+
+  process.env.DOCXY_APPROVAL_MODE = 'always';
+  process.env.DOCXY_REQUIRE_APPROVAL = 'false';
+  check('the current name wins over the retired one', reload() === false);
+
+  process.env = before;
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

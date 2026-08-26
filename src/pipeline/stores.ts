@@ -34,8 +34,16 @@ export interface LogQuery {
   limit: number;
   kind?: string;
   role?: RoleName;
-  /** A single run, which bypasses the repository filter. */
+  /**
+   * A single run. It narrows the listing within `repoPaths`; it never widens
+   * past it. A run id is guessable from any dashboard URL, so a query that
+   * named one used to be the way to read another project's role events.
+   */
   runId?: string;
+  /**
+   * Repositories whose runs the caller is allowed to see. Omitted only by
+   * callers that already are the deployment — the CLI reading its own runs.
+   */
   repoPaths?: string[];
 }
 

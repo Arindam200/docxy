@@ -141,6 +141,31 @@ function envBool(key: string, fallback: boolean): boolean {
 }
 
 /**
+ * Whether the approval gate holds proposals back.
+ *
+ * `DOCXY_REQUIRE_APPROVAL` replaced `DOCXY_APPROVAL_MODE`, whose `elevated` and
+ * `always` values *did* gate. Reading only the new name would answer a
+ * deployment that had asked for a gate by quietly not having one — the one
+ * direction this must never fail in — so the retired name still turns the gate
+ * on, loudly, until whoever set it has moved across.
+ */
+function approvalRequired(): boolean {
+  const explicit = process.env.DOCXY_REQUIRE_APPROVAL;
+  if (explicit !== undefined && explicit !== '') return envBool('DOCXY_REQUIRE_APPROVAL', false);
+
+  const retired = env('DOCXY_APPROVAL_MODE').trim().toLowerCase();
+  if (retired === '' || retired === 'auto') return false;
+
+  console.warn(
+    `DOCXY_APPROVAL_MODE is no longer read (it was set to "${retired}"). The approval ` +
+      'gate is now one setting: DOCXY_REQUIRE_APPROVAL=true. Treating this as ' +
+      'DOCXY_REQUIRE_APPROVAL=true so the gate you asked for is still there — set it ' +
+      'explicitly and drop DOCXY_APPROVAL_MODE.',
+  );
+  return true;
+}
+
+/**
  * Default roster model. DeepSeek V4 Pro is chosen because every role in this
  * pipeline must emit strict JSON, and it advertises `json_mode` and
  * `structured_outputs` alongside a 1M context window — enough to hold a large
@@ -223,7 +248,7 @@ export function loadConfig(overrides: Partial<{ repoPath: string }> = {}): Confi
     },
     approval: {
       staleAfterMinutes: envInt('DOCXY_APPROVAL_STALE_MINUTES', 60),
-      required: envBool('DOCXY_REQUIRE_APPROVAL', false),
+      required: approvalRequired(),
     },
     agent: {
       maxAttempts: Math.max(1, envInt('DOCXY_ROLE_MAX_ATTEMPTS', 3)),

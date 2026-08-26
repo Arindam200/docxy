@@ -45,6 +45,16 @@ export class RunStore implements RunStorage {
     }
   }
 
+  /**
+   * Whether a run belongs to one of the repositories the caller may see.
+   *
+   * `list` applies the same rule as it reads; this exists for the paths that
+   * address a run by id and so never pass through the listing at all.
+   */
+  private visible(run: RunRecord, repoPaths?: string[]): boolean {
+    return !repoPaths || repoPaths.length === 0 || repoPaths.includes(run.repoPath);
+  }
+
   /** Newest first. */
   async list(limit = 50, repoPaths?: string[]): Promise<RunRecord[]> {
     let names: string[];
@@ -78,8 +88,12 @@ export class RunStore implements RunStorage {
    * index to ask. The window is capped at fifty runs for exactly that reason.
    */
   async logs(query: LogQuery): Promise<LogPage> {
+    // A named run still has to sit inside the repositories the caller may see.
+    // Loading it by id alone would let anyone holding a run id read the events
+    // of a project they were never granted.
+    const named = query.runId ? await this.load(query.runId) : null;
     const runs = query.runId
-      ? [await this.load(query.runId)].filter((run) => run !== null)
+      ? [named].filter((run) => run !== null).filter((run) => this.visible(run, query.repoPaths))
       : await this.list(50, query.repoPaths);
 
     const entries: LogEntry[] = runs.flatMap((run) =>

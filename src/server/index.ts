@@ -357,10 +357,13 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
       // answer for a query string naming a role that does not exist.
       query.role = role as RoleName;
     }
-    // A named run is addressed directly; anything else is scoped to the
-    // repositories this deployment is synced to.
+    // Scoped to the repositories this deployment is synced to, whether or not
+    // a run was named. Naming one narrows the listing; it does not reach past
+    // the filter. Run ids are printed in the dashboard's own URLs, so a `?run=`
+    // that skipped this was the way to read another repository's role events
+    // with nothing but a signed-in session.
+    query.repoPaths = await syncedPaths();
     if (runId) query.runId = runId;
-    else query.repoPaths = await syncedPaths();
 
     return c.json(await runs.logs(query));
   });
@@ -377,8 +380,22 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
     return c.json(buildReport(await runs.list(limit, await syncedPaths())));
   });
 
+  /**
+   * A run by id, but only one this dashboard is synced to.
+   *
+   * `load` addresses the store by primary key and knows nothing about which
+   * repositories the caller may see, so the scope check belongs here — and a
+   * run outside it is reported as absent rather than forbidden, because
+   * "forbidden" confirms the id names something real.
+   */
+  const scopedRun = async (id: string): Promise<RunRecord | null> => {
+    const run = await runs.load(id);
+    if (!run) return null;
+    return (await syncedPaths()).includes(run.repoPath) ? run : null;
+  };
+
   app.get('/api/runs/:id', async (c) => {
-    const run = await runs.load(c.req.param('id'));
+    const run = await scopedRun(c.req.param('id'));
     if (!run) return c.json({ error: 'No such run.' }, 404);
     const withStaleness = run.approval
       ? { ...run, approvalStaleness: staleness(run.approval, config) }
@@ -387,7 +404,7 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
   });
 
   app.get('/api/runs/:id/files', async (c) => {
-    const run = await runs.load(c.req.param('id'));
+    const run = await scopedRun(c.req.param('id'));
     if (!run) return c.json({ error: 'No such run.' }, 404);
     const files = await rebuildProposedFiles(config, run);
     return c.json(files.map((f) => ({ path: f.path, before: f.before, after: f.after })));
@@ -717,7 +734,7 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
   });
 
   app.post('/api/runs/:id/approve', async (c) => {
-    const run = await runs.load(c.req.param('id'));
+    const run = await scopedRun(c.req.param('id'));
     if (!run?.approval) return c.json({ error: 'No such run, or it has no approval request.' }, 404);
 
     const body = (await c.req.json().catch(() => ({}))) as { by?: string };
@@ -739,7 +756,9 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
       }
 
       const files = await rebuildProposedFiles(config, run);
-      const pr = await openPullRequest(config, run, files);
+      // As in the CLI: the draft intent and the concerns were decided when the
+      // run finished, and the sign-off does not overturn them.
+      const pr = await openPullRequest(config, run, files, run.publication);
       run.pullRequestUrl = pr.url;
       run.status = 'done';
       run.finishedAt = new Date().toISOString();
@@ -757,7 +776,7 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
   });
 
   app.post('/api/runs/:id/deny', async (c) => {
-    const run = await runs.load(c.req.param('id'));
+    const run = await scopedRun(c.req.param('id'));
     if (!run?.approval) return c.json({ error: 'No such run, or it has no approval request.' }, 404);
 
     const body = (await c.req.json().catch(() => ({}))) as { by?: string; reason?: string };

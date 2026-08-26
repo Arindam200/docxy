@@ -16,6 +16,67 @@ async function git(cwd: string, args: string[]): Promise<string> {
   return stdout.trim();
 }
 
+/**
+ * The remote branch is standing on work docxy did not write.
+ *
+ * Reported rather than forced past, and distinguished from an ordinary push
+ * failure because the answer is different: nothing here is retryable, and the
+ * branch needs a human to look at it.
+ */
+export class BranchConflictError extends Error {}
+
+/**
+ * Push over a branch this run published earlier — and only such a branch.
+ *
+ * `--force-with-lease` needs an expected value, and there is no remote-tracking
+ * ref to supply one: the push goes to a tokenized URL minted for this call, not
+ * to a configured remote. So the tip is read explicitly, checked for docxy's
+ * own authorship, and then leased against exactly what was read. A branch that
+ * moves between the read and the push refuses the push rather than resolving
+ * the race in our favour.
+ */
+async function republish(
+  worktree: string,
+  remote: string,
+  branch: string,
+  run: RunRecord,
+  botEmail: string,
+): Promise<void> {
+  const listed = await git(worktree, ['ls-remote', remote, `refs/heads/${branch}`]).catch(() => '');
+  const remoteSha = listed.split(/\s+/)[0] ?? '';
+  if (!remoteSha) {
+    // The branch is gone, or was never the reason for the rejection. Retry
+    // plainly; whatever fails now fails with its own message.
+    await git(worktree, ['push', remote, `HEAD:refs/heads/${branch}`]);
+    return;
+  }
+
+  await git(worktree, ['fetch', '--no-tags', '--force', remote, `refs/heads/${branch}`]);
+  const [committer = '', ...body] = (
+    await git(worktree, ['log', '-1', '--format=%ce%n%B', remoteSha])
+  ).split('\n');
+
+  // Two things have to hold: the App committed the tip, and the tip says it was
+  // drafted from this run's commit. The first rules out a collaborator's push,
+  // the second rules out an unrelated docxy branch that collided on the name.
+  const ours = committer.trim() === botEmail && body.join('\n').includes(run.commit.sha);
+  if (!ours) {
+    throw new BranchConflictError(
+      `The remote branch "${branch}" carries commits this run did not publish, so ` +
+        'pushing over it would destroy them. Nothing was pushed, and the proposal is ' +
+        'committed on that branch locally — inspect the remote branch, then delete or ' +
+        'rename it if the work on it is finished.',
+    );
+  }
+
+  await git(worktree, [
+    'push',
+    `--force-with-lease=refs/heads/${branch}:${remoteSha}`,
+    remote,
+    `HEAD:refs/heads/${branch}`,
+  ]);
+}
+
 export function buildPrBody(run: RunRecord, concerns: string[] = []): string {
   const lines: string[] = [];
   const c = run.classification;
@@ -244,17 +305,21 @@ export async function openPullRequest(
       try {
         await git(worktree, ['push', remote, `HEAD:refs/heads/${branch}`]);
       } catch (first) {
-        // The branch already exists with different content, which means this
-        // run was published before and is being republished. The name encodes
-        // this run's id, so nothing but an earlier attempt at the same proposal
-        // can be standing on it.
+        // The branch already exists with different content, which usually means
+        // this run was published before and is being republished. The name
+        // encodes this run's id, so an earlier attempt at the same proposal is
+        // by far the likeliest thing standing on it — but likeliest is not
+        // certain, and an unconditional `--force` answers a collaborator's
+        // commits by deleting them.
         const stale =
           first instanceof Error &&
           /non-fast-forward|\brejected\b|already exists/i.test(first.message);
         if (!stale) throw first;
-        await git(worktree, ['push', '--force', remote, `HEAD:refs/heads/${branch}`]);
+        await republish(worktree, remote, branch, run, app.botEmail);
       }
     } catch (err) {
+      // Already precise about what is on the remote and why it was left alone.
+      if (err instanceof BranchConflictError) throw err;
       // The token is in the command line, so it is in git's error output too.
       const detail =
         err instanceof Error ? err.message.split('\n').slice(-3).join(' ') : String(err);

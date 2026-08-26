@@ -30,6 +30,7 @@ import type {
   Classification,
   DocsProposal,
   ImpactMap,
+  PublicationIntent,
   RoleFailure,
   RoleUsage,
   RunStatus,
@@ -127,6 +128,22 @@ export const runOutputs = pgTable('run_outputs', {
   docs: jsonb('docs').$type<DocsProposal>(),
   changelog: jsonb('changelog').$type<ChangelogProposal>(),
   validation: jsonb('validation').$type<ValidationReport>(),
+  /**
+   * The publication decision, taken while the run was still in memory.
+   *
+   * The approval gate can hold a proposal for days and the process that
+   * finally publishes it is not the one that judged it, so a decision left
+   * unwritten is a decision lost — and the pull request opens clean over the
+   * pipeline's own objections.
+   */
+  publication: jsonb('publication').$type<PublicationIntent>(),
+  /**
+   * Roles that failed without stopping the run.
+   *
+   * Read back for the same reason: the pull request body says which agents did
+   * not finish, and it is written long after they did not.
+   */
+  degraded: jsonb('degraded').$type<Array<{ role: string; reason: string }>>(),
 });
 
 export const runRoles = pgTable(

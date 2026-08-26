@@ -90,6 +90,8 @@ export class PgRunStore implements RunStorage {
         docs: run.docs ?? null,
         changelog: run.changelog ?? null,
         validation: run.validation ?? null,
+        publication: run.publication ?? null,
+        degraded: run.degraded ?? null,
       };
       await tx
         .insert(runOutputs)
@@ -308,23 +310,30 @@ export class PgRunStore implements RunStorage {
   async logs(query: LogQuery): Promise<LogPage> {
     const db = getDb();
 
+    // Same reason as `load`: a `?run=` that is not a UUID is a miss, and
+    // Postgres would answer it with a cast error instead of an empty page.
+    if (query.runId && !UUID.test(query.runId)) return { entries: [], total: 0, kinds: [] };
+
+    // As in `list`: naming a repository is what makes it visible, whether or
+    // not it has run yet.
+    const visibleProjects = [
+      ...new Set(
+        await Promise.all(
+          (query.repoPaths && query.repoPaths.length > 0
+            ? query.repoPaths
+            : [this.config.repoPath]
+          ).map((path) => projectId(db, path)),
+        ),
+      ),
+    ];
+
+    // A named run narrows within those projects rather than replacing them. Run
+    // ids are visible in every dashboard URL, so a query that named one was a
+    // way to read the events of a repository the caller was never granted.
+    const withinScope = inArray(runs.projectId, visibleProjects);
     const scope = query.runId
-      ? eq(runs.id, query.runId)
-      : inArray(
-          runs.projectId,
-          // As in `list`: naming a repository is what makes it visible, whether
-          // or not it has run yet.
-          [
-            ...new Set(
-              await Promise.all(
-                (query.repoPaths && query.repoPaths.length > 0
-                  ? query.repoPaths
-                  : [this.config.repoPath]
-                ).map((path) => projectId(db, path)),
-              ),
-            ),
-          ],
-        );
+      ? and(withinScope, eq(runs.id, query.runId))
+      : withinScope;
 
     const filters = [
       scope,
@@ -530,6 +539,9 @@ export class PgRunStore implements RunStorage {
         docs: outputs?.docs ?? undefined,
         changelog: outputs?.changelog ?? undefined,
         validation: outputs?.validation ?? undefined,
+        publication: outputs?.publication ?? undefined,
+        // SAFETY: written only by `write`, always from `RunRecord.degraded`.
+        degraded: (outputs?.degraded as RunRecord['degraded']) ?? undefined,
         // Absent, not empty: a run saved before any file was proposed should
         // round-trip as `undefined` the way the JSON store leaves it.
         proposedFiles: proposedFiles.length > 0 ? proposedFiles : undefined,
