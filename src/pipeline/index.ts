@@ -213,6 +213,29 @@ export async function runPipeline(
     newSymbolCount: 0,
   };
 
+  /**
+   * Free-form standing instructions, as saved from the dashboard.
+   *
+   * `PUT /api/instructions` has written this file since the endpoint existed
+   * and nothing ever read it, so every instruction anyone typed into the
+   * dashboard was persisted, rendered back to them, and silently ignored. The
+   * two drafting roles are the ones the endpoint's own description promises
+   * read it, and they are the two where a house style actually applies.
+   */
+  const standingInstructions = await readRepoFile(config.stateDir, 'instructions.md');
+  const houseStyle = standingInstructions?.trim()
+    ? [
+        '',
+        '## Standing instructions for this repository',
+        '',
+        'These come from the team, not from the commit. They outrank your default',
+        'style where the two disagree, and they never license inventing a fact the',
+        'diff does not support.',
+        '',
+        standingInstructions.trim(),
+      ].join('\n')
+    : '';
+
   // Once per run, cached for an hour, and empty if the endpoint is unreachable.
   const prices = await loadPrices(config);
 
@@ -396,6 +419,17 @@ export async function runPipeline(
 
         if (result.turnId) trace.turnId = result.turnId;
         raw = result.text;
+
+        // Counted here, not after a successful parse.
+        //
+        // The count exists to retire a session before its transcript overflows,
+        // and the transcript grows the moment a turn is *submitted* — whether
+        // or not the answer came back usable. Counting only successes meant a
+        // session that kept failing never reached the limit, so it never
+        // rotated, so it kept growing: precisely the spiral rotation was built
+        // to stop. A `max_tokens` failure is the worst case of all, because the
+        // model generated its whole budget into the transcript before failing.
+        await sessions.recordTurn(role.name).catch(() => {});
         // Recorded before anything can throw. The raw text is the field that
         // explains a failure — a `max_tokens breached` error has as often meant
         // a repetition loop as a budget that was too small — and it is what
@@ -419,9 +453,6 @@ export async function runPipeline(
         } else {
           try {
             const parsed = extractJson<T>(role.title, result.text);
-            // The turn is only counted once it produced something usable, so a
-            // session is never retired on the strength of turns that failed.
-            await sessions.recordTurn(role.name).catch(() => {});
             finish('done');
             note(
               'result',
@@ -461,6 +492,9 @@ export async function runPipeline(
           lastError = new Error(
             `[${role.title}] no answer within ${Math.round(config.agent.attemptTimeoutMs / 1000)}s`,
           );
+          // Abandoned here, but the harness still has it and the transcript
+          // still grew, so it counts against the session like any other turn.
+          await sessions.recordTurn(role.name).catch(() => {});
           failure = 'transient';
           note('error', lastError.message);
         } else {
@@ -575,6 +609,7 @@ export async function runPipeline(
               '## Commit diff',
               '',
               diffText,
+              houseStyle,
             ].join('\n'),
           ),
       invoke<ChangelogProposal>(
@@ -593,6 +628,7 @@ export async function runPipeline(
           `## Existing changelog (${config.docs.changelogPath}) — match its voice`,
           '',
           existingChangelog.slice(0, 6000),
+          houseStyle,
         ].join('\n'),
       ),
     ]);

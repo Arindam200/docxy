@@ -95,13 +95,11 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
   const app = new Hono();
   const { runs, knowledge: knowledgeStore } = createStores(config);
   const bus = new Broadcaster();
-  /** Guards against two runs racing on the same commit. */
-  let activeRun: Promise<unknown> | null = null;
 
   /**
    * Close out runs abandoned by a previous process.
    *
-   * `activeRun` lives in memory, so any run still marked `running` when this
+   * The lanes below live in memory, so any run still marked `running` when this
    * server starts belongs to a process that is gone — killed, crashed, or
    * redeployed mid-pipeline. Left alone it sits in the dashboard spinning
    * forever, which reads as "still working" when the truth is "nobody is
@@ -421,26 +419,46 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
    * is work to do next. Dropped, the commit was never documented and nothing
    * anywhere said so, because GitHub had already been answered 200.
    */
-  const queue: QueuedRun[] = [];
-  /** Bounded so a burst of pushes cannot grow this without limit. */
-  const QUEUE_LIMIT = 20;
   /**
-   * The commit currently being run.
+   * One lane per repository.
    *
-   * Deduplicating against the queue alone is not enough: the moment a run
-   * starts it leaves the queue, so a redelivered webhook arriving mid-run found
-   * nothing to match and started the very duplicate the check exists to
-   * prevent. GitHub retries deliveries it believes failed, and this pipeline
-   * answers 200 long before the work is done, so that is the common case rather
-   * than the rare one.
+   * The constraint that matters is one writer *per repository*: two runs on the
+   * same repo drive the same long-lived harness sessions and the same symbol
+   * map, and neither can absorb that. A single global lock enforced it by
+   * enforcing far more — a push to one repository waited behind an unrelated
+   * run on another, and before the queue existed it was dropped outright.
+   * Keying the lanes by repository keeps the invariant that is real and drops
+   * the one that was incidental.
    */
-  let runningCommit: string | null = null;
+  interface Lane {
+    queue: QueuedRun[];
+    active: Promise<unknown> | null;
+    /** The commit running in this lane, for deduplicating a redelivery. */
+    running: string | null;
+  }
 
-  const drainQueue = (): void => {
-    if (activeRun || queue.length === 0) return;
-    const next = queue.shift();
+  const lanes = new Map<string, Lane>();
+  /** Bounded so a burst of pushes cannot grow a lane without limit. */
+  const QUEUE_LIMIT = 20;
+
+  const laneFor = (key: string): Lane => {
+    const existing = lanes.get(key);
+    if (existing) return existing;
+    const lane: Lane = { queue: [], active: null, running: null };
+    lanes.set(key, lane);
+    return lane;
+  };
+
+  /** Total depth across lanes, which is what the dashboard shows. */
+  const totalDepth = (): number =>
+    [...lanes.values()].reduce((sum, lane) => sum + lane.queue.length, 0);
+
+  const drainLane = (key: string): void => {
+    const lane = laneFor(key);
+    if (lane.active || lane.queue.length === 0) return;
+    const next = lane.queue.shift();
     if (!next) return;
-    runningCommit = next.commit;
+    lane.running = next.commit;
 
     // `prepare` runs inside the same promise as the pipeline rather than before
     // it, because the caller has already answered GitHub and cannot await
@@ -448,7 +466,7 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
     // seconds a delivery is given. It also decides which checkout the run uses,
     // so a webhook can document the repository it names rather than whichever
     // directory the server happened to start in.
-    activeRun = (async () => {
+    lane.active = (async () => {
       const runConfig = next.prepare ? await next.prepare() : config;
       const result = await runPipeline(client, runConfig, next.commit, {
         force: next.force ?? false,
@@ -472,12 +490,16 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
         bus.publish('error', { commit: next.commit, message });
       })
       .finally(() => {
-        activeRun = null;
-        runningCommit = null;
-        bus.publish('queue', { depth: queue.length });
-        // Synchronously after clearing `activeRun`, so the next run starts
-        // without waiting for anything to poll.
-        drainQueue();
+        lane.active = null;
+        lane.running = null;
+        // Nothing left to do in this lane, and nothing waiting: forget it, so a
+        // long-lived server does not accumulate one entry per repository it has
+        // ever seen.
+        if (lane.queue.length === 0) lanes.delete(key);
+        bus.publish('queue', { depth: totalDepth() });
+        // Synchronously after clearing `active`, so the next run in this lane
+        // starts without waiting for anything to poll.
+        drainLane(key);
       });
   };
 
@@ -486,42 +508,46 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
     | { accepted: false; reason: string };
 
   /**
-   * Take a run, now or as soon as the current one finishes.
+   * Take a run, now or as soon as this repository's current one finishes.
    *
-   * Deduplicated on the commit: GitHub retries a delivery it thinks failed, and
-   * a reviewer clicking twice means one run, not two. A commit already waiting
-   * is not queued again.
+   * Deduplicated on the commit, against both the queue and the run already in
+   * flight: GitHub retries a delivery it thinks failed, and a reviewer clicking
+   * twice means one run, not two. Checking only the queue was not enough — a
+   * run leaves the queue the moment it starts, so a redelivery arriving
+   * mid-run found nothing to match.
    */
   const enqueueRun = (
+    repoKey: string,
     commit: string,
     source: string,
     prepare?: () => Promise<Config>,
     force = false,
   ): EnqueueResult => {
-    if (commit === runningCommit || queue.some((item) => item.commit === commit)) {
+    const lane = laneFor(repoKey);
+
+    if (commit === lane.running || lane.queue.some((item) => item.commit === commit)) {
       // Already in hand. Reported as accepted, because it is: the commit will
       // be documented, and the caller does not need to know it asked twice.
-      return { accepted: true, queued: true, depth: queue.length };
+      return { accepted: true, queued: true, depth: totalDepth() };
     }
-    if (queue.length >= QUEUE_LIMIT) {
+    if (lane.queue.length >= QUEUE_LIMIT) {
       return {
         accepted: false,
-        reason: `The run queue is full (${QUEUE_LIMIT} waiting). Try again once it drains.`,
+        reason: `The run queue for ${repoKey} is full (${QUEUE_LIMIT} waiting). Try again once it drains.`,
       };
     }
 
-    queue.push(prepare ? { commit, prepare, source, force } : { commit, source, force });
-    const depth = queue.length;
-    const willWait = Boolean(activeRun);
-    drainQueue();
-    bus.publish('queue', { depth: queue.length });
-    return { accepted: true, queued: willWait, depth };
+    lane.queue.push(prepare ? { commit, prepare, source, force } : { commit, source, force });
+    const willWait = Boolean(lane.active);
+    drainLane(repoKey);
+    bus.publish('queue', { depth: totalDepth() });
+    return { accepted: true, queued: willWait, depth: totalDepth() };
   };
 
   app.post('/api/runs', async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as { commit?: string; force?: boolean };
     const commit = body.commit || 'HEAD';
-    const result = enqueueRun(commit, 'api', undefined, body.force === true);
+    const result = enqueueRun(config.repoPath, commit, 'api', undefined, body.force === true);
     if (!result.accepted) return c.json({ error: result.reason }, 503);
     return c.json({ started: true, commit, queued: result.queued, depth: result.depth });
   });
@@ -578,7 +604,9 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
     // the App was installed on, which is the only thing that survives the
     // server being restarted somewhere else.
     const pinned = process.env.DOCXY_REPO_PATH?.trim() ? config.repoPath : undefined;
-    const result = enqueueRun(commit, `webhook ${delivery}`, async () => ({
+    // Keyed by the repository the delivery names, which is what makes two
+    // repositories' pushes independent of one another.
+    const result = enqueueRun(repository, commit, `webhook ${delivery}`, async () => ({
       ...config,
       repoPath: await ensureCheckout(repository, defaultBranch, commit, pinned),
     }));
