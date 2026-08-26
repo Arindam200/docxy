@@ -2,7 +2,7 @@ import { mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/pro
 import { join } from 'node:path';
 import type { Config } from '../config.js';
 import type { RunRecord } from '../types.js';
-import type { RunStorage } from './stores.js';
+import type { LogEntry, LogPage, LogQuery, RunStorage } from './stores.js';
 
 /** Runs are plain JSON on disk: inspectable, diffable, and trivially replayable. */
 export class RunStore implements RunStorage {
@@ -71,5 +71,42 @@ export class RunStore implements RunStorage {
 
   async pending(): Promise<RunRecord[]> {
     return (await this.list(200)).filter((r) => r.status === 'awaiting-approval');
+  }
+
+  /**
+   * Flattened in memory, which is the honest cost of JSON files: there is no
+   * index to ask. The window is capped at fifty runs for exactly that reason.
+   */
+  async logs(query: LogQuery): Promise<LogPage> {
+    const runs = query.runId
+      ? [await this.load(query.runId)].filter((run) => run !== null)
+      : await this.list(50, query.repoPaths);
+
+    const entries: LogEntry[] = runs.flatMap((run) =>
+      run.traces.flatMap((trace) =>
+        trace.events.map((event) => ({
+          at: event.at,
+          kind: event.kind,
+          text: event.text,
+          role: trace.role,
+          runId: run.id,
+          commit: run.commit.shortSha,
+          subject: run.commit.subject,
+          level: event.kind === 'error' ? ('error' as const) : ('info' as const),
+        })),
+      ),
+    );
+
+    const matched = entries.filter(
+      (entry) =>
+        (!query.kind || entry.kind === query.kind) && (!query.role || entry.role === query.role),
+    );
+    matched.sort((a, b) => b.at.localeCompare(a.at));
+
+    return {
+      entries: matched.slice(0, query.limit),
+      total: matched.length,
+      kinds: [...new Set(entries.map((entry) => entry.kind))].sort(),
+    };
   }
 }

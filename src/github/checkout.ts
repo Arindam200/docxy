@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { mkdir, stat } from 'node:fs/promises';
 import {
+  githubFetch,
   installationToken,
   readAppCredentials,
   scrubToken,
@@ -40,7 +41,7 @@ export async function installationRepositories(
   credentials: AppCredentials,
 ): Promise<InstalledRepo[]> {
   const token = await installationToken(credentials, []);
-  const response = await fetch('https://api.github.com/installation/repositories?per_page=100', {
+  const response = await githubFetch('https://api.github.com/installation/repositories?per_page=100', {
     headers: {
       authorization: `Bearer ${token}`,
       accept: 'application/vnd.github+json',
@@ -75,6 +76,34 @@ export async function installationRepositories(
  */
 export function checkoutPathFor(repo: string): string {
   return join(homedir(), '.docxy', 'checkouts', repo.replace('/', '__'));
+}
+
+/**
+ * Every repository path whose runs belong to this deployment.
+ *
+ * The configured path is always included — a developer pointing
+ * `DOCXY_REPO_PATH` at a working tree is still using docxy — and so is the
+ * managed checkout of each repository the App is installed on, because that is
+ * where a webhook-driven run actually happened.
+ *
+ * Shared with the CLI rather than living in the server, because they were
+ * drifting: the dashboard listed runs across every synced repository while
+ * `docxy approve <short-id>` searched only the directory it was invoked from,
+ * so a run the dashboard showed could not be found by the command the
+ * dashboard told you to run.
+ *
+ * Degrades to the local path alone. An unreachable GitHub should narrow what
+ * can be listed, never fail the listing.
+ */
+export async function syncedRepoPaths(repoPath: string): Promise<string[]> {
+  try {
+    const credentials = readAppCredentials();
+    if (!credentials) return [repoPath];
+    const installed = await installationRepositories(credentials);
+    return [...new Set([repoPath, ...installed.map((repo) => checkoutPathFor(repo.fullName))])];
+  } catch {
+    return [repoPath];
+  }
 }
 
 async function exists(path: string): Promise<boolean> {

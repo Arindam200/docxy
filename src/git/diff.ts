@@ -6,6 +6,21 @@ const exec = promisify(execFile);
 
 /** Per-file patch budget, in characters. Keeps a huge commit inside the context window. */
 const PATCH_BUDGET = 12_000;
+/**
+ * Whole-diff budget, in characters.
+ *
+ * The per-file budget alone bounds nothing: a commit touching two hundred files
+ * stays under it on every single one and still renders two million characters.
+ * A vendored dependency bump, a generated-client refresh, or a formatter run
+ * across the tree all look exactly like that, and each one pushed the prompt
+ * past the context window — where the failure arrives as an opaque provider
+ * error rather than as "this commit is too big".
+ *
+ * Files are kept whole, largest dropped first, so what survives is the small
+ * hand-written change inside a mechanical one — which is the part that has
+ * documentation consequences.
+ */
+const DIFF_BUDGET = 180_000;
 /** ASCII unit separator — safe against any character a commit message may contain. */
 const SEP = '\x1f';
 
@@ -141,8 +156,43 @@ export async function readCommitDiff(repoPath: string, ref: string): Promise<Com
   };
 }
 
+function renderFile(file: DiffFile): string {
+  const rename = file.previousPath ? ` (renamed from ${file.previousPath})` : '';
+  return [
+    `--- ${file.path} [${file.status}${rename}] +${file.additions}/-${file.deletions}`,
+    file.patch || '(no textual patch - binary or deleted)',
+  ].join('\n');
+}
+
+/**
+ * Choose which files fit in the budget.
+ *
+ * Smallest first, so a commit that mixes one hand-edited file with a hundred
+ * generated ones keeps the hand-edited one. The originally-listed order is
+ * restored afterwards: a diff should read in the order git reported it.
+ */
+function withinBudget(files: DiffFile[]) {
+  const rendered = files.map((file) => ({ file, size: renderFile(file).length + 2 }));
+  const bySize = [...rendered].sort((a, b) => a.size - b.size);
+
+  const keep = new Set<DiffFile>();
+  let spent = 0;
+  for (const { file, size } of bySize) {
+    if (spent + size > DIFF_BUDGET) continue;
+    spent += size;
+    keep.add(file);
+  }
+
+  return {
+    kept: files.filter((file) => keep.has(file)),
+    dropped: files.filter((file) => !keep.has(file)),
+  };
+}
+
 /** Render a diff as the prompt payload handed to the agents. */
 export function renderDiffForPrompt(diff: CommitDiff): string {
+  const { kept, dropped } = withinBudget(diff.files);
+
   const header = [
     `commit ${diff.sha}`,
     `author: ${diff.author}`,
@@ -150,17 +200,19 @@ export function renderDiffForPrompt(diff: CommitDiff): string {
     `subject: ${diff.subject}`,
     diff.body ? `\n${diff.body}\n` : '',
     `files changed: ${diff.files.length} (+${diff.totalAdditions} / -${diff.totalDeletions})`,
+    // Named, never silent. A role that cannot see a file must not conclude the
+    // file was unchanged, and a reader looking at a thin classification needs
+    // to know the diff was thinned before the model ever saw it.
+    ...(dropped.length > 0
+      ? [
+          '',
+          `NOTE: ${dropped.length} of these files were too large to include and are ` +
+            `listed below by name only. Treat them as changed but unread, and say so ` +
+            `in your output rather than assuming they are unaffected:`,
+          ...dropped.map((f) => `  - ${f.path} [${f.status}] +${f.additions}/-${f.deletions}`),
+        ]
+      : []),
   ].join('\n');
 
-  const body = diff.files
-    .map((f) => {
-      const rename = f.previousPath ? ` (renamed from ${f.previousPath})` : '';
-      return [
-        `--- ${f.path} [${f.status}${rename}] +${f.additions}/-${f.deletions}`,
-        f.patch || '(no textual patch - binary or deleted)',
-      ].join('\n');
-    })
-    .join('\n\n');
-
-  return `${header}\n\n${body}`;
+  return `${header}\n\n${kept.map(renderFile).join('\n\n')}`;
 }

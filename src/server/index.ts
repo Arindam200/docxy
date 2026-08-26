@@ -3,10 +3,10 @@ import { join } from 'node:path';
 import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import type { TrueForge } from '@truefoundry/trueforge-sdk';
-import type { Config } from '../config.js';
+import type { Config, RoleName } from '../config.js';
 import type { RunRecord } from '../types.js';
 import { PACKAGE_ROOT } from '../paths.js';
-import { createStores, storageBackend } from '../pipeline/stores.js';
+import { createStores, storageBackend, type LogQuery } from '../pipeline/stores.js';
 import { appStatus, verifyWebhook } from '../github/app.js';
 import { stat } from 'node:fs/promises';
 import { buildReport } from './observability.js';
@@ -18,7 +18,7 @@ import {
   type InstalledRepo,
 } from '../github/checkout.js';
 import { readAppCredentials } from '../github/app.js';
-import { ApprovalError, deny, describeGate, signOff, staleness } from '../approval/gate.js';
+import { ApprovalError, deny, signOff, staleness } from '../approval/gate.js';
 import { openPullRequest } from '../github/pr.js';
 
 /** Fan-out for server-sent events, so the timeline updates while a run is live. */
@@ -40,6 +40,44 @@ class Broadcaster {
       }
     }
   }
+}
+
+/**
+ * A run reduced to what a list — or a live update — actually renders.
+ *
+ * Also what goes over the event stream. Broadcasting the whole `RunRecord` on
+ * every role event meant every prompt, every raw model response, and every
+ * proposed file body crossed the wire a dozen times per run, to every connected
+ * browser, none of which the timeline draws. On a diff-heavy commit that is
+ * megabytes of duplicated payload for a handful of rendered fields.
+ */
+function summarize(run: RunRecord) {
+  return {
+    id: run.id,
+    repoPath: run.repoPath,
+    commit: run.commit,
+    status: run.status,
+    startedAt: run.startedAt,
+    finishedAt: run.finishedAt,
+    scope: run.approval?.scope,
+    pullRequestUrl: run.pullRequestUrl,
+    durationMs: run.durationMs,
+    totals: run.totals,
+    /** Roles that failed without stopping the run, so a list can say so. */
+    degraded: run.degraded,
+    error: run.error,
+    // One dot per role, in pipeline order. The whole run at a glance, and the
+    // reason a listing does not need to fetch role bodies.
+    roles: run.traces.map((trace) => ({
+      role: trace.role,
+      status: trace.status,
+      failure: trace.failure,
+      durationMs: trace.durationMs,
+      // A role that needed three tries looks identical to a clean one without
+      // this, which hides exactly the flakiness worth seeing.
+      attempts: trace.attempts,
+    })),
+  };
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -71,7 +109,7 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
    */
   const reapAbandonedRuns = async (): Promise<void> => {
     try {
-      const paths = await syncedRepoPaths();
+      const paths = await syncedPaths();
       for (const run of await runs.list(200, paths)) {
         if (run.status !== 'running') continue;
         run.status = 'failed';
@@ -200,14 +238,11 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
   /**
    * Every repository path whose runs belong on this dashboard.
    *
-   * The configured path is always included — a developer pointing
-   * `DOCXY_REPO_PATH` at a working tree is still using docxy — and so is the
-   * managed checkout of each installed repository, because that is where a
-   * webhook-driven run actually happened. Without this the dashboard showed
-   * only the directory the server started in, and every webhook run was
-   * invisible.
+   * Shared with the CLI — see `syncedRepoPaths` — so the two cannot drift apart
+   * on which runs exist. Wrapped here only to reuse the cached installation
+   * listing above rather than fetching it again on every request.
    */
-  const syncedRepoPaths = async (): Promise<string[]> => {
+  const syncedPaths = async (): Promise<string[]> => {
     try {
       const installed = await installedRepos();
       return [...new Set([config.repoPath, ...installed.map((r) => checkoutPathFor(r.fullName))])];
@@ -216,10 +251,6 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
       return [config.repoPath];
     }
   };
-
-  // Deferred to here only because it needs `syncedRepoPaths`; it runs once, at
-  // startup, and nothing waits on it.
-  void reapAbandonedRuns();
 
   app.get('/api/repositories', async (c) => {
     let credentials;
@@ -262,7 +293,7 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
     }
 
     const pinned = Boolean(process.env.DOCXY_REPO_PATH?.trim());
-    const recent = await runs.list(200, await syncedRepoPaths());
+    const recent = await runs.list(200, await syncedPaths());
 
     const repositories = await Promise.all(
       installed.map(async (repo) => {
@@ -303,35 +334,8 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
   });
 
   app.get('/api/runs', async (c) => {
-    const list = await runs.list(50, await syncedRepoPaths());
-    return c.json(
-      list.map((run) => ({
-        id: run.id,
-        commit: run.commit,
-        status: run.status,
-        startedAt: run.startedAt,
-        finishedAt: run.finishedAt,
-        scope: run.approval?.scope,
-        gate: describeGate(run, config),
-        pullRequestUrl: run.pullRequestUrl,
-        durationMs: run.durationMs,
-        totals: run.totals,
-        /** Roles that failed without stopping the run, so a list can say so. */
-        degraded: run.degraded,
-        error: run.error,
-        // One dot per role, in pipeline order. The whole run at a glance, and
-        // the reason a listing does not need to fetch role bodies.
-        roles: run.traces.map((trace) => ({
-          role: trace.role,
-          status: trace.status,
-          failure: trace.failure,
-          durationMs: trace.durationMs,
-          // A role that needed three tries looks identical to a clean one
-          // without this, which hides exactly the flakiness worth seeing.
-          attempts: trace.attempts,
-        })),
-      })),
-    );
+    const list = await runs.list(50, await syncedPaths());
+    return c.json(list.map(summarize));
   });
 
   /**
@@ -344,40 +348,23 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
    */
   app.get('/api/logs', async (c) => {
     const limit = Math.min(Number(c.req.query('limit') ?? 200) || 200, 1000);
+    const runId = c.req.query('run');
     const kind = c.req.query('kind');
     const role = c.req.query('role');
-    const runId = c.req.query('run');
 
-    const list = runId
-      ? [await runs.load(runId)].filter((r) => r !== null)
-      : await runs.list(50, await syncedRepoPaths());
+    const query: LogQuery = { limit };
+    if (kind) query.kind = kind;
+    if (role) {
+      // SAFETY: an unknown role simply matches nothing, which is the right
+      // answer for a query string naming a role that does not exist.
+      query.role = role as RoleName;
+    }
+    // A named run is addressed directly; anything else is scoped to the
+    // repositories this deployment is synced to.
+    if (runId) query.runId = runId;
+    else query.repoPaths = await syncedPaths();
 
-    const entries = list.flatMap((run) =>
-      run.traces.flatMap((trace) =>
-        trace.events.map((event) => ({
-          at: event.at,
-          kind: event.kind,
-          text: event.text,
-          role: trace.role,
-          runId: run.id,
-          commit: run.commit.shortSha,
-          subject: run.commit.subject,
-          /** `error` events are the ones worth surfacing on their own. */
-          level: event.kind === 'error' ? 'error' : 'info',
-        })),
-      ),
-    );
-
-    const filtered = entries.filter(
-      (entry) => (!kind || entry.kind === kind) && (!role || entry.role === role),
-    );
-    filtered.sort((a, b) => b.at.localeCompare(a.at));
-
-    return c.json({
-      entries: filtered.slice(0, limit),
-      total: filtered.length,
-      kinds: [...new Set(entries.map((entry) => entry.kind))].sort(),
-    });
+    return c.json(await runs.logs(query));
   });
 
   /**
@@ -389,7 +376,7 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
    */
   app.get('/api/observability', async (c) => {
     const limit = Math.min(Number(c.req.query('limit') ?? 50) || 50, 200);
-    return c.json(buildReport(await runs.list(limit, await syncedRepoPaths())));
+    return c.json(buildReport(await runs.list(limit, await syncedPaths())));
   });
 
   app.get('/api/runs/:id', async (c) => {
@@ -415,8 +402,43 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
    * long-lived harness sessions concurrently, and the symbol map cannot absorb
    * that. Returns false when a run is already in flight.
    */
-  const startRun = (commit: string, prepare?: () => Promise<Config>): boolean => {
-    if (activeRun) return false;
+  interface QueuedRun {
+    commit: string;
+    prepare?: () => Promise<Config>;
+    /** Where it came from, for the log line when it finally starts. */
+    source: string;
+  }
+
+  /**
+   * Runs waiting their turn.
+   *
+   * One writer per repository is a real constraint — two runs drive the same
+   * long-lived harness sessions concurrently and the symbol map cannot absorb
+   * that — but *dropping* the second one was the wrong way to enforce it. A
+   * push that arrives while another run is going is not a mistake to reject; it
+   * is work to do next. Dropped, the commit was never documented and nothing
+   * anywhere said so, because GitHub had already been answered 200.
+   */
+  const queue: QueuedRun[] = [];
+  /** Bounded so a burst of pushes cannot grow this without limit. */
+  const QUEUE_LIMIT = 20;
+  /**
+   * The commit currently being run.
+   *
+   * Deduplicating against the queue alone is not enough: the moment a run
+   * starts it leaves the queue, so a redelivered webhook arriving mid-run found
+   * nothing to match and started the very duplicate the check exists to
+   * prevent. GitHub retries deliveries it believes failed, and this pipeline
+   * answers 200 long before the work is done, so that is the common case rather
+   * than the rare one.
+   */
+  let runningCommit: string | null = null;
+
+  const drainQueue = (): void => {
+    if (activeRun || queue.length === 0) return;
+    const next = queue.shift();
+    if (!next) return;
+    runningCommit = next.commit;
 
     // `prepare` runs inside the same promise as the pipeline rather than before
     // it, because the caller has already answered GitHub and cannot await
@@ -425,9 +447,9 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
     // so a webhook can document the repository it names rather than whichever
     // directory the server happened to start in.
     activeRun = (async () => {
-      const runConfig = prepare ? await prepare() : config;
-      return runPipeline(client, runConfig, commit, {
-        onRunUpdate: (run) => bus.publish('run', run),
+      const runConfig = next.prepare ? await next.prepare() : config;
+      return runPipeline(client, runConfig, next.commit, {
+        onRunUpdate: (run) => bus.publish('run', summarize(run)),
         onRoleEvent: (role, event) => bus.publish('role', { role, event }),
       });
     })()
@@ -436,21 +458,57 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
         // Also to stderr: a failure before the first role has no run record to
         // attach to, so the event bus is the only place it would otherwise go —
         // and nobody is watching an SSE stream at push time.
-        console.error(`run for ${commit.slice(0, 7)} failed: ${message}`);
-        bus.publish('error', { commit, message });
+        console.error(`run for ${next.commit.slice(0, 7)} failed: ${message}`);
+        bus.publish('error', { commit: next.commit, message });
       })
       .finally(() => {
         activeRun = null;
+        runningCommit = null;
+        bus.publish('queue', { depth: queue.length });
+        // Synchronously after clearing `activeRun`, so the next run starts
+        // without waiting for anything to poll.
+        drainQueue();
       });
+  };
 
-    return true;
+  type EnqueueResult =
+    | { accepted: true; queued: boolean; depth: number }
+    | { accepted: false; reason: string };
+
+  /**
+   * Take a run, now or as soon as the current one finishes.
+   *
+   * Deduplicated on the commit: GitHub retries a delivery it thinks failed, and
+   * a reviewer clicking twice means one run, not two. A commit already waiting
+   * is not queued again.
+   */
+  const enqueueRun = (commit: string, source: string, prepare?: () => Promise<Config>): EnqueueResult => {
+    if (commit === runningCommit || queue.some((item) => item.commit === commit)) {
+      // Already in hand. Reported as accepted, because it is: the commit will
+      // be documented, and the caller does not need to know it asked twice.
+      return { accepted: true, queued: true, depth: queue.length };
+    }
+    if (queue.length >= QUEUE_LIMIT) {
+      return {
+        accepted: false,
+        reason: `The run queue is full (${QUEUE_LIMIT} waiting). Try again once it drains.`,
+      };
+    }
+
+    queue.push(prepare ? { commit, prepare, source } : { commit, source });
+    const depth = queue.length;
+    const willWait = Boolean(activeRun);
+    drainQueue();
+    bus.publish('queue', { depth: queue.length });
+    return { accepted: true, queued: willWait, depth };
   };
 
   app.post('/api/runs', async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as { commit?: string };
     const commit = body.commit || 'HEAD';
-    if (!startRun(commit)) return c.json({ error: 'A run is already in progress.' }, 409);
-    return c.json({ started: true, commit });
+    const result = enqueueRun(commit, 'api');
+    if (!result.accepted) return c.json({ error: result.reason }, 503);
+    return c.json({ started: true, commit, queued: result.queued, depth: result.depth });
   });
 
   /**
@@ -505,16 +563,26 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
     // the App was installed on, which is the only thing that survives the
     // server being restarted somewhere else.
     const pinned = process.env.DOCXY_REPO_PATH?.trim() ? config.repoPath : undefined;
-    const started = startRun(commit, async () => ({
+    const result = enqueueRun(commit, `webhook ${delivery}`, async () => ({
       ...config,
       repoPath: await ensureCheckout(repository, defaultBranch, commit, pinned),
     }));
-    if (!started) {
-      return c.json({ ok: true, ignored: 'a run is already in progress', delivery });
+
+    if (!result.accepted) {
+      // 503 rather than 200: this is the one case where GitHub retrying is
+      // exactly what should happen, because the work genuinely was not taken.
+      return c.json({ ok: false, error: result.reason, delivery }, 503);
     }
 
-    bus.publish('webhook', { delivery, commit, repository: payload.repository?.full_name });
-    return c.json({ ok: true, queued: delivery, commit });
+    bus.publish('webhook', { delivery, commit, repository });
+    return c.json({
+      ok: true,
+      queued: delivery,
+      commit,
+      // A push during another run now waits its turn instead of being dropped.
+      waiting: result.queued,
+      depth: result.depth,
+    });
   });
 
   /**
@@ -703,6 +771,30 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
 export function startServer(client: TrueForge, config: Config): ServerHandle {
   const { app } = createServer(client, config);
   const server = serve({ fetch: app.fetch, port: config.server.port });
+
+  // A listen failure arrives as an `error` event, and an `error` event with no
+  // listener is a process-level throw — so the commonest mistake in local
+  // development, a server already running, surfaced as a `node:net` stack
+  // trace. Say what happened and what to do about it.
+  server.on('error', (cause: NodeJS.ErrnoException) => {
+    if (cause.code === 'EADDRINUSE') {
+      console.error(
+        `Port ${config.server.port} is already in use — docxy is very likely ` +
+          `already running.\nStop it, or start this one elsewhere with ` +
+          `DOCXY_PORT=<port> docxy serve`,
+      );
+      process.exit(1);
+    }
+    if (cause.code === 'EACCES') {
+      console.error(
+        `Not allowed to listen on port ${config.server.port}. Ports below 1024 ` +
+          `need elevated privileges; pick a higher one with DOCXY_PORT.`,
+      );
+      process.exit(1);
+    }
+    throw cause;
+  });
+
   return {
     port: config.server.port,
     close: () => server.close(),

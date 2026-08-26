@@ -95,6 +95,14 @@ export interface Config {
     /** Wall-clock ceiling for a single attempt. */
     attemptTimeoutMs: number;
     /**
+     * Wall-clock ceiling for a whole run.
+     *
+     * Per-attempt timeouts bound each role but not their sum: five roles, three
+     * attempts each, all crawling just inside their own deadline, is a run that
+     * never ends and blocks every push behind it. This is the outer bound.
+     */
+    runTimeoutMs: number;
+    /**
      * Turns a session may carry before it is retired and rebuilt.
      *
      * Session reuse is what makes the second commit cheaper than the first, but
@@ -220,6 +228,7 @@ export function loadConfig(overrides: Partial<{ repoPath: string }> = {}): Confi
     agent: {
       maxAttempts: Math.max(1, envInt('DOCXY_ROLE_MAX_ATTEMPTS', 3)),
       attemptTimeoutMs: Math.max(30, envInt('DOCXY_ROLE_TIMEOUT_SECONDS', 420)) * 1000,
+      runTimeoutMs: Math.max(60, envInt('DOCXY_RUN_TIMEOUT_SECONDS', 2700)) * 1000,
       sessionMaxTurns: Math.max(0, envInt('DOCXY_SESSION_MAX_TURNS', 12)),
     },
     server: { port: envInt('DOCXY_PORT', 4317) },

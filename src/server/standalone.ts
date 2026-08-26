@@ -13,6 +13,22 @@ import { loadConfig } from '../config.js';
 import { assertReachable, createClient } from '../trueforge/client.js';
 import { createServer } from './index.js';
 
+/**
+ * A rejection nobody handled must not take the process down.
+ *
+ * Node's default for an unhandled rejection is to exit, and a long-running
+ * server has plenty of places one can escape from — a background refresh, a
+ * detached publish, a driver's own internals. Exiting mid-run loses the run and
+ * every connected event stream to fix a fault that was very likely survivable.
+ * Logged loudly and left running; the deployment's health check is what should
+ * decide whether this process deserves to live.
+ */
+process.on('unhandledRejection', (reason) => {
+  console.error(
+    `unhandled rejection: ${reason instanceof Error ? (reason.stack ?? reason.message) : String(reason)}`,
+  );
+});
+
 const config = loadConfig();
 const client = createClient(config);
 const { app } = createServer(client, config);

@@ -176,34 +176,82 @@ export async function runPipeline(
   // Once per run, cached for an hour, and empty if the endpoint is unreachable.
   const prices = await loadPrices(config);
 
+  // Started when the run starts, so time spent on a role that had to be retried
+  // counts against the same budget as everything else.
+  const runDeadline = AbortSignal.timeout(config.agent.runTimeoutMs);
+
   /**
-   * Serialized, and never fatal.
+   * Serialized, coalescing, and never fatal.
    *
-   * The Docs Updater and Changelog Author run concurrently and both write the
-   * same `RunRecord`; against Postgres each save deletes and re-inserts the
-   * run's roles and events inside a transaction, so two of them in flight at
-   * once either deadlock or lose a role's trace. Chaining them costs nothing —
-   * a save is milliseconds — and makes the record single-writer again.
+   * Three properties, each earning its place:
    *
-   * A failed save is reported and swallowed: losing the audit trail for a
-   * moment is bad, killing a run that is otherwise going fine is worse.
+   * *Serialized*, because the Docs Updater and Changelog Author run
+   * concurrently and both write the same `RunRecord`. Against Postgres a save
+   * rewrites the run's roles and events in one transaction, and two of those in
+   * flight at once either deadlock or lose a role's trace.
+   *
+   * *Coalescing*, because the record is saved nineteen times in a run and
+   * seventeen of those are progress updates on a record that is about to change
+   * again. Callers that arrive while a write is in flight collapse into a
+   * single follow-up write of the record as it stands when that write starts —
+   * so a burst of role events costs one save, not one each. `flush` forces the
+   * write for the points that must be durable.
+   *
+   * *Never fatal*, because losing the audit trail for a moment is bad and
+   * killing a run that is otherwise going fine is worse.
    */
-  let writes: Promise<void> = Promise.resolve();
-  const persist = (): Promise<void> => {
-    writes = writes.then(async () => {
-      rollUp(run, config, prices);
-      try {
-        await runs.save(run);
-      } catch (err) {
-        console.error(
-          `could not persist run ${run.id.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-      hooks.onRunUpdate?.(run);
-    });
-    return writes;
+  let writing: Promise<void> | null = null;
+  let pendingWrite: Promise<void> | null = null;
+
+  const writeNow = async (): Promise<void> => {
+    rollUp(run, config, prices);
+    try {
+      await runs.save(run);
+    } catch (err) {
+      console.error(
+        `could not persist run ${run.id.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    hooks.onRunUpdate?.(run);
   };
-  await persist();
+
+  const persist = (): Promise<void> => {
+    if (!writing) {
+      writing = writeNow().finally(() => {
+        writing = null;
+      });
+      return writing;
+    }
+    // A write is already going. Ride the one already queued behind it rather
+    // than adding another: they would both save the same final state.
+    pendingWrite ??= writing
+      .then(() => {
+        pendingWrite = null;
+        return persist();
+      })
+      .catch(() => {});
+    return pendingWrite;
+  };
+
+  /**
+   * Wait for the record on disk to reflect everything written so far.
+   *
+   * Bounded rather than looping until quiet: at every point this is called the
+   * run is between roles and nothing else is writing, so two passes is already
+   * one more than needed — but a `while` here would be a spin waiting on a
+   * writer that never stops, and a durability barrier must not be able to hang
+   * the run it is protecting.
+   */
+  const flush = async (): Promise<void> => {
+    for (let pass = 0; pass < 3; pass += 1) {
+      await persist();
+      const inFlight = writing ?? pendingWrite;
+      if (!inFlight) return;
+      await inFlight;
+    }
+  };
+
+  await flush();
 
   /**
    * Run one role to completion, retrying on its own terms, and record one trace
@@ -289,14 +337,16 @@ export async function runPipeline(
       await persist();
 
       // A hung turn used to hang the whole run: `runTurn` accepted a signal and
-      // nothing ever passed one.
+      // nothing ever passed one. Two deadlines apply — this attempt's, and
+      // whatever is left of the run's — and the earlier one wins.
       const timeout = AbortSignal.timeout(config.agent.attemptTimeoutMs);
+      const deadline = AbortSignal.any([timeout, runDeadline]);
       let failure: AttemptFailure | undefined;
       let raw = '';
 
       try {
         const result = await runTurn(client, session.id, prompt, {
-          signal: timeout,
+          signal: deadline,
           onEvent: (event) => {
             trace.events.push(event);
             hooks.onRoleEvent?.(role.name, event);
@@ -348,20 +398,29 @@ export async function runPipeline(
         }
       } catch (err) {
         if (abortedBy(err)) {
-          // A caller-side abort is a decision, not a fault. A timeout is ours,
-          // and is worth another attempt.
-          const timedOut = timeout.aborted;
-          lastError = new Error(
-            timedOut
-              ? `[${role.title}] no answer within ${Math.round(config.agent.attemptTimeoutMs / 1000)}s`
-              : `[${role.title}] the run was cancelled`,
-          );
-          if (!timedOut) {
+          // Three ways to get here, and they are not the same event. The run's
+          // own deadline is terminal — retrying cannot fit inside a budget that
+          // is already spent. This attempt's deadline is worth another try. A
+          // caller-side abort is a decision, not a fault.
+          if (runDeadline.aborted) {
+            lastError = new Error(
+              `[${role.title}] the run exceeded its ${Math.round(config.agent.runTimeoutMs / 1000)}s budget`,
+            );
+            finish('failed', 'timeout');
+            trace.error = lastError.message;
+            await persist();
+            throw lastError;
+          }
+          if (!timeout.aborted) {
+            lastError = new Error(`[${role.title}] the run was cancelled`);
             finish('failed', 'aborted');
             trace.error = lastError.message;
             await persist();
             throw lastError;
           }
+          lastError = new Error(
+            `[${role.title}] no answer within ${Math.round(config.agent.attemptTimeoutMs / 1000)}s`,
+          );
           failure = 'transient';
           note('error', lastError.message);
         } else {
@@ -627,7 +686,7 @@ export async function runPipeline(
       run.status = 'done';
       run.error = undefined;
       run.finishedAt = new Date().toISOString();
-      await persist();
+      await flush();
       return { run, proposedFiles };
     }
 
@@ -652,7 +711,7 @@ export async function runPipeline(
       // CLI both know how to carry an approved run the rest of the way.
       run.status = 'awaiting-approval';
       if (concerns.length > 0) run.error = concerns.join(' | ');
-      await persist();
+      await flush();
       return { run, proposedFiles };
     }
 
@@ -665,7 +724,9 @@ export async function runPipeline(
     autoApprove(run.approval);
     run.status = 'approved';
     if (concerns.length > 0) run.error = concerns.join(' | ');
-    await persist();
+    // Durable before the branch is pushed: if publishing dies here, the record
+    // must already name the files that were approved, or the proposal is lost.
+    await flush();
 
     try {
       const pr = await openPullRequest(config, run, proposedFiles, {
@@ -686,14 +747,14 @@ export async function runPipeline(
     }
 
     run.finishedAt = new Date().toISOString();
-    await persist();
+    await flush();
 
     return { run, proposedFiles };
   } catch (err) {
     run.status = 'failed';
     run.error = err instanceof Error ? err.message : String(err);
     run.finishedAt = new Date().toISOString();
-    await persist();
+    await flush();
     throw Object.assign(err instanceof Error ? err : new Error(String(err)), { run });
   } finally {
     await docsTree.dispose();

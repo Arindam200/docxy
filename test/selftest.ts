@@ -10,6 +10,8 @@ import { listDocs, readRepoFile } from '../src/git/repo.js';
 import { prBaseBranch } from '../src/config.js';
 import { costOf, priceFor } from '../src/trueforge/pricing.js';
 import { classifyTurnError } from '../src/trueforge/run.js';
+import { renderDiffForPrompt } from '../src/git/diff.js';
+import type { CommitDiff, DiffFile } from '../src/types.js';
 import { planRetry } from '../src/pipeline/retry.js';
 import type { RoleName } from '../src/config.js';
 import type { DocEdit, RoleTrace, RunRecord } from '../src/types.js';
@@ -37,6 +39,43 @@ catch { check('throws on garbage', true); }
 check('confidence percent', normalizeConfidence(85) === 0.85);
 check('confidence clamp', normalizeConfidence(2) === 1);
 check('confidence junk', normalizeConfidence('abc', 0.4) === 0.4);
+
+// --- diff budget ---------------------------------------------------------
+{
+  const file = (path: string, size: number): DiffFile => ({
+    path,
+    status: 'modified',
+    additions: 1,
+    deletions: 0,
+    patch: 'x'.repeat(size),
+    truncated: false,
+  });
+  const commitOf = (files: DiffFile[]): CommitDiff => ({
+    sha: 'abc123', shortSha: 'abc123', subject: 's', body: '', author: 'a', date: 'd',
+    files, totalAdditions: files.length, totalDeletions: 0,
+  });
+
+  const small = renderDiffForPrompt(commitOf([file('a.ts', 100), file('b.ts', 200)]));
+  check('a small diff is rendered whole', small.includes('a.ts') && small.includes('b.ts'));
+  check('a small diff drops nothing', !small.includes('too large to include'));
+
+  // Fifty files at the per-file cap: each one is legal, the sum is not.
+  const huge = commitOf(Array.from({ length: 50 }, (_, i) => file(`gen/f${i}.ts`, 12_000)));
+  const rendered = renderDiffForPrompt(huge);
+  check('a huge diff is bounded', rendered.length < 260_000, `got ${rendered.length}`);
+  check('dropped files are named, not silently missing',
+    rendered.includes('too large to include'));
+
+  // The one hand-written file among a hundred generated ones is the one that
+  // has documentation consequences, so it is the one that must survive.
+  const mixed = commitOf([
+    ...Array.from({ length: 40 }, (_, i) => file(`gen/f${i}.ts`, 12_000)),
+    file('src/api.ts', 300),
+  ]);
+  const keptSmall = renderDiffForPrompt(mixed);
+  check('the smallest file survives a crowded diff',
+    keptSmall.includes('x'.repeat(300)) && keptSmall.includes('src/api.ts'));
+}
 
 // --- turn failure classification -----------------------------------------
 check('max_tokens is named', classifyTurnError('max_tokens breached') === 'max-tokens');
@@ -114,6 +153,20 @@ check('ambiguous anchor caught', dup.problems.some((p) => p.kind === 'anchor-amb
 // --- links ---------------------------------------------------------------
 const brokenLink = checkLinks(repo, [{ path: 'docs/api.md', before: '', appliedEdits: 1,
   after: '# API\n\nSee [gone](./gone.md) and [ok](./guide.md).\n' }]);
+// A heading with punctuation between two spaces — em dashes are everywhere in
+// this project's own headings — must slug to the double hyphen GitHub produces.
+{
+  const doc = [{
+    path: 'g.md', before: '', appliedEdits: 0,
+    after: '# Guide\n\n[go](#stage-1--the-pipeline)\n[bad](#stage-1-the-pipeline)\n\n## Stage 1 — the pipeline\n\nx\n',
+  }];
+  const anchors = checkLinks(repo, doc);
+  check('an em-dash heading keeps both hyphens',
+    !anchors.some((b) => b.target === '#stage-1--the-pipeline'), JSON.stringify(anchors));
+  check('a collapsed anchor is still reported broken',
+    anchors.some((b) => b.target === '#stage-1-the-pipeline'));
+}
+
 check('broken relative link caught', brokenLink.length === 1 && brokenLink[0]!.target === './gone.md');
 
 const anchorLink = checkLinks(repo, [{ path: 'docs/api.md', before: '', appliedEdits: 1,

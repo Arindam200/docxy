@@ -1,9 +1,9 @@
-import { randomUUID } from 'node:crypto';
-import { asc, desc, eq, inArray } from 'drizzle-orm';
+import { createHash } from 'node:crypto';
+import { and, asc, desc, eq, inArray, notInArray, sql } from 'drizzle-orm';
 import type { Config, RoleName } from '../config.js';
-import type { RunStorage } from '../pipeline/stores.js';
+import type { LogPage, LogQuery, RunStorage } from '../pipeline/stores.js';
 import type { ApprovalRequest, ProposedFile, RoleTrace, RunRecord } from '../types.js';
-import { getDb } from './index.js';
+import { getDb, type Database } from './index.js';
 import { projectId, type Executor } from './executor.js';
 import {
   approvals,
@@ -29,9 +29,31 @@ import {
 export class PgRunStore implements RunStorage {
   constructor(private readonly config: Config) {}
 
+  /**
+   * Events already written, per role row.
+   *
+   * Per instance, which is the right scope: the pipeline builds its own store
+   * for the run it is writing, and it is the only writer of that run. A reader
+   * elsewhere has its own instance and an empty map, which costs nothing
+   * because readers never call `save`.
+   */
+  private readonly eventMark = new Map<string, number>();
+
   async save(run: RunRecord): Promise<void> {
     const db = getDb();
 
+    try {
+      await this.write(db, run);
+    } catch (err) {
+      // A rolled-back transaction may have left the marks claiming events are
+      // stored that are not. Dropping them costs one full re-send on the next
+      // save and is the only way back to a state that is certainly correct.
+      this.eventMark.clear();
+      throw err;
+    }
+  }
+
+  private async write(db: Database, run: RunRecord): Promise<void> {
     await db.transaction(async (tx) => {
       const project = await projectId(tx, run.repoPath || this.config.repoPath);
 
@@ -80,17 +102,34 @@ export class PgRunStore implements RunStorage {
     });
   }
 
-  /** Deleting the roles cascades to their events, so this is one statement plus inserts. */
+  /**
+   * Write the roles, their bodies, and any events not yet stored.
+   *
+   * This used to delete every role and re-insert it — which cascaded to the
+   * events and re-wrote them too — on each of the nineteen saves a run makes.
+   * The last save of a five-role run therefore rewrote every row the run had
+   * ever produced, so the cost of recording a run grew with the square of its
+   * own length, and a long run spent more time rewriting its history than
+   * making any.
+   *
+   * Now role ids are derived from the run and the ordinal rather than
+   * generated, so a role keeps its identity across saves and can be upserted.
+   * Events are append-only and only the ones past the high-water mark are sent.
+   */
   private async replaceTraces(tx: Executor, run: RunRecord): Promise<void> {
-    await tx.delete(runRoles).where(eq(runRoles.runId, run.id));
-    if (run.traces.length === 0) return;
+    if (run.traces.length === 0) {
+      await tx.delete(runRoles).where(eq(runRoles.runId, run.id));
+      return;
+    }
 
-    // Ids are generated here rather than read back, so events can be batched in
-    // the same pass without depending on the order RETURNING happens to give.
-    const rows = run.traces.map((trace, ordinal) => ({ id: randomUUID(), trace, ordinal }));
+    const rows = run.traces.map((trace, ordinal) => ({
+      id: roleRowId(run.id, ordinal),
+      trace,
+      ordinal,
+    }));
 
-    await tx.insert(runRoles).values(
-      rows.map(({ id, trace, ordinal }) => ({
+    for (const { id, trace, ordinal } of rows) {
+      const row = {
         id,
         runId: run.id,
         ordinal,
@@ -107,29 +146,61 @@ export class PgRunStore implements RunStorage {
         usage: trace.usage ?? null,
         startedAt: new Date(trace.startedAt),
         finishedAt: trace.finishedAt ? new Date(trace.finishedAt) : null,
-      })),
-    );
+      };
+      await tx.insert(runRoles).values(row).onConflictDoUpdate({ target: runRoles.id, set: row });
+    }
 
     // Bodies go in their own table; only roles that actually have one get a row.
-    const bodies = rows
-      .filter(({ trace }) => trace.prompt !== undefined || trace.rawOutput !== undefined)
-      .map(({ id, trace }) => ({
+    for (const { id, trace } of rows) {
+      if (trace.prompt === undefined && trace.rawOutput === undefined) continue;
+      const body = {
         roleId: id,
         prompt: trace.prompt ?? null,
         rawOutput: trace.rawOutput ?? null,
-      }));
-    if (bodies.length > 0) await tx.insert(runRoleBodies).values(bodies);
+      };
+      await tx
+        .insert(runRoleBodies)
+        .values(body)
+        .onConflictDoUpdate({ target: runRoleBodies.roleId, set: body });
+    }
 
-    const events = rows.flatMap(({ id, trace }) =>
-      trace.events.map((event, ordinal) => ({
+    const events = rows.flatMap(({ id, trace }) => {
+      // Events only ever accumulate, so everything below the mark is already
+      // stored and identical. Sending it again is the cost this avoids.
+      const written = this.eventMark.get(id) ?? 0;
+      return trace.events.slice(written).map((event, offset) => ({
         roleId: id,
-        ordinal,
+        ordinal: written + offset,
         at: new Date(event.at),
         kind: event.kind,
         text: event.text,
-      })),
-    );
-    if (events.length > 0) await tx.insert(runEvents).values(events);
+      }));
+    });
+
+    if (events.length > 0) {
+      await tx.insert(runEvents).values(events);
+      // Advanced only once the insert has gone through. The transaction may
+      // still roll back, which `save` handles by dropping the marks entirely.
+      for (const { id, trace } of rows) this.eventMark.set(id, trace.events.length);
+    }
+
+    // Anything left under this run that is not one of the rows above.
+    //
+    // Two cases, one statement. A run whose trace list shrank leaves a tail of
+    // stale roles; and a run first saved before ids were derived has rows under
+    // *random* ids, which would otherwise sit alongside the derived ones and
+    // show every role twice. Cascades to their events, which is the intent.
+    await tx
+      .delete(runRoles)
+      .where(
+        and(
+          eq(runRoles.runId, run.id),
+          notInArray(
+            runRoles.id,
+            rows.map((r) => r.id),
+          ),
+        ),
+      );
   }
 
   private async replaceFiles(tx: Executor, run: RunRecord): Promise<void> {
@@ -182,6 +253,13 @@ export class PgRunStore implements RunStorage {
   }
 
   async load(id: string): Promise<RunRecord | null> {
+    // A run id is a UUID column, and Postgres rejects anything that is not one
+    // with a cast error rather than an empty result. That turned every lookup
+    // by a *prefix* — which `docxy approve 061fe721` and every short id in the
+    // CLI's own output are — into a raw SQL failure instead of the miss the
+    // caller is written to handle by widening the search.
+    if (!UUID.test(id)) return null;
+
     const [record] = await this.hydrate(
       await getDb()
         .select({ run: runs, repoPath: projects.key })
@@ -220,6 +298,92 @@ export class PgRunStore implements RunStorage {
   }
 
   /**
+   * Events joined to their run, filtered and ordered in the database.
+   *
+   * The alternative — and what this replaces — was rebuilding fifty whole
+   * `RunRecord`s and flattening them in memory, which read every role, file,
+   * and approval those runs owned so that a few hundred log lines could be
+   * rendered. Three indexed queries instead of six full hydrations.
+   */
+  async logs(query: LogQuery): Promise<LogPage> {
+    const db = getDb();
+
+    const scope = query.runId
+      ? eq(runs.id, query.runId)
+      : inArray(
+          runs.projectId,
+          // As in `list`: naming a repository is what makes it visible, whether
+          // or not it has run yet.
+          [
+            ...new Set(
+              await Promise.all(
+                (query.repoPaths && query.repoPaths.length > 0
+                  ? query.repoPaths
+                  : [this.config.repoPath]
+                ).map((path) => projectId(db, path)),
+              ),
+            ),
+          ],
+        );
+
+    const filters = [
+      scope,
+      ...(query.kind ? [eq(runEvents.kind, query.kind)] : []),
+      ...(query.role ? [eq(runRoles.role, query.role)] : []),
+    ];
+
+    const joined = db
+      .select({
+        at: runEvents.at,
+        kind: runEvents.kind,
+        text: runEvents.text,
+        role: runRoles.role,
+        runId: runs.id,
+        commit: runs.commitShortSha,
+        subject: runs.commitSubject,
+      })
+      .from(runEvents)
+      .innerJoin(runRoles, eq(runRoles.id, runEvents.roleId))
+      .innerJoin(runs, eq(runs.id, runRoles.runId))
+      .where(and(...filters));
+
+    const [rows, [counted], kindRows] = await Promise.all([
+      joined.orderBy(desc(runEvents.at)).limit(query.limit),
+      db
+        .select({ total: sql<number>`count(*)::int` })
+        .from(runEvents)
+        .innerJoin(runRoles, eq(runRoles.id, runEvents.roleId))
+        .innerJoin(runs, eq(runs.id, runRoles.runId))
+        .where(and(...filters)),
+      // Unfiltered by kind on purpose: the control has to offer the kinds you
+      // are not currently looking at, or it can never be un-narrowed.
+      db
+        .selectDistinct({ kind: runEvents.kind })
+        .from(runEvents)
+        .innerJoin(runRoles, eq(runRoles.id, runEvents.roleId))
+        .innerJoin(runs, eq(runs.id, runRoles.runId))
+        .where(and(scope, ...(query.role ? [eq(runRoles.role, query.role)] : []))),
+    ]);
+
+    return {
+      // SAFETY: `role` is a free-text column only this store writes, always
+      // from a `RoleTrace`, where it is typed `RoleName`.
+      entries: rows.map((row) => ({
+        at: row.at.toISOString(),
+        kind: row.kind,
+        text: row.text,
+        role: row.role as RoleName,
+        runId: row.runId,
+        commit: row.commit,
+        subject: row.subject,
+        level: row.kind === 'error' ? ('error' as const) : ('info' as const),
+      })),
+      total: counted?.total ?? rows.length,
+      kinds: kindRows.map((row) => row.kind).sort(),
+    };
+  }
+
+  /**
    * Rebuild whole `RunRecord`s from a page of run rows.
    *
    * Children are fetched with one query each over the full id set rather than
@@ -228,6 +392,12 @@ export class PgRunStore implements RunStorage {
    * `bodies` is off for listings. Prompts and raw outputs are the two largest
    * fields on a run and nothing in a list renders them, which is the reason
    * they sit in their own table at all.
+   *
+   * So are the proposed files, for the same reason and a worse one: a row in
+   * `run_files` holds a documentation page twice over, before and after. Fifty
+   * runs of those crossed the wire so that a dashboard could count how many
+   * runs a repository had. Only the detail view — and the publish path behind
+   * it, which reads `run.proposedFiles` to know what was approved — needs them.
    */
   private async hydrate(
     rows: Array<{ run: typeof runs.$inferSelect; repoPath: string }>,
@@ -241,7 +411,13 @@ export class PgRunStore implements RunStorage {
     const [outputRows, roleRows, fileRows, approvalRows] = await Promise.all([
       db.select().from(runOutputs).where(inArray(runOutputs.runId, ids)),
       db.select().from(runRoles).where(inArray(runRoles.runId, ids)).orderBy(asc(runRoles.ordinal)),
-      db.select().from(runFiles).where(inArray(runFiles.runId, ids)).orderBy(asc(runFiles.ordinal)),
+      options.bodies
+        ? db
+            .select()
+            .from(runFiles)
+            .where(inArray(runFiles.runId, ids))
+            .orderBy(asc(runFiles.ordinal))
+        : Promise.resolve([]),
       db.select().from(approvals).where(inArray(approvals.runId, ids)),
     ]);
 
@@ -374,6 +550,27 @@ export class PgRunStore implements RunStorage {
     });
   }
 }
+
+/**
+ * A role's row id, derived rather than generated.
+ *
+ * A role is identified by its run and its position in that run, and both are
+ * known before the row exists. Deriving the id is what lets a save upsert the
+ * role it wrote last time instead of deleting and re-creating it — and keeps
+ * the events hanging off it, which a delete would cascade away.
+ *
+ * Shaped as a UUID because the column is one; the bytes are a hash, so this is
+ * a name, not a claim of randomness.
+ */
+function roleRowId(runId: string, ordinal: number): string {
+  const hex = createHash('sha256').update(`${runId}:${ordinal}`).digest('hex');
+  // Version and variant nibbles set so the value is a well-formed UUID.
+  const v = `${hex.slice(0, 12)}5${hex.slice(13, 16)}${((Number.parseInt(hex[16] ?? '0', 16) & 0x3) | 0x8).toString(16)}${hex.slice(17, 32)}`;
+  return `${v.slice(0, 8)}-${v.slice(8, 12)}-${v.slice(12, 16)}-${v.slice(16, 20)}-${v.slice(20, 32)}`;
+}
+
+/** Canonical 8-4-4-4-12 hex, which is all the `uuid` columns will accept. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function groupBy<T, K>(items: T[], key: (item: T) => K): Map<K, T[]> {
   const out = new Map<K, T[]>();

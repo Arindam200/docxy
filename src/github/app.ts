@@ -33,6 +33,50 @@ function appJwt(appId: string, pem: string): string {
   return `${body}.${createSign('RSA-SHA256').update(body).sign(pem, 'base64url')}`;
 }
 
+/**
+ * A GitHub request that survives a bad moment.
+ *
+ * Every call here is a network hop to api.github.com, and the failures worth
+ * distinguishing are: a transient one (`fetch failed` — DNS, a dropped socket,
+ * a blip), which is worth repeating; a 5xx or a rate limit, likewise; and a
+ * 4xx, which will say exactly the same thing however many times it is asked.
+ *
+ * Not decoration. A run reached the point of publishing with five agents' work
+ * finished behind it, and lost the pull request to one `fetch failed` — the
+ * proposal survived, but somebody then had to notice and republish it by hand.
+ */
+async function githubFetch(
+  url: string,
+  init: RequestInit,
+  attempts = 3,
+): Promise<Response> {
+  let last: Error = new Error('never attempted');
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        ...init,
+        // Without this a hung connection blocks until the platform's own
+        // timeout, which is minutes and long past useful.
+        signal: AbortSignal.timeout(20_000),
+      });
+      // 5xx and 429 are GitHub having a moment; anything else is an answer.
+      if (response.status < 500 && response.status !== 429) return response;
+      if (attempt === attempts) return response;
+      last = new Error(`HTTP ${response.status}`);
+    } catch (cause) {
+      last = cause instanceof Error ? cause : new Error(String(cause));
+      if (attempt === attempts) break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** (attempt - 1)));
+  }
+
+  throw new Error(
+    `Could not reach the GitHub API at ${new URL(url).pathname} after ${attempts} ` +
+      `attempts: ${last.message}`,
+  );
+}
+
 /** Null when the App is not configured, which is the signal to fall back. */
 export function readAppCredentials(): AppCredentials | null {
   const appId = process.env.GITHUB_APP_ID?.trim();
@@ -73,7 +117,7 @@ export async function installationToken(
   credentials: AppCredentials,
   repositories: string[],
 ): Promise<string> {
-  const response = await fetch(
+  const response = await githubFetch(
     `https://api.github.com/app/installations/${credentials.installationId}/access_tokens`,
     {
       method: 'POST',
@@ -122,6 +166,8 @@ export function verifyWebhook(
 }
 
 /** Never let a tokenized remote URL reach a log line or an error message. */
+export { githubFetch };
+
 export function scrubToken(text: string): string {
   return text.replace(/x-access-token:[^@]+@/g, 'x-access-token:***@');
 }

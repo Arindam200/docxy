@@ -8,13 +8,24 @@ export interface BrokenLink {
   reason: string;
 }
 
-/** Slugify a heading the way GitHub does, so in-page anchors can be checked. */
+/**
+ * Slugify a heading the way GitHub does, so in-page anchors can be checked.
+ *
+ * Each space becomes its own hyphen. Collapsing runs of them looks like the
+ * same thing and is not: GitHub strips punctuation *before* replacing spaces,
+ * so `## Stage 1 — the pipeline` loses the em dash and keeps the two spaces
+ * that surrounded it, giving `stage-1--the-pipeline` with a double hyphen.
+ * Collapsing produced `stage-1-the-pipeline`, which matches no anchor GitHub
+ * will ever generate — so every heading with punctuation between two spaces was
+ * reported as a broken in-page link. A false failure here is expensive now that
+ * a failed check opens the pull request as a draft that says why.
+ */
 function slug(heading: string): string {
   return heading
     .trim()
     .toLowerCase()
     .replace(/[^\w\s-]/g, '')
-    .replace(/\s+/g, '-');
+    .replace(/\s/g, '-');
 }
 
 function headingSlugs(markdown: string): Set<string> {

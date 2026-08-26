@@ -7,8 +7,12 @@ TrueFoundry's open-source agent harness, with models served by
 Every push to `main` wakes five specialists. One classifies what changed. One
 traces which docs and downstream code the change actually touches. Two draft the
 edits — reference docs and release notes, in deliberately different voices. The
-last reviews their work before a human sees any of it. Everything is validated
-before review, and **nothing opens a pull request without explicit sign-off.**
+last reviews their work before anything is published. Everything is validated
+first, and **a proposal that fails those checks opens as a draft that says why,
+never as a clean pull request.**
+
+**→ [Set it up locally](guides/LOCAL-SETUP.md)** — from nothing to a
+documentation pull request on your own repository.
 
 ---
 
@@ -126,7 +130,20 @@ Validation runs **against the working copy on disk**, not a remote sandbox, so i
 needs no third-party account. TrueForge's own sandbox can be switched on with
 `DOCXY_USE_HARNESS_SKILLS=true` if you'd rather run it there.
 
-### 3. Graduated approval, and no silent timeout
+### 3. The pull request is the gate — and a graduated one is there if you want it
+
+By default a run signs itself off and opens the pull request. That is not an
+absence of review; it is review in the place teams already do it. Nothing merges
+without someone approving it on GitHub, and a pipeline that stops short of
+opening anything reviews nothing at all — it just goes quiet.
+
+What that default protects is the *quality* of what gets opened. A proposal the
+Coordinator rejected, or one that failed validation, still opens — as a **draft
+with the reasons at the top of the body**. A stalled run tells nobody anything;
+an unmergeable draft tells them exactly what went wrong.
+
+Set `DOCXY_REQUIRE_APPROVAL=true` and docxy holds the proposal behind its own
+gate as well:
 
 - **Routine** — a docs-only fix needs one sign-off.
 - **Elevated** — anything classified breaking, touching documented public API, or
@@ -143,6 +160,10 @@ job open until a human clicks approve — see [`.github/workflows/docxy.yml`](.g
 ---
 
 ## Getting started
+
+The five-minute version is below. For the whole thing — GitHub App, Postgres,
+the dashboard, webhooks, and what to do when a role fails — see
+**[guides/LOCAL-SETUP.md](guides/LOCAL-SETUP.md)**.
 
 ### Prerequisites
 
@@ -195,24 +216,28 @@ npx tsx src/cli.ts doctor     # harness, key, repo, and per-role model check
 npx tsx src/cli.ts run HEAD
 ```
 
-The pipeline stops at the approval gate and tells you exactly how to proceed.
+The pipeline prints the classification, the proposed edits, and the changelog
+entry. With the GitHub App configured it then opens the pull request; without
+one it stops there, because there is no identity to publish as —
+[guides/GITHUB-APP.md](guides/GITHUB-APP.md) sets that up.
 
-### 5. Review and approve
+The proposal is written to a branch **in a throwaway git worktree**, so your
+checkout, index, and current branch are never touched.
+
+### 5. Look at what it did
 
 ```bash
-npx tsx src/cli.ts serve      # timeline UI on http://localhost:4317
+npx tsx src/cli.ts runs           # recent runs
+npx tsx src/cli.ts show <run-id>  # one run, role by role
+npx tsx src/cli.ts serve          # timeline UI on http://localhost:4317
 ```
 
-or from the terminal:
+With `DOCXY_REQUIRE_APPROVAL=true` a run waits for you instead of publishing:
 
 ```bash
 npx tsx src/cli.ts approve <run-id> --by "your name"
 npx tsx src/cli.ts deny    <run-id> --by "your name" --reason "why"
 ```
-
-Once fully approved, the proposal is written to a branch **in a throwaway git
-worktree** — your checkout, index, and current branch are never touched — and a
-pull request is opened.
 
 ---
 
@@ -312,7 +337,11 @@ tree. Leave `DOCXY_DOCS_BRANCH` unset and everything stays in one tree as before
 
 Every knob is an environment variable, all documented in
 [`.env.example`](.env.example) — model per role, docs branch, docs roots,
-changelog path, validation commands, staleness threshold, base branch, port.
+changelog path, validation commands, retry and timeout budgets, session
+rotation, staleness threshold, base branch, port.
+
+[guides/LOCAL-SETUP.md](guides/LOCAL-SETUP.md) covers the ones worth knowing
+early, and what to change when a role starts failing.
 
 ## License
 

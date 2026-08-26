@@ -4,11 +4,38 @@ import { createClient, assertReachable } from './trueforge/client.js';
 import { listAvailableModels, listNebiusModels, registerNebiusProvider } from './trueforge/setup.js';
 import { runPipeline, rebuildProposedFiles } from './pipeline/index.js';
 import { createStores, type RunStorage } from './pipeline/stores.js';
+import type { RunRecord } from './types.js';
 import { closeDb } from './db/index.js';
 import { appStatus } from './github/app.js';
 
 /** `serve` returns while the server keeps running, so it must not close the pool. */
 let holdOpen = false;
+
+/**
+ * A run by id or by a unique prefix of one, always as a full record.
+ *
+ * The listing is only ever used to turn a prefix into an id — never as the
+ * record itself. A run taken from a listing carries no `proposedFiles`, since
+ * listings deliberately skip the file bodies, and publishing one would silently
+ * re-derive the edits against a docs tree that may have moved since the
+ * reviewer looked at them.
+ */
+async function loadRunByPrefix(
+  store: RunStorage,
+  id: string,
+  config: Config,
+): Promise<RunRecord | null> {
+  const direct = await store.load(id);
+  if (direct) return direct;
+
+  // Widened to every synced repository, not just this directory. A webhook run
+  // belongs to the checkout docxy manages, so scoping the search to wherever
+  // the command was typed made exactly the runs the dashboard shows the ones it
+  // could not find.
+  const scope = await syncedRepoPaths(config.repoPath);
+  const match = (await store.list(200, scope)).find((run) => run.id.startsWith(id));
+  return match ? store.load(match.id) : null;
+}
 import { ApprovalError, deny, describeGate, signOff } from './approval/gate.js';
 import { openPullRequest } from './github/pr.js';
 import { startServer } from './server/index.js';
@@ -16,7 +43,7 @@ import { isGitRepo, recentCommits } from './git/diff.js';
 import { openDocsTree } from './git/worktree.js';
 import { ROLES } from './agents/roles.js';
 import { readAppCredentials } from './github/app.js';
-import { installationRepositories, ensureCheckout } from './github/checkout.js';
+import { installationRepositories, ensureCheckout, syncedRepoPaths } from './github/checkout.js';
 
 const c = {
   dim: (s: string) => `\x1b[2m${s}\x1b[0m`,
@@ -343,7 +370,7 @@ async function main(): Promise<void> {
       if (!id || !by) throw new Error('Usage: docxy approve <run-id> --by "your name"');
 
       const store = createStores(config).runs;
-      const run = (await store.load(id)) ?? (await store.list(200)).find((r) => r.id.startsWith(id));
+      const run = await loadRunByPrefix(store, id, config);
       if (!run?.approval) throw new Error(`No pending approval found for "${id}".`);
 
       const { approved } = signOff(run.approval, by);
@@ -395,7 +422,7 @@ async function main(): Promise<void> {
         throw new Error('Usage: docxy deny <run-id> --by "your name" --reason "why"');
       }
       const store = createStores(config).runs;
-      const run = (await store.load(id)) ?? (await store.list(200)).find((r) => r.id.startsWith(id));
+      const run = await loadRunByPrefix(store, id, config);
       if (!run?.approval) throw new Error(`No pending approval found for "${id}".`);
       deny(run.approval, by, reason);
       run.status = 'denied';
@@ -407,6 +434,18 @@ async function main(): Promise<void> {
 
     case 'serve': {
       holdOpen = true;
+
+      // The same net the deployed entry point casts. `serve` runs for hours
+      // with a pipeline attached, and a rejection escaping some background
+      // corner of a driver is not a reason to lose the run in flight and every
+      // connected event stream. Logged loudly, and the process stays up.
+      process.on('unhandledRejection', (reason) => {
+        console.error(
+          `${c.red('unhandled rejection:')} ${
+            reason instanceof Error ? (reason.stack ?? reason.message) : String(reason)
+          }`,
+        );
+      });
 
       // Resolve the repository *before* the server starts, not per request.
       // Runs, sessions, logs, and the symbol map all key on `repoPath`, so a
