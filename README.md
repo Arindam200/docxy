@@ -1,3 +1,5 @@
+![demo](assets/image.png)
+
 # Docxy
 
 A multi-agent documentation-and-changelog pipeline built on [TrueForge](https://trueforge.dev),
