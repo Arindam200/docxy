@@ -407,6 +407,8 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
     prepare?: () => Promise<Config>;
     /** Where it came from, for the log line when it finally starts. */
     source: string;
+    /** Run even if this commit has already been documented. */
+    force?: boolean;
   }
 
   /**
@@ -448,10 +450,18 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
     // directory the server happened to start in.
     activeRun = (async () => {
       const runConfig = next.prepare ? await next.prepare() : config;
-      return runPipeline(client, runConfig, next.commit, {
+      const result = await runPipeline(client, runConfig, next.commit, {
+        force: next.force ?? false,
         onRunUpdate: (run) => bus.publish('run', summarize(run)),
         onRoleEvent: (role, event) => bus.publish('role', { role, event }),
       });
+      // Not an error, and not silent either: a delivery that was already
+      // handled should say so rather than look like a run that vanished.
+      if (result.skipped) {
+        console.log(`skipped ${next.commit.slice(0, 7)}: ${result.skipped.reason}`);
+        bus.publish('skipped', { commit: next.commit, ...result.skipped });
+      }
+      return result;
     })()
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
@@ -482,7 +492,12 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
    * a reviewer clicking twice means one run, not two. A commit already waiting
    * is not queued again.
    */
-  const enqueueRun = (commit: string, source: string, prepare?: () => Promise<Config>): EnqueueResult => {
+  const enqueueRun = (
+    commit: string,
+    source: string,
+    prepare?: () => Promise<Config>,
+    force = false,
+  ): EnqueueResult => {
     if (commit === runningCommit || queue.some((item) => item.commit === commit)) {
       // Already in hand. Reported as accepted, because it is: the commit will
       // be documented, and the caller does not need to know it asked twice.
@@ -495,7 +510,7 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
       };
     }
 
-    queue.push(prepare ? { commit, prepare, source } : { commit, source });
+    queue.push(prepare ? { commit, prepare, source, force } : { commit, source, force });
     const depth = queue.length;
     const willWait = Boolean(activeRun);
     drainQueue();
@@ -504,9 +519,9 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
   };
 
   app.post('/api/runs', async (c) => {
-    const body = (await c.req.json().catch(() => ({}))) as { commit?: string };
+    const body = (await c.req.json().catch(() => ({}))) as { commit?: string; force?: boolean };
     const commit = body.commit || 'HEAD';
-    const result = enqueueRun(commit, 'api');
+    const result = enqueueRun(commit, 'api', undefined, body.force === true);
     if (!result.accepted) return c.json({ error: result.reason }, 503);
     return c.json({ started: true, commit, queued: result.queued, depth: result.depth });
   });

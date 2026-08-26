@@ -82,6 +82,7 @@ ${c.bold('Commands')}
   doctor                      Check the harness, the provider, and the repository
   models                      List models your Nebius account can serve
   run [commit]                Run the pipeline on a commit (default: HEAD)
+                              --force re-runs a commit already documented
   runs                        List recent runs
   show <run-id>               Show one run in detail
   approve <run-id> --by NAME  Sign off; opens the pull request once fully approved
@@ -282,13 +283,21 @@ async function main(): Promise<void> {
       const ref = positional[0] ?? 'HEAD';
 
       console.log(`${c.dim('Running the pipeline on')} ${ref}\n`);
-      const { run } = await runPipeline(client, config, ref, {
+      const { run, skipped } = await runPipeline(client, config, ref, {
+        force: Boolean(flags.force),
         onRoleEvent: (role, event) => {
           if (event.kind === 'session' || event.kind === 'subagent' || event.kind === 'approval') {
             console.log(`  ${c.dim(role.padEnd(18))} ${event.text}`);
           }
         },
       });
+
+      if (skipped) {
+        console.log(`${c.yellow('▌')} ${skipped.reason}`);
+        if (skipped.pullRequestUrl) console.log(`  ${skipped.pullRequestUrl}`);
+        console.log(`\n  ${c.dim(`Run it again anyway with:  docxy run ${ref} --force`)}`);
+        return;
+      }
 
       summarizeRun(run, config);
 

@@ -53,6 +53,26 @@ export interface PipelineResult {
   run: RunRecord;
   /** In-memory proposed file contents, for preview and PR creation. */
   proposedFiles: ProposedFile[];
+  /**
+   * Set when the commit had already been documented and no work was done.
+   *
+   * `run` is the earlier run in that case, not a new one — there is nothing new
+   * to record, and recording a run that did nothing would be the second lie.
+   */
+  skipped?: { reason: string; previousRunId: string; pullRequestUrl?: string };
+}
+
+export interface PipelineOptions extends PipelineHooks {
+  /**
+   * Run even if this commit has already been documented.
+   *
+   * The guard exists because nothing else was watching. A webhook redelivered
+   * after its run finished, a re-trigger from the dashboard, or a restart
+   * replaying a delivery each opened another identical pull request against
+   * another identical branch — six of them, in this repository's own demo,
+   * before anyone noticed they were all the same commit.
+   */
+  force?: boolean;
 }
 
 /**
@@ -150,12 +170,32 @@ export async function runPipeline(
   client: TrueForge,
   config: Config,
   commitRef: string,
-  hooks: PipelineHooks = {},
+  options: PipelineOptions = {},
 ): Promise<PipelineResult> {
+  const hooks: PipelineHooks = options;
   const { runs, sessions, knowledge } = createStores(config);
 
   const diff = await readCommitDiff(config.repoPath, commitRef);
   const priorMap = await knowledge.load();
+
+  // Before a single token is spent. The symbol map has recorded every commit it
+  // folded in since the beginning and nothing ever read it back, so the cheapest
+  // possible check was sitting there unused.
+  if (!options.force && priorMap.processedCommits.includes(diff.sha)) {
+    const previous = (await runs.list(200, [config.repoPath])).find(
+      (candidate) => candidate.commit.sha === diff.sha && candidate.status !== 'failed',
+    );
+    if (previous) {
+      const skipped: NonNullable<PipelineResult['skipped']> = {
+        reason:
+          `Commit ${diff.shortSha} has already been documented by run ` +
+          `${previous.id.slice(0, 8)}. Pass force to run it again.`,
+        previousRunId: previous.id,
+      };
+      if (previous.pullRequestUrl) skipped.pullRequestUrl = previous.pullRequestUrl;
+      return { run: previous, proposedFiles: previous.proposedFiles ?? [], skipped };
+    }
+  }
 
   // Docs may live on their own branch. This resolves to a throwaway worktree at
   // that branch's tip, or to the code checkout when they live alongside the code.
