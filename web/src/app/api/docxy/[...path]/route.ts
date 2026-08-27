@@ -28,7 +28,15 @@ async function forward(request: NextRequest, method: string): Promise<Response> 
     }
   }
 
-  const path = request.nextUrl.pathname.replace(/^\/api\/docxy/, "") + request.nextUrl.search;
+  // `/api/docxy/<x>` maps to the pipeline's `/api/<x>`, not to `/<x>`.
+  //
+  // Stripping the whole prefix dropped the upstream `/api` along with it, so
+  // every call through this proxy was forwarded one segment short of the route
+  // it wanted — `/api/docxy/instructions` reached the server as
+  // `/instructions`, which does not exist. Saving standing instructions from
+  // the dashboard has therefore never worked; it 404'd behind an error toast.
+  const path =
+    request.nextUrl.pathname.replace(/^\/api\/docxy/, "/api") + request.nextUrl.search;
   const body = method === "GET" || method === "HEAD"
     ? undefined
     : await request.arrayBuffer();

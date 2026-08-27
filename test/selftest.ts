@@ -7,9 +7,14 @@ import { checkLinks } from '../src/validate/links.js';
 import { decideScope, createApprovalRequest, signOff, deny, ApprovalError } from '../src/approval/gate.js';
 import { openDocsTree, resolveBaseRef } from '../src/git/worktree.js';
 import { listDocs, readRepoFile } from '../src/git/repo.js';
-import { prBaseBranch } from '../src/config.js';
+import { loadConfig, prBaseBranch } from '../src/config.js';
+import type { Config } from '../src/config.js';
+import { RunStore } from '../src/pipeline/store.js';
 import { costOf, priceFor } from '../src/trueforge/pricing.js';
 import { classifyTurnError } from '../src/trueforge/run.js';
+import { renderDiffForPrompt } from '../src/git/diff.js';
+import { nextPage } from '../src/github/checkout.js';
+import type { CommitDiff, DiffFile } from '../src/types.js';
 import { planRetry } from '../src/pipeline/retry.js';
 import type { RoleName } from '../src/config.js';
 import type { DocEdit, RoleTrace, RunRecord } from '../src/types.js';
@@ -37,6 +42,66 @@ catch { check('throws on garbage', true); }
 check('confidence percent', normalizeConfidence(85) === 0.85);
 check('confidence clamp', normalizeConfidence(2) === 1);
 check('confidence junk', normalizeConfidence('abc', 0.4) === 0.4);
+
+// --- diff budget ---------------------------------------------------------
+{
+  const file = (path: string, size: number): DiffFile => ({
+    path,
+    status: 'modified',
+    additions: 1,
+    deletions: 0,
+    patch: 'x'.repeat(size),
+    truncated: false,
+  });
+  const commitOf = (files: DiffFile[]): CommitDiff => ({
+    sha: 'abc123', shortSha: 'abc123', subject: 's', body: '', author: 'a', date: 'd',
+    files, totalAdditions: files.length, totalDeletions: 0,
+  });
+
+  const small = renderDiffForPrompt(commitOf([file('a.ts', 100), file('b.ts', 200)]));
+  check('a small diff is rendered whole', small.includes('a.ts') && small.includes('b.ts'));
+  check('a small diff drops nothing', !small.includes('too large to include'));
+
+  // Fifty files at the per-file cap: each one is legal, the sum is not.
+  const huge = commitOf(Array.from({ length: 50 }, (_, i) => file(`gen/f${i}.ts`, 12_000)));
+  const rendered = renderDiffForPrompt(huge);
+  check('a huge diff is bounded', rendered.length < 260_000, `got ${rendered.length}`);
+  check('dropped files are named, not silently missing',
+    rendered.includes('too large to include'));
+
+  // The one hand-written file among a hundred generated ones is the one that
+  // has documentation consequences, so it is the one that must survive.
+  const mixed = commitOf([
+    ...Array.from({ length: 40 }, (_, i) => file(`gen/f${i}.ts`, 12_000)),
+    file('src/api.ts', 300),
+  ]);
+  const keptSmall = renderDiffForPrompt(mixed);
+  check('the smallest file survives a crowded diff',
+    keptSmall.includes('x'.repeat(300)) && keptSmall.includes('src/api.ts'));
+
+  // The notice about dropped files is itself a rendering, and a commit that
+  // drops twenty thousand files would otherwise pay a line for every one —
+  // overflowing the context window on the explanation for why the diff was
+  // trimmed to protect it.
+  const deep = `gen/${'nested/'.repeat(15)}`;
+  const many = commitOf(
+    Array.from({ length: 20_000 }, (_, i) => file(`${deep}component-${i}.tsx`, 200)),
+  );
+  const manyRendered = renderDiffForPrompt(many);
+  check('a diff that drops thousands of files is still bounded',
+    manyRendered.length < 200_000, `got ${manyRendered.length}`);
+  check('the files past the manifest budget are counted, not listed',
+    manyRendered.includes('too many to list by name'));
+  check('the manifest still names the files it can',
+    manyRendered.includes('component-'));
+
+  // A release commit can paste a whole changelog into its message body.
+  const chatty = commitOf([file('src/api.ts', 100)]);
+  const rendered2 = renderDiffForPrompt({ ...chatty, body: 'y'.repeat(50_000) });
+  check('an enormous commit message body is truncated',
+    rendered2.length < 20_000 && rendered2.includes('message truncated'),
+    `got ${rendered2.length}`);
+}
 
 // --- turn failure classification -----------------------------------------
 check('max_tokens is named', classifyTurnError('max_tokens breached') === 'max-tokens');
@@ -114,6 +179,20 @@ check('ambiguous anchor caught', dup.problems.some((p) => p.kind === 'anchor-amb
 // --- links ---------------------------------------------------------------
 const brokenLink = checkLinks(repo, [{ path: 'docs/api.md', before: '', appliedEdits: 1,
   after: '# API\n\nSee [gone](./gone.md) and [ok](./guide.md).\n' }]);
+// A heading with punctuation between two spaces — em dashes are everywhere in
+// this project's own headings — must slug to the double hyphen GitHub produces.
+{
+  const doc = [{
+    path: 'g.md', before: '', appliedEdits: 0,
+    after: '# Guide\n\n[go](#stage-1--the-pipeline)\n[bad](#stage-1-the-pipeline)\n\n## Stage 1 — the pipeline\n\nx\n',
+  }];
+  const anchors = checkLinks(repo, doc);
+  check('an em-dash heading keeps both hyphens',
+    !anchors.some((b) => b.target === '#stage-1--the-pipeline'), JSON.stringify(anchors));
+  check('a collapsed anchor is still reported broken',
+    anchors.some((b) => b.target === '#stage-1-the-pipeline'));
+}
+
 check('broken relative link caught', brokenLink.length === 1 && brokenLink[0]!.target === './gone.md');
 
 const anchorLink = checkLinks(repo, [{ path: 'docs/api.md', before: '', appliedEdits: 1,
@@ -316,6 +395,91 @@ const empty = buildReport([]);
 check('empty history has no rates',
   empty.window.runs === 0 && empty.successRate === undefined &&
   empty.totals.costUsd === undefined && empty.roles.length === 0);
+
+// --- run scoping ---------------------------------------------------------
+// A run id is printed in every dashboard URL, so naming one in a query must
+// narrow the listing rather than reach past the repository filter.
+{
+  const dir = await mkdtemp(join(tmpdir(), 'docxy-runs-'));
+  const store = new RunStore({ stateDir: dir } as Config);
+
+  const runIn = (id: string, repoPath: string): RunRecord => ({
+    id,
+    repoPath,
+    commit: { sha: `${id}0000`, shortSha: id.slice(0, 7), subject: 's' },
+    startedAt: '2026-08-01T00:00:00.000Z',
+    status: 'done',
+    traces: [
+      {
+        role: 'change-analyst',
+        sessionId: 's1',
+        startedAt: '2026-08-01T00:00:00.000Z',
+        status: 'done',
+        reusedSession: false,
+        events: [{ at: '2026-08-01T00:00:01.000Z', kind: 'note', text: 'hello' }],
+      },
+    ],
+    priorSymbolCount: 0,
+    newSymbolCount: 0,
+  });
+
+  const mine = runIn('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', '/repos/mine');
+  const theirs = runIn('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', '/repos/theirs');
+  await store.save(mine);
+  await store.save(theirs);
+
+  const scope = ['/repos/mine'];
+  const own = await store.logs({ limit: 50, runId: mine.id, repoPaths: scope });
+  check('a named run inside the scope is readable', own.entries.length === 1);
+  const other = await store.logs({ limit: 50, runId: theirs.id, repoPaths: scope });
+  check('a named run outside the scope returns nothing', other.entries.length === 0);
+  const listed = await store.logs({ limit: 50, repoPaths: scope });
+  check('an unnamed listing stays inside the scope',
+    listed.entries.every((entry) => entry.runId === mine.id));
+
+  await rm(dir, { recursive: true, force: true });
+}
+
+// --- the retired approval variable ---------------------------------------
+// DOCXY_APPROVAL_MODE stopped being read. A deployment that had asked for a
+// gate with it must not silently lose one, and the new name must still win.
+{
+  const before = { ...process.env };
+  const reload = () => loadConfig().approval.required;
+
+  delete process.env.DOCXY_REQUIRE_APPROVAL;
+  delete process.env.DOCXY_APPROVAL_MODE;
+  check('no approval setting means no gate', reload() === false);
+
+  process.env.DOCXY_APPROVAL_MODE = 'always';
+  check('a retired "always" still gates', reload() === true);
+
+  process.env.DOCXY_APPROVAL_MODE = 'elevated';
+  check('a retired "elevated" still gates', reload() === true);
+
+  process.env.DOCXY_APPROVAL_MODE = 'auto';
+  check('a retired "auto" asked for no gate and gets none', reload() === false);
+
+  process.env.DOCXY_APPROVAL_MODE = 'always';
+  process.env.DOCXY_REQUIRE_APPROVAL = 'false';
+  check('the current name wins over the retired one', reload() === false);
+
+  process.env = before;
+}
+
+// --- installation pagination ---------------------------------------------
+// An installation past a hundred repositories is not an error, and the ones on
+// page two were silently absent from every listing that matters.
+{
+  const link =
+    '<https://api.github.com/installation/repositories?per_page=100&page=2>; rel="next", ' +
+    '<https://api.github.com/installation/repositories?per_page=100&page=5>; rel="last"';
+  check('the next page is followed',
+    nextPage(link) === 'https://api.github.com/installation/repositories?per_page=100&page=2');
+  check('the last page ends the walk',
+    nextPage('<https://api.github.com/x?page=1>; rel="prev"') === null);
+  check('no link header ends the walk', nextPage(null) === null);
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

@@ -4,6 +4,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { mkdir, stat } from 'node:fs/promises';
 import {
+  githubFetch,
   installationToken,
   readAppCredentials,
   scrubToken,
@@ -40,30 +41,57 @@ export async function installationRepositories(
   credentials: AppCredentials,
 ): Promise<InstalledRepo[]> {
   const token = await installationToken(credentials, []);
-  const response = await fetch('https://api.github.com/installation/repositories?per_page=100', {
-    headers: {
-      authorization: `Bearer ${token}`,
-      accept: 'application/vnd.github+json',
-      'user-agent': 'docxy',
-    },
-  });
-  if (!response.ok) {
-    throw new Error(
-      `Could not list the installation's repositories (HTTP ${response.status}): ${await response.text()}`,
-    );
-  }
-  // SAFETY: a 2xx from this endpoint is GitHub's published shape, and every
-  // field below is declared optional and proven present by the filter.
-  const body = (await response.json()) as {
-    repositories?: Array<{ full_name?: string; default_branch?: string }>;
+  const headers = {
+    authorization: `Bearer ${token}`,
+    accept: 'application/vnd.github+json',
+    'user-agent': 'docxy',
   };
-  // SAFETY: the predicate below is the parse — an entry reaches `map` only once
-  // both of the fields it reads have been proven present.
-  return (body.repositories ?? [])
-    .filter((r): r is { full_name: string; default_branch: string } =>
-      Boolean(r.full_name && r.default_branch),
-    )
-    .map((r) => ({ fullName: r.full_name, defaultBranch: r.default_branch }));
+
+  const found: InstalledRepo[] = [];
+  // Paginated, because the first page is not the answer. A hundred repositories
+  // sounds like plenty until an installation is account-wide, and the ones past
+  // it did not fail — they were absent, from `syncedRepoPaths`, from the
+  // dashboard's list, and from the scope `docxy approve <short-id>` searches.
+  // Bounded so a malformed `Link` header cannot loop forever.
+  let url: string | null = 'https://api.github.com/installation/repositories?per_page=100';
+  for (let page = 0; url && page < 50; page += 1) {
+    const response: Response = await githubFetch(url, { headers });
+    if (!response.ok) {
+      throw new Error(
+        `Could not list the installation's repositories (HTTP ${response.status}): ${await response.text()}`,
+      );
+    }
+    // SAFETY: a 2xx from this endpoint is GitHub's published shape, and every
+    // field below is declared optional and proven present by the filter.
+    const body = (await response.json()) as {
+      repositories?: Array<{ full_name?: string; default_branch?: string }>;
+    };
+    // SAFETY: the predicate below is the parse — an entry reaches `map` only
+    // once both of the fields it reads have been proven present.
+    for (const repo of body.repositories ?? []) {
+      if (!repo.full_name || !repo.default_branch) continue;
+      found.push({ fullName: repo.full_name, defaultBranch: repo.default_branch });
+    }
+    url = nextPage(response.headers.get('link'));
+  }
+
+  return found;
+}
+
+/**
+ * The `rel="next"` URL from a `Link` header, or null at the last page.
+ *
+ * GitHub's own pagination contract: following the header is the documented way
+ * to walk it, and computing page numbers instead drifts the moment the listing
+ * changes underneath.
+ */
+export function nextPage(link: string | null): string | null {
+  if (!link) return null;
+  for (const part of link.split(',')) {
+    const match = /<([^>]+)>\s*;\s*rel="next"/.exec(part.trim());
+    if (match?.[1]) return match[1];
+  }
+  return null;
 }
 
 /**
@@ -75,6 +103,34 @@ export async function installationRepositories(
  */
 export function checkoutPathFor(repo: string): string {
   return join(homedir(), '.docxy', 'checkouts', repo.replace('/', '__'));
+}
+
+/**
+ * Every repository path whose runs belong to this deployment.
+ *
+ * The configured path is always included — a developer pointing
+ * `DOCXY_REPO_PATH` at a working tree is still using docxy — and so is the
+ * managed checkout of each repository the App is installed on, because that is
+ * where a webhook-driven run actually happened.
+ *
+ * Shared with the CLI rather than living in the server, because they were
+ * drifting: the dashboard listed runs across every synced repository while
+ * `docxy approve <short-id>` searched only the directory it was invoked from,
+ * so a run the dashboard showed could not be found by the command the
+ * dashboard told you to run.
+ *
+ * Degrades to the local path alone. An unreachable GitHub should narrow what
+ * can be listed, never fail the listing.
+ */
+export async function syncedRepoPaths(repoPath: string): Promise<string[]> {
+  try {
+    const credentials = readAppCredentials();
+    if (!credentials) return [repoPath];
+    const installed = await installationRepositories(credentials);
+    return [...new Set([repoPath, ...installed.map((repo) => checkoutPathFor(repo.fullName))])];
+  } catch {
+    return [repoPath];
+  }
 }
 
 async function exists(path: string): Promise<boolean> {

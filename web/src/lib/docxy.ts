@@ -76,7 +76,6 @@ export interface RunSummary {
   startedAt: string;
   finishedAt?: string;
   scope?: string;
-  gate?: unknown;
   pullRequestUrl?: string;
   durationMs?: number;
   totals?: RunTotals;

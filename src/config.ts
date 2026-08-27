@@ -95,6 +95,14 @@ export interface Config {
     /** Wall-clock ceiling for a single attempt. */
     attemptTimeoutMs: number;
     /**
+     * Wall-clock ceiling for a whole run.
+     *
+     * Per-attempt timeouts bound each role but not their sum: five roles, three
+     * attempts each, all crawling just inside their own deadline, is a run that
+     * never ends and blocks every push behind it. This is the outer bound.
+     */
+    runTimeoutMs: number;
+    /**
      * Turns a session may carry before it is retired and rebuilt.
      *
      * Session reuse is what makes the second commit cheaper than the first, but
@@ -130,6 +138,31 @@ function envBool(key: string, fallback: boolean): boolean {
   const v = process.env[key];
   if (v === undefined || v === '') return fallback;
   return /^(1|true|yes|on)$/i.test(v);
+}
+
+/**
+ * Whether the approval gate holds proposals back.
+ *
+ * `DOCXY_REQUIRE_APPROVAL` replaced `DOCXY_APPROVAL_MODE`, whose `elevated` and
+ * `always` values *did* gate. Reading only the new name would answer a
+ * deployment that had asked for a gate by quietly not having one — the one
+ * direction this must never fail in — so the retired name still turns the gate
+ * on, loudly, until whoever set it has moved across.
+ */
+function approvalRequired(): boolean {
+  const explicit = process.env.DOCXY_REQUIRE_APPROVAL;
+  if (explicit !== undefined && explicit !== '') return envBool('DOCXY_REQUIRE_APPROVAL', false);
+
+  const retired = env('DOCXY_APPROVAL_MODE').trim().toLowerCase();
+  if (retired === '' || retired === 'auto') return false;
+
+  console.warn(
+    `DOCXY_APPROVAL_MODE is no longer read (it was set to "${retired}"). The approval ` +
+      'gate is now one setting: DOCXY_REQUIRE_APPROVAL=true. Treating this as ' +
+      'DOCXY_REQUIRE_APPROVAL=true so the gate you asked for is still there — set it ' +
+      'explicitly and drop DOCXY_APPROVAL_MODE.',
+  );
+  return true;
 }
 
 /**
@@ -215,11 +248,12 @@ export function loadConfig(overrides: Partial<{ repoPath: string }> = {}): Confi
     },
     approval: {
       staleAfterMinutes: envInt('DOCXY_APPROVAL_STALE_MINUTES', 60),
-      required: envBool('DOCXY_REQUIRE_APPROVAL', false),
+      required: approvalRequired(),
     },
     agent: {
       maxAttempts: Math.max(1, envInt('DOCXY_ROLE_MAX_ATTEMPTS', 3)),
       attemptTimeoutMs: Math.max(30, envInt('DOCXY_ROLE_TIMEOUT_SECONDS', 420)) * 1000,
+      runTimeoutMs: Math.max(60, envInt('DOCXY_RUN_TIMEOUT_SECONDS', 2700)) * 1000,
       sessionMaxTurns: Math.max(0, envInt('DOCXY_SESSION_MAX_TURNS', 12)),
     },
     server: { port: envInt('DOCXY_PORT', 4317) },

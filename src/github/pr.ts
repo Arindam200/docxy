@@ -7,13 +7,74 @@ import { prBaseBranch, type Config } from '../config.js';
 import { resolveBaseRef } from '../git/worktree.js';
 import type { RunRecord } from '../types.js';
 import type { ProposedFile } from '../types.js';
-import { installationToken, readAppCredentials, scrubToken } from './app.js';
+import { githubFetch, installationToken, readAppCredentials, scrubToken } from './app.js';
 
 const exec = promisify(execFile);
 
 async function git(cwd: string, args: string[]): Promise<string> {
   const { stdout } = await exec('git', args, { cwd, maxBuffer: 32 * 1024 * 1024 });
   return stdout.trim();
+}
+
+/**
+ * The remote branch is standing on work docxy did not write.
+ *
+ * Reported rather than forced past, and distinguished from an ordinary push
+ * failure because the answer is different: nothing here is retryable, and the
+ * branch needs a human to look at it.
+ */
+export class BranchConflictError extends Error {}
+
+/**
+ * Push over a branch this run published earlier — and only such a branch.
+ *
+ * `--force-with-lease` needs an expected value, and there is no remote-tracking
+ * ref to supply one: the push goes to a tokenized URL minted for this call, not
+ * to a configured remote. So the tip is read explicitly, checked for docxy's
+ * own authorship, and then leased against exactly what was read. A branch that
+ * moves between the read and the push refuses the push rather than resolving
+ * the race in our favour.
+ */
+async function republish(
+  worktree: string,
+  remote: string,
+  branch: string,
+  run: RunRecord,
+  botEmail: string,
+): Promise<void> {
+  const listed = await git(worktree, ['ls-remote', remote, `refs/heads/${branch}`]).catch(() => '');
+  const remoteSha = listed.split(/\s+/)[0] ?? '';
+  if (!remoteSha) {
+    // The branch is gone, or was never the reason for the rejection. Retry
+    // plainly; whatever fails now fails with its own message.
+    await git(worktree, ['push', remote, `HEAD:refs/heads/${branch}`]);
+    return;
+  }
+
+  await git(worktree, ['fetch', '--no-tags', '--force', remote, `refs/heads/${branch}`]);
+  const [committer = '', ...body] = (
+    await git(worktree, ['log', '-1', '--format=%ce%n%B', remoteSha])
+  ).split('\n');
+
+  // Two things have to hold: the App committed the tip, and the tip says it was
+  // drafted from this run's commit. The first rules out a collaborator's push,
+  // the second rules out an unrelated docxy branch that collided on the name.
+  const ours = committer.trim() === botEmail && body.join('\n').includes(run.commit.sha);
+  if (!ours) {
+    throw new BranchConflictError(
+      `The remote branch "${branch}" carries commits this run did not publish, so ` +
+        'pushing over it would destroy them. Nothing was pushed, and the proposal is ' +
+        'committed on that branch locally — inspect the remote branch, then delete or ' +
+        'rename it if the work on it is finished.',
+    );
+  }
+
+  await git(worktree, [
+    'push',
+    `--force-with-lease=refs/heads/${branch}:${remoteSha}`,
+    remote,
+    `HEAD:refs/heads/${branch}`,
+  ]);
 }
 
 export function buildPrBody(run: RunRecord, concerns: string[] = []): string {
@@ -138,13 +199,27 @@ export async function openPullRequest(
     );
   }
 
+  /**
+   * The checkout this run actually read, which is not always the one this
+   * process was started in.
+   *
+   * A run records the repository it documented. Publishing used the *config's*
+   * path instead, so approving a webhook-driven run from a terminal sitting in
+   * some other repository resolved the branch, the base ref, and the target
+   * repository from whatever happened to be in that directory — an installation
+   * token request for the wrong repository at best, and a pull request opened
+   * against the wrong repository at worst.
+   */
+  const repoPath = run.repoPath || config.repoPath;
+
   // Check the remote before doing any work, so a repo with no origin fails with
   // an explanation instead of raw git stderr after a commit already exists.
   try {
-    await git(config.repoPath, ['remote', 'get-url', 'origin']);
+    await git(repoPath, ['remote', 'get-url', 'origin']);
   } catch {
     throw new Error(
-      'This repository has no "origin" remote, so there is nowhere to push a ' +
+      `The repository this run documented (${repoPath}) has no "origin" remote, ` +
+        'so there is nowhere to push a ' +
         'branch or open a pull request. Add one with `git remote add origin <url>`, ' +
         'or run the pipeline against a repository that has one.',
     );
@@ -165,12 +240,14 @@ export async function openPullRequest(
   }
 
   const base = prBaseBranch(config);
-  const baseRef = await resolveBaseRef(config.repoPath, base);
+  const baseRef = await resolveBaseRef(repoPath, base);
 
   const branch = `docxy/${run.commit.shortSha}-${run.id.slice(0, 8)}`;
   const worktree = await mkdtemp(join(tmpdir(), 'docxy-wt-'));
 
-  const repo = config.github.repo ?? (await inferRepo(config.repoPath));
+  // Inferred from the run's own checkout for the same reason. `GITHUB_REPOSITORY`
+  // still wins where an operator has been explicit.
+  const repo = config.github.repo ?? (await inferRepo(repoPath));
   // Minted here, at the moment it is used. An installation token lives an hour
   // and the approval gate can wait days, so one stored on the run record would
   // be long dead by the time a reviewer signs off.
@@ -178,10 +255,10 @@ export async function openPullRequest(
 
   try {
     // A worktree left behind by a killed run holds a lock that blocks this one.
-    await git(config.repoPath, ['worktree', 'prune']).catch(() => {});
+    await git(repoPath, ['worktree', 'prune']).catch(() => {});
     // Detached at the resolved tip: the base branch may already be checked out
     // elsewhere, and git refuses to check out one branch in two worktrees.
-    await git(config.repoPath, ['worktree', 'add', '--detach', worktree, baseRef]);
+    await git(repoPath, ['worktree', 'add', '--detach', worktree, baseRef]);
     // `-B`, not `-b`: publishing the same run twice (a retried push, a resumed
     // approval) must land on the same branch rather than failing on a name that
     // is already taken locally.
@@ -228,17 +305,21 @@ export async function openPullRequest(
       try {
         await git(worktree, ['push', remote, `HEAD:refs/heads/${branch}`]);
       } catch (first) {
-        // The branch already exists with different content, which means this
-        // run was published before and is being republished. The name encodes
-        // this run's id, so nothing but an earlier attempt at the same proposal
-        // can be standing on it.
+        // The branch already exists with different content, which usually means
+        // this run was published before and is being republished. The name
+        // encodes this run's id, so an earlier attempt at the same proposal is
+        // by far the likeliest thing standing on it — but likeliest is not
+        // certain, and an unconditional `--force` answers a collaborator's
+        // commits by deleting them.
         const stale =
           first instanceof Error &&
           /non-fast-forward|\brejected\b|already exists/i.test(first.message);
         if (!stale) throw first;
-        await git(worktree, ['push', '--force', remote, `HEAD:refs/heads/${branch}`]);
+        await republish(worktree, remote, branch, run, app.botEmail);
       }
     } catch (err) {
+      // Already precise about what is on the remote and why it was left alone.
+      if (err instanceof BranchConflictError) throw err;
       // The token is in the command line, so it is in git's error output too.
       const detail =
         err instanceof Error ? err.message.split('\n').slice(-3).join(' ') : String(err);
@@ -262,7 +343,7 @@ export async function openPullRequest(
     });
     return { ...created, branch };
   } finally {
-    await git(config.repoPath, ['worktree', 'remove', '--force', worktree]).catch(() => {});
+    await git(repoPath, ['worktree', 'remove', '--force', worktree]).catch(() => {});
     await rm(worktree, { recursive: true, force: true }).catch(() => {});
   }
 }
@@ -297,7 +378,7 @@ async function createPullRequest(
 
   let lastDetail = '';
   for (let attempt = 1; attempt <= 3; attempt += 1) {
-    const res = await fetch(`https://api.github.com/repos/${repo}/pulls`, {
+    const res = await githubFetch(`https://api.github.com/repos/${repo}/pulls`, {
       method: 'POST',
       headers,
       // Some plans do not allow drafts; a rejected draft is retried as a normal
@@ -357,7 +438,7 @@ async function findOpenPullRequest(
   headers: Record<string, string>,
 ): Promise<string | null> {
   const owner = repo.split('/')[0];
-  const res = await fetch(
+  const res = await githubFetch(
     `https://api.github.com/repos/${repo}/pulls?state=open&head=${owner}:${branch}`,
     { headers },
   );

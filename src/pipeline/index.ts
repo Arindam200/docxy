@@ -53,6 +53,26 @@ export interface PipelineResult {
   run: RunRecord;
   /** In-memory proposed file contents, for preview and PR creation. */
   proposedFiles: ProposedFile[];
+  /**
+   * Set when the commit had already been documented and no work was done.
+   *
+   * `run` is the earlier run in that case, not a new one — there is nothing new
+   * to record, and recording a run that did nothing would be the second lie.
+   */
+  skipped?: { reason: string; previousRunId: string; pullRequestUrl?: string };
+}
+
+export interface PipelineOptions extends PipelineHooks {
+  /**
+   * Run even if this commit has already been documented.
+   *
+   * The guard exists because nothing else was watching. A webhook redelivered
+   * after its run finished, a re-trigger from the dashboard, or a restart
+   * replaying a delivery each opened another identical pull request against
+   * another identical branch — six of them, in this repository's own demo,
+   * before anyone noticed they were all the same commit.
+   */
+  force?: boolean;
 }
 
 /**
@@ -150,12 +170,43 @@ export async function runPipeline(
   client: TrueForge,
   config: Config,
   commitRef: string,
-  hooks: PipelineHooks = {},
+  options: PipelineOptions = {},
 ): Promise<PipelineResult> {
+  const hooks: PipelineHooks = options;
   const { runs, sessions, knowledge } = createStores(config);
+
+  /**
+   * The whole run's budget, started at the door.
+   *
+   * It used to be created four awaits in — after the diff, the symbol map, the
+   * docs worktree, and the price table — so everything before that point was
+   * outside the budget it is named for. A repository slow to read could spend
+   * minutes there and still hand the agents a full clock, and the lane behind
+   * it waited for all of it.
+   */
+  const runDeadline = AbortSignal.timeout(config.agent.runTimeoutMs);
 
   const diff = await readCommitDiff(config.repoPath, commitRef);
   const priorMap = await knowledge.load();
+
+  // Before a single token is spent. The symbol map has recorded every commit it
+  // folded in since the beginning and nothing ever read it back, so the cheapest
+  // possible check was sitting there unused.
+  if (!options.force && priorMap.processedCommits.includes(diff.sha)) {
+    const previous = (await runs.list(200, [config.repoPath])).find(
+      (candidate) => candidate.commit.sha === diff.sha && candidate.status !== 'failed',
+    );
+    if (previous) {
+      const skipped: NonNullable<PipelineResult['skipped']> = {
+        reason:
+          `Commit ${diff.shortSha} has already been documented by run ` +
+          `${previous.id.slice(0, 8)}. Pass force to run it again.`,
+        previousRunId: previous.id,
+      };
+      if (previous.pullRequestUrl) skipped.pullRequestUrl = previous.pullRequestUrl;
+      return { run: previous, proposedFiles: previous.proposedFiles ?? [], skipped };
+    }
+  }
 
   // Docs may live on their own branch. This resolves to a throwaway worktree at
   // that branch's tip, or to the code checkout when they live alongside the code.
@@ -173,37 +224,104 @@ export async function runPipeline(
     newSymbolCount: 0,
   };
 
+  /**
+   * Free-form standing instructions, as saved from the dashboard.
+   *
+   * `PUT /api/instructions` has written this file since the endpoint existed
+   * and nothing ever read it, so every instruction anyone typed into the
+   * dashboard was persisted, rendered back to them, and silently ignored. The
+   * two drafting roles are the ones the endpoint's own description promises
+   * read it, and they are the two where a house style actually applies.
+   */
+  const standingInstructions = await readRepoFile(config.stateDir, 'instructions.md');
+  const houseStyle = standingInstructions?.trim()
+    ? [
+        '',
+        '## Standing instructions for this repository',
+        '',
+        'These come from the team, not from the commit. They outrank your default',
+        'style where the two disagree, and they never license inventing a fact the',
+        'diff does not support.',
+        '',
+        standingInstructions.trim(),
+      ].join('\n')
+    : '';
+
   // Once per run, cached for an hour, and empty if the endpoint is unreachable.
   const prices = await loadPrices(config);
 
   /**
-   * Serialized, and never fatal.
+   * Serialized, coalescing, and never fatal.
    *
-   * The Docs Updater and Changelog Author run concurrently and both write the
-   * same `RunRecord`; against Postgres each save deletes and re-inserts the
-   * run's roles and events inside a transaction, so two of them in flight at
-   * once either deadlock or lose a role's trace. Chaining them costs nothing —
-   * a save is milliseconds — and makes the record single-writer again.
+   * Three properties, each earning its place:
    *
-   * A failed save is reported and swallowed: losing the audit trail for a
-   * moment is bad, killing a run that is otherwise going fine is worse.
+   * *Serialized*, because the Docs Updater and Changelog Author run
+   * concurrently and both write the same `RunRecord`. Against Postgres a save
+   * rewrites the run's roles and events in one transaction, and two of those in
+   * flight at once either deadlock or lose a role's trace.
+   *
+   * *Coalescing*, because the record is saved nineteen times in a run and
+   * seventeen of those are progress updates on a record that is about to change
+   * again. Callers that arrive while a write is in flight collapse into a
+   * single follow-up write of the record as it stands when that write starts —
+   * so a burst of role events costs one save, not one each. `flush` forces the
+   * write for the points that must be durable.
+   *
+   * *Never fatal*, because losing the audit trail for a moment is bad and
+   * killing a run that is otherwise going fine is worse.
    */
-  let writes: Promise<void> = Promise.resolve();
-  const persist = (): Promise<void> => {
-    writes = writes.then(async () => {
-      rollUp(run, config, prices);
-      try {
-        await runs.save(run);
-      } catch (err) {
-        console.error(
-          `could not persist run ${run.id.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-      hooks.onRunUpdate?.(run);
-    });
-    return writes;
+  let writing: Promise<void> | null = null;
+  let pendingWrite: Promise<void> | null = null;
+
+  const writeNow = async (): Promise<void> => {
+    rollUp(run, config, prices);
+    try {
+      await runs.save(run);
+    } catch (err) {
+      console.error(
+        `could not persist run ${run.id.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    hooks.onRunUpdate?.(run);
   };
-  await persist();
+
+  const persist = (): Promise<void> => {
+    if (!writing) {
+      writing = writeNow().finally(() => {
+        writing = null;
+      });
+      return writing;
+    }
+    // A write is already going. Ride the one already queued behind it rather
+    // than adding another: they would both save the same final state.
+    pendingWrite ??= writing
+      .then(() => {
+        pendingWrite = null;
+        return persist();
+      })
+      .catch(() => {});
+    return pendingWrite;
+  };
+
+  /**
+   * Wait for the record on disk to reflect everything written so far.
+   *
+   * Bounded rather than looping until quiet: at every point this is called the
+   * run is between roles and nothing else is writing, so two passes is already
+   * one more than needed — but a `while` here would be a spin waiting on a
+   * writer that never stops, and a durability barrier must not be able to hang
+   * the run it is protecting.
+   */
+  const flush = async (): Promise<void> => {
+    for (let pass = 0; pass < 3; pass += 1) {
+      await persist();
+      const inFlight = writing ?? pendingWrite;
+      if (!inFlight) return;
+      await inFlight;
+    }
+  };
+
+  await flush();
 
   /**
    * Run one role to completion, retrying on its own terms, and record one trace
@@ -289,14 +407,16 @@ export async function runPipeline(
       await persist();
 
       // A hung turn used to hang the whole run: `runTurn` accepted a signal and
-      // nothing ever passed one.
+      // nothing ever passed one. Two deadlines apply — this attempt's, and
+      // whatever is left of the run's — and the earlier one wins.
       const timeout = AbortSignal.timeout(config.agent.attemptTimeoutMs);
+      const deadline = AbortSignal.any([timeout, runDeadline]);
       let failure: AttemptFailure | undefined;
       let raw = '';
 
       try {
         const result = await runTurn(client, session.id, prompt, {
-          signal: timeout,
+          signal: deadline,
           onEvent: (event) => {
             trace.events.push(event);
             hooks.onRoleEvent?.(role.name, event);
@@ -306,6 +426,17 @@ export async function runPipeline(
 
         if (result.turnId) trace.turnId = result.turnId;
         raw = result.text;
+
+        // Counted here, not after a successful parse.
+        //
+        // The count exists to retire a session before its transcript overflows,
+        // and the transcript grows the moment a turn is *submitted* — whether
+        // or not the answer came back usable. Counting only successes meant a
+        // session that kept failing never reached the limit, so it never
+        // rotated, so it kept growing: precisely the spiral rotation was built
+        // to stop. A `max_tokens` failure is the worst case of all, because the
+        // model generated its whole budget into the transcript before failing.
+        await sessions.recordTurn(role.name).catch(() => {});
         // Recorded before anything can throw. The raw text is the field that
         // explains a failure — a `max_tokens breached` error has as often meant
         // a repetition loop as a budget that was too small — and it is what
@@ -329,9 +460,6 @@ export async function runPipeline(
         } else {
           try {
             const parsed = extractJson<T>(role.title, result.text);
-            // The turn is only counted once it produced something usable, so a
-            // session is never retired on the strength of turns that failed.
-            await sessions.recordTurn(role.name).catch(() => {});
             finish('done');
             note(
               'result',
@@ -348,20 +476,32 @@ export async function runPipeline(
         }
       } catch (err) {
         if (abortedBy(err)) {
-          // A caller-side abort is a decision, not a fault. A timeout is ours,
-          // and is worth another attempt.
-          const timedOut = timeout.aborted;
-          lastError = new Error(
-            timedOut
-              ? `[${role.title}] no answer within ${Math.round(config.agent.attemptTimeoutMs / 1000)}s`
-              : `[${role.title}] the run was cancelled`,
-          );
-          if (!timedOut) {
+          // Three ways to get here, and they are not the same event. The run's
+          // own deadline is terminal — retrying cannot fit inside a budget that
+          // is already spent. This attempt's deadline is worth another try. A
+          // caller-side abort is a decision, not a fault.
+          if (runDeadline.aborted) {
+            lastError = new Error(
+              `[${role.title}] the run exceeded its ${Math.round(config.agent.runTimeoutMs / 1000)}s budget`,
+            );
+            finish('failed', 'timeout');
+            trace.error = lastError.message;
+            await persist();
+            throw lastError;
+          }
+          if (!timeout.aborted) {
+            lastError = new Error(`[${role.title}] the run was cancelled`);
             finish('failed', 'aborted');
             trace.error = lastError.message;
             await persist();
             throw lastError;
           }
+          lastError = new Error(
+            `[${role.title}] no answer within ${Math.round(config.agent.attemptTimeoutMs / 1000)}s`,
+          );
+          // Abandoned here, but the harness still has it and the transcript
+          // still grew, so it counts against the session like any other turn.
+          await sessions.recordTurn(role.name).catch(() => {});
           failure = 'transient';
           note('error', lastError.message);
         } else {
@@ -383,7 +523,24 @@ export async function runPipeline(
 
       fresh = plan.freshSession;
       nudge = plan.nudge ?? '';
-      if (plan.delayMs > 0) await sleep(plan.delayMs);
+      if (plan.delayMs > 0) {
+        // Backing off spends the run's budget like everything else does. A
+        // rate-limited role that sleeps past the deadline has spent it
+        // sleeping, and waking to try again would only spend more — so this
+        // ends the same way an exhausted budget ends anywhere else.
+        try {
+          await sleep(plan.delayMs, runDeadline);
+        } catch {
+          lastError = new Error(
+            `[${role.title}] the run exceeded its ` +
+              `${Math.round(config.agent.runTimeoutMs / 1000)}s budget while backing off`,
+          );
+          finish('failed', 'timeout');
+          trace.error = lastError.message;
+          await persist();
+          throw lastError;
+        }
+      }
     }
 
     finish('failed', 'harness-error');
@@ -476,6 +633,7 @@ export async function runPipeline(
               '## Commit diff',
               '',
               diffText,
+              houseStyle,
             ].join('\n'),
           ),
       invoke<ChangelogProposal>(
@@ -494,6 +652,7 @@ export async function runPipeline(
           `## Existing changelog (${config.docs.changelogPath}) — match its voice`,
           '',
           existingChangelog.slice(0, 6000),
+          houseStyle,
         ].join('\n'),
       ),
     ]);
@@ -627,7 +786,7 @@ export async function runPipeline(
       run.status = 'done';
       run.error = undefined;
       run.finishedAt = new Date().toISOString();
-      await persist();
+      await flush();
       return { run, proposedFiles };
     }
 
@@ -647,12 +806,17 @@ export async function runPipeline(
     const { scope, rationale } = decideScope(classification, changelog, verdict.scope);
     run.approval = createApprovalRequest(run.id, scope, rationale, verdict.summary);
 
+    // Decided here, where the verdict and the validation report are still in
+    // hand, and recorded on the run so whoever publishes it later replays this
+    // judgement rather than re-deriving it — or, as it was, losing it.
+    run.publication = { draft: concerns.length > 0, concerns };
+
     if (config.approval.required) {
       // The gate exists and somebody asked for it. Stop here; the server and the
       // CLI both know how to carry an approved run the rest of the way.
       run.status = 'awaiting-approval';
       if (concerns.length > 0) run.error = concerns.join(' | ');
-      await persist();
+      await flush();
       return { run, proposedFiles };
     }
 
@@ -665,13 +829,12 @@ export async function runPipeline(
     autoApprove(run.approval);
     run.status = 'approved';
     if (concerns.length > 0) run.error = concerns.join(' | ');
-    await persist();
+    // Durable before the branch is pushed: if publishing dies here, the record
+    // must already name the files that were approved, or the proposal is lost.
+    await flush();
 
     try {
-      const pr = await openPullRequest(config, run, proposedFiles, {
-        draft: concerns.length > 0,
-        concerns,
-      });
+      const pr = await openPullRequest(config, run, proposedFiles, run.publication);
       run.pullRequestUrl = pr.url;
       run.status = 'done';
       run.error = concerns.length > 0 ? concerns.join(' | ') : undefined;
@@ -686,14 +849,14 @@ export async function runPipeline(
     }
 
     run.finishedAt = new Date().toISOString();
-    await persist();
+    await flush();
 
     return { run, proposedFiles };
   } catch (err) {
     run.status = 'failed';
     run.error = err instanceof Error ? err.message : String(err);
     run.finishedAt = new Date().toISOString();
-    await persist();
+    await flush();
     throw Object.assign(err instanceof Error ? err : new Error(String(err)), { run });
   } finally {
     await docsTree.dispose();

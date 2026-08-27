@@ -192,6 +192,14 @@ export interface RoleTrace {
   attempts?: number;
 }
 
+/** How a proposal should be published, and what it must say when it is. */
+export interface PublicationIntent {
+  /** True when the pipeline itself objected, so the pull request opens unmergeable. */
+  draft: boolean;
+  /** The objections, verbatim, for the top of the pull request body. */
+  concerns: string[];
+}
+
 export interface RunRecord {
   id: string;
   repoPath: string;
@@ -213,6 +221,17 @@ export interface RunRecord {
   /** Branch the docs were read from, when they live on their own branch. */
   docsBranch?: string;
   approval?: ApprovalRequest;
+  /**
+   * What publishing this proposal should do, decided when the run finished
+   * rather than when someone finally signs off.
+   *
+   * The gate can hold a run for days, and the reasons a proposal is unfit —
+   * the Coordinator's rejection, a failed validation check — are known only
+   * while the run is still in memory. Recording the decision here is what
+   * keeps an approved-but-unsound proposal opening as a draft that says why,
+   * instead of a clean pull request that says nothing.
+   */
+  publication?: PublicationIntent;
   pullRequestUrl?: string;
   error?: string;
   /**
