@@ -115,6 +115,11 @@ export interface ValidationCheck {
   name: string;
   status: "pass" | "fail" | "skipped";
   detail: string;
+  /**
+   * Where the check ran. Absent on checks that execute nothing, and on runs
+   * recorded before validation could run anywhere but the pipeline's own host.
+   */
+  where?: "sandbox" | "local";
 }
 
 /** The whole run record, as `GET /api/runs/:id` returns it. */

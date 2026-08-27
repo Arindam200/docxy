@@ -722,6 +722,16 @@ export async function runPipeline(
       changelog,
       docsPath: docsTree.path,
       stageable: docsTree.disposable,
+      client,
+      // Validation is the one stage that executes anything, and on a slow docs
+      // build it is the longest silence in the run. Routing its events to the
+      // Coordinator's lane keeps the timeline moving and makes the sandbox
+      // visible while it works rather than only in the finished report.
+      onEvent: (event) => {
+        hooks.onRoleEvent?.('coordinator', event);
+        hooks.onRunUpdate?.(run);
+      },
+      signal: runDeadline,
     });
     run.validation = validation;
     await persist();

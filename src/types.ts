@@ -102,6 +102,12 @@ export interface ValidationCheck {
   name: string;
   status: 'pass' | 'fail' | 'skipped';
   detail: string;
+  /**
+   * Where the check ran. Absent on checks that execute nothing (link and anchor
+   * resolution, semver consistency) and on records written before validation
+   * could run anywhere but this machine.
+   */
+  where?: 'sandbox' | 'local';
 }
 
 export interface ValidationReport {

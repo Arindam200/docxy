@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { loadConfig, prBaseBranch, ROLE_NAMES, type Config } from './config.js';
 import { createClient, assertReachable } from './trueforge/client.js';
-import { listAvailableModels, listNebiusModels, registerNebiusProvider } from './trueforge/setup.js';
+import { listAvailableModels, listNebiusModels, registerNebiusProvider, registerSandboxProvider } from './trueforge/setup.js';
+import { sandboxAvailability } from './validate/sandbox.js';
 import { runPipeline, rebuildProposedFiles } from './pipeline/index.js';
 import { createStores, type RunStorage } from './pipeline/stores.js';
 import type { RunRecord } from './types.js';
@@ -197,6 +198,13 @@ async function main(): Promise<void> {
       } else {
         console.log(`${c.green('✓')} All registered models resolve.`);
       }
+
+      const sandbox = await registerSandboxProvider(client, config);
+      console.log(
+        sandbox.action === 'registered'
+          ? `${c.green('✓')} Daytona sandbox provider registered — the docs build runs there`
+          : `${c.yellow('!')} Sandbox not registered: ${sandbox.reason}`,
+      );
       return;
     }
 
@@ -228,6 +236,22 @@ async function main(): Promise<void> {
       } catch (err) {
         console.log(`${c.red('✗')} ${err instanceof Error ? err.message : String(err)}`);
       }
+      console.log(`\n${c.bold('Validation')}`);
+      if (!config.sandbox.enabled) {
+        console.log(
+          `${c.yellow('!')} DOCXY_SANDBOX is off — the docs build runs on this machine, ` +
+            `over text a model wrote`,
+        );
+      } else {
+        const sandbox = await sandboxAvailability(client);
+        console.log(
+          sandbox.available
+            ? `${c.green('✓')} sandbox ready — the docs build runs there, not on this machine`
+            : `${c.yellow('!')} ${sandbox.reason}\n` +
+              `  ${c.dim('the docs build still runs, locally, and the report says so')}`,
+        );
+      }
+
       const github = appStatus();
       console.log(
         github.configured

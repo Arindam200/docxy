@@ -85,6 +85,61 @@ export async function registerNebiusProvider(
   };
 }
 
+export interface SandboxSetupResult {
+  action: 'registered' | 'skipped';
+  /** Why it was skipped, when it was. */
+  reason?: string;
+}
+
+/**
+ * Register Daytona as the harness's sandbox provider.
+ *
+ * The harness holds exactly one sandbox provider per tenant, so this is an
+ * upsert rather than a create. Without a key this is a no-op that says so:
+ * validation then falls back to local execution and reports that it did, which
+ * is a working pipeline with a named limitation rather than a broken one.
+ */
+export async function registerSandboxProvider(
+  client: TrueForge,
+  config: Config,
+): Promise<SandboxSetupResult> {
+  if (!config.sandbox.enabled) {
+    return { action: 'skipped', reason: 'DOCXY_SANDBOX is off' };
+  }
+  if (!config.sandbox.daytonaApiKey) {
+    return {
+      action: 'skipped',
+      reason:
+        'DAYTONA_API_KEY is not set, so the docs build will run on this machine. ' +
+        'Get a key at https://app.daytona.io to run it in an isolated sandbox instead',
+    };
+  }
+
+  const res = await client.fetch('/api/v1/settings/sandbox-providers', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    // The HTTP API is strictly snake_case and rejects unknown keys.
+    body: JSON.stringify({
+      manifest: {
+        type: 'daytona',
+        auth: { api_key: config.sandbox.daytonaApiKey },
+        auto_stop_interval_in_minutes: config.sandbox.autoStopMinutes,
+        auto_archive_interval_in_minutes: config.sandbox.autoStopMinutes,
+        auto_delete_interval_in_minutes: config.sandbox.autoDeleteMinutes,
+        exec_timeout_ms: config.sandbox.execTimeoutMs,
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    const detail = await readJson(res);
+    throw new Error(
+      `Registering the Daytona sandbox provider failed (HTTP ${res.status}): ${JSON.stringify(detail)}`,
+    );
+  }
+  return { action: 'registered' };
+}
+
 /** Model FQNs the harness will actually accept, after registration. */
 export async function listAvailableModels(client: TrueForge): Promise<string[]> {
   const { data } = await client.models.list();

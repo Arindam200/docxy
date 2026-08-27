@@ -19,6 +19,8 @@ import { planRetry } from '../src/pipeline/retry.js';
 import type { RoleName } from '../src/config.js';
 import type { DocEdit, RoleTrace, RunRecord } from '../src/types.js';
 import { buildReport } from '../src/server/observability.js';
+import { sandboxEnabled } from '../src/agents/roles.js';
+import { validateProposal } from '../src/validate/index.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -479,6 +481,80 @@ check('empty history has no rates',
   check('the last page ends the walk',
     nextPage('<https://api.github.com/x?page=1>; rel="prev"') === null);
   check('no link header ends the walk', nextPage(null) === null);
+}
+
+// --- sandbox execution ----------------------------------------------------
+// The docs build is the one check that runs a command over text a model wrote.
+// It belongs in the sandbox, and the two reasons to have a sandbox — executing
+// validation, and serving git-backed skills — used to share one flag, so a
+// deployment could not have either without the other.
+{
+  const before = process.env;
+  process.env = { ...process.env };
+
+  const reload = () => loadConfig();
+
+  delete process.env.DOCXY_SANDBOX;
+  delete process.env.DOCXY_USE_HARNESS_SKILLS;
+  check('the sandbox is on by default', reload().sandbox.enabled === true);
+  check('the default config asks for a sandbox', sandboxEnabled(reload()) === true);
+
+  process.env.DOCXY_SANDBOX = 'false';
+  check('the sandbox can be turned off', reload().sandbox.enabled === false);
+  check('turning it off means no sandbox', sandboxEnabled(reload()) === false);
+
+  // Skills are served from inside a sandbox, so asking for them asks for one
+  // even when execution was explicitly declined.
+  process.env.DOCXY_USE_HARNESS_SKILLS = 'true';
+  check('harness skills still require a sandbox', sandboxEnabled(reload()) === true);
+  check('but they do not turn execution back on', reload().sandbox.enabled === false);
+
+  delete process.env.DOCXY_SANDBOX;
+  delete process.env.DOCXY_USE_HARNESS_SKILLS;
+  process.env.DAYTONA_API_KEY = 'dt-test-key';
+  check('the Daytona key is read', reload().sandbox.daytonaApiKey === 'dt-test-key');
+
+  process.env = before;
+}
+
+// --- validation reports where it ran --------------------------------------
+// A report that does not say where a command executed cannot be audited: the
+// same "docs-build passed" means two different things on a machine with a
+// sandbox and one without.
+{
+  const before = process.env;
+  process.env = { ...process.env };
+  delete process.env.DOCXY_DOCS_BUILD_COMMAND;
+  process.env.DOCXY_TEST_COMMAND = 'true';
+
+  const config = loadConfig();
+  const report = await validateProposal({
+    config,
+    applied: { files: [], problems: [] },
+    changelogFile: null,
+    classification: {
+      kind: 'fix',
+      surface: 'docs-only',
+      summary: 's',
+      changedSymbols: [],
+      breakingRationale: '',
+      confidence: 1,
+    },
+    changelog: undefined,
+    docsPath: config.repoPath,
+    stageable: false,
+    // No client: nothing can reach a sandbox, so every command runs locally.
+  });
+
+  const tests = report.checks.find((c) => c.name === 'tests');
+  check('a locally executed check says so', tests?.where === 'local');
+  check('a check that executes nothing claims no location',
+    report.checks.find((c) => c.name === 'link-check')?.where === undefined);
+
+  const build = report.checks.find((c) => c.name === 'docs-build');
+  check('no docs build command is skipped, not failed', build?.status === 'skipped');
+
+  process.env = before;
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

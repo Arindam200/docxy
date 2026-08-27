@@ -112,7 +112,23 @@ export default async function RunPage({ params }: { params: Promise<{ id: string
                 >
                   {check.status}
                 </span>
-                <span className="w-40 shrink-0 font-mono">{check.name}</span>
+                <span className="w-40 shrink-0 font-mono">
+                  {check.name}
+                  {/* Where a command ran is part of the result, not trivia: the
+                      same "docs-build passed" means something different when the
+                      build ran against the operator's own filesystem. */}
+                  {check.where && (
+                    <span
+                      className={`ml-2 rounded-sm px-1 py-px text-[10px] font-sans uppercase tracking-wide ${
+                        check.where === "sandbox"
+                          ? "bg-ok/10 text-ok"
+                          : "bg-muted/10 text-muted"
+                      }`}
+                    >
+                      {check.where}
+                    </span>
+                  )}
+                </span>
                 {/* `anchor-not-found` names the anchor that missed, which is the
                     most actionable message the pipeline produces — so the detail
                     is shown verbatim rather than summarised. */}

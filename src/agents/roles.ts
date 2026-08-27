@@ -39,14 +39,22 @@ function buildInstructions(role: {
 }
 
 /**
- * Shared runtime settings. Sandbox stays off by default: the harness requires it
- * for git-backed skills, and this pipeline inlines its skill packs instead so it
- * runs without a sandbox provider account.
+ * Whether a session gets a sandbox.
+ *
+ * Two independent reasons to want one, and for a while they shared a single
+ * flag: executing validation commands away from the operator's filesystem, and
+ * serving git-backed skill packs (which the harness will only do inside a
+ * sandbox). Either is now sufficient on its own.
  */
+export function sandboxEnabled(config: Config): boolean {
+  return config.sandbox.enabled || config.useHarnessSkills;
+}
+
+/** Shared runtime settings for the five drafting roles. */
 function runtime(config: Config, opts: { subagents?: boolean } = {}): TrueForgeApi.RuntimeConfig {
   return {
     iterationLimit: 40,
-    sandbox: { enabled: config.useHarnessSkills },
+    sandbox: { enabled: sandboxEnabled(config) },
     dynamicSubAgents: { enabled: opts.subagents ?? false },
   };
 }
