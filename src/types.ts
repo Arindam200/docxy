@@ -129,6 +129,20 @@ export interface ApprovalRequest {
 
 export type RunStatus = 'running' | 'awaiting-approval' | 'approved' | 'denied' | 'failed' | 'done';
 
+/** How a role failed, so the UI can choose what to put in front of the user. */
+export type RoleFailure = 'harness-error' | 'parse-error' | 'timeout' | 'aborted';
+
+export interface RoleUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  /** harness / instructions / messages / skills / tool_definitions */
+  inputBreakdown?: Record<string, number>;
+  /** Priced from the account's own rates; absent when they are unknown. */
+  costUsd?: number;
+}
+
 export interface RoleTrace {
   role: RoleName;
   sessionId: string;
@@ -141,6 +155,24 @@ export interface RoleTrace {
   error?: string;
   /** True when this role reused a session created by an earlier run. */
   reusedSession: boolean;
+
+  /**
+   * Exactly what this role was asked. The single most useful field when a
+   * classification comes back wrong. Truncated — see PROMPT_LIMIT.
+   */
+  prompt?: string;
+  /**
+   * Exactly what came back, before parsing. Kept on success too: it is what
+   * makes a run auditable, and on failure it is usually the only thing that
+   * explains it — a `max_tokens breached` error has as often meant a repetition
+   * loop as a budget that was too small.
+   */
+  rawOutput?: string;
+  /** Which model actually ran; roles can be pointed at different ones. */
+  model?: string;
+  durationMs?: number;
+  usage?: RoleUsage;
+  failure?: RoleFailure;
 }
 
 export interface RunRecord {
@@ -169,4 +201,13 @@ export interface RunRecord {
   /** Knowledge-map symbols already known before this run started. */
   priorSymbolCount: number;
   newSymbolCount: number;
+
+  durationMs?: number;
+  /** Rolled up from the traces, so the run list needs no per-role arithmetic. */
+  totals?: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens?: number;
+    costUsd?: number;
+  };
 }

@@ -8,6 +8,10 @@ import { decideScope, createApprovalRequest, signOff, deny, ApprovalError } from
 import { openDocsTree, resolveBaseRef } from '../src/git/worktree.js';
 import { listDocs, readRepoFile } from '../src/git/repo.js';
 import { prBaseBranch } from '../src/config.js';
+import { costOf, priceFor } from '../src/trueforge/pricing.js';
+import type { RoleName } from '../src/config.js';
+import type { DocEdit, RoleTrace, RunRecord } from '../src/types.js';
+import { buildReport } from '../src/server/observability.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -189,6 +193,90 @@ try {
 }
 
 await rm(codeRepo, { recursive: true, force: true });
+
+
+// --- pricing -------------------------------------------------------------
+const priceCfg = {
+  registeredModels: [
+    { name: 'deepseek-v4-pro', modelId: 'deepseek-ai/DeepSeek-V4-Pro', contextLength: 1 },
+  ],
+};
+const priceTable = new Map([
+  ['deepseek-ai/deepseek-v4-pro', { prompt: 0.0000004, completion: 0.0000012 }],
+]);
+
+// A trace records the harness's name for the model; the table is keyed by the
+// upstream id, so resolution has to go through registeredModels.
+check('price resolves through the registered name',
+  priceFor('nebius/deepseek-v4-pro', priceCfg, priceTable)?.completion === 0.0000012);
+check('price falls back to a raw upstream id',
+  priceFor('deepseek-ai/DeepSeek-V4-Pro', priceCfg, priceTable)?.prompt === 0.0000004);
+check('unknown model has no price',
+  priceFor('nebius/not-a-model', priceCfg, priceTable) === undefined);
+check('no table means no price', priceFor('nebius/deepseek-v4-pro', priceCfg, new Map()) === undefined);
+
+const priced = costOf({ inputTokens: 1_000_000, outputTokens: 100_000 },
+  priceFor('nebius/deepseek-v4-pro', priceCfg, priceTable));
+check('cost is input + output at their own rates', priced === 0.52, String(priced));
+check('unpriced usage yields no cost',
+  costOf({ inputTokens: 100, outputTokens: 10 }, undefined) === undefined);
+
+// --- observability report ------------------------------------------------
+const trace = (role: RoleName, over: Partial<RoleTrace> = {}): RoleTrace => ({
+  role, sessionId: 's', startedAt: '2026-08-01T00:00:00.000Z', status: 'done',
+  events: [], reusedSession: true, durationMs: 1000,
+  usage: { inputTokens: 100, outputTokens: 10, costUsd: 0.01 }, ...over,
+});
+
+const edit = (path: string): DocEdit =>
+  ({ path, section: 'Usage', find: 'a', replace: 'b', mode: 'replace', rationale: '' });
+
+const fixture = (over: Partial<RunRecord> & Pick<RunRecord, 'id' | 'startedAt' | 'status'>): RunRecord => ({
+  repoPath: '/x', commit: { sha: 'a', shortSha: 'aaa', subject: 'one' },
+  traces: [], priorSymbolCount: 0, newSymbolCount: 0, ...over,
+});
+
+const report = buildReport([
+  fixture({
+    id: 'r1', startedAt: '2026-08-01T00:00:00.000Z', status: 'done', durationMs: 4000,
+    traces: [trace('change-analyst'), trace('docs-updater', { durationMs: 3000 })],
+    classification: { kind: 'fix', surface: 'internal', summary: '', changedSymbols: [], breakingRationale: '', confidence: 0.9 },
+    docs: { edits: [edit('docs/api.md'), edit('docs/api.md'), edit('docs/cli.md')], skipped: [] },
+    totals: { inputTokens: 200, outputTokens: 20, costUsd: 0.02 },
+  }),
+  fixture({
+    id: 'r2', commit: { sha: 'b', shortSha: 'bbb', subject: 'two' },
+    startedAt: '2026-08-02T00:00:00.000Z', status: 'failed', durationMs: 2000,
+    traces: [
+      trace('change-analyst', { reusedSession: false }),
+      trace('docs-updater', { status: 'failed', failure: 'parse-error', usage: undefined }),
+    ],
+    docs: { edits: [edit('docs/api.md')], skipped: [] },
+    totals: { inputTokens: 100, outputTokens: 10, costUsd: 0.01 },
+  }),
+]);
+
+check('window counts every run', report.window.runs === 2);
+check('window runs oldest to newest', report.window.from === '2026-08-01T00:00:00.000Z');
+check('outcomes are tallied by status', report.outcomes.done === 1 && report.outcomes.failed === 1);
+check('success rate counts settled runs only', report.successRate === 0.5);
+check('spend rolls up across runs', report.totals.costUsd === 0.03);
+check('cost per run divides by the window', report.totals.costPerRunUsd === 0.015);
+check('roles come back in pipeline order',
+  report.roles[0]?.role === 'change-analyst' && report.roles[1]?.role === 'docs-updater');
+check('role failures are counted by kind',
+  report.roles[1]?.failed === 1 && report.roles[1]?.failures['parse-error'] === 1);
+check('session reuse is a rate, not a count', report.roles[0]?.reuseRate === 0.5);
+check('a doc edited twice in one run counts as one stale run',
+  report.staleDocs[0]?.path === 'docs/api.md' && report.staleDocs[0]?.runs === 2 &&
+  report.staleDocs[0]?.edits === 3);
+check('series carries confidence for trends', report.series[0]?.confidence === 0.9);
+
+// An empty history must not divide by zero or invent a rate.
+const empty = buildReport([]);
+check('empty history has no rates',
+  empty.window.runs === 0 && empty.successRate === undefined &&
+  empty.totals.costUsd === undefined && empty.roles.length === 0);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

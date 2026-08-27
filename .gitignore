@@ -10,3 +10,7 @@ dist/
 # file is still on disk at .github/workflows/docxy.yml — delete these two lines
 # to start tracking it again.
 .github/workflows/
+
+# Claude Code scratch worktrees, created per session.
+.claude/worktrees/
+.gstack/

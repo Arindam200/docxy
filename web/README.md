@@ -1,25 +1,78 @@
-# Docxy marketing site
+# Docxy web
 
-The public landing page for [Docxy](../README.md), the multi-agent
-documentation-and-changelog pipeline in the parent directory.
+The landing page and the operator dashboard for [Docxy](../README.md), the
+multi-agent documentation-and-changelog pipeline in the parent directory.
 
-Next.js 16 (App Router, Turbopack) · React 19 · Tailwind CSS v4 · TypeScript.
+Next.js 16 (App Router, Turbopack) · React 19 · Tailwind CSS v4 · TypeScript ·
+Better Auth on Neon Postgres via Drizzle.
 
 ```bash
 npm install
-npm run dev      # http://localhost:3000
-npm run build    # static prerender of /
+cp .env.local.example .env.local   # then fill in DATABASE_URL and BETTER_AUTH_SECRET
+npm run db:migrate                 # create the auth schema
+npm run dev                        # http://localhost:3000
+npm run build
 ```
+
+`/` is static and needs no configuration at all. `/dashboard` and `/login` need
+the database.
+
+## Sign-in
+
+Three ways in, all through Better Auth: email and password, Google, and GitHub.
+Email and password always works; each social button appears only once that
+provider's credentials are set, because an OAuth button that can only fail is
+worse than no button.
+
+| Variable | Required | What it is |
+|---|---|---|
+| `DATABASE_URL` | yes | Neon pooled connection string, shared with the pipeline |
+| `BETTER_AUTH_SECRET` | yes | session signing key: `openssl rand -base64 32` |
+| `BETTER_AUTH_URL` | behind a proxy | public origin, for OAuth callback URLs |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | no | enables the Google button |
+| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | no | enables the GitHub button |
+| `DOCXY_API_URL` | no | where the pipeline API lives, default `http://localhost:4317` |
+| `DOCXY_REQUIRE_AUTH` | no | set to `0` to open the dashboard unauthenticated, for demos |
+
+OAuth callback URLs are `/api/auth/callback/google` and
+`/api/auth/callback/github`.
+
+Missing either required variable, `/login` says which one rather than presenting
+a form that cannot work.
+
+### How the gate is arranged
+
+`src/proxy.ts` checks only that a session cookie is *present* on `/dashboard`.
+It runs on every navigation, so a database round trip there would tax each one.
+The authoritative check is `getSessionUser` in the dashboard layout, and the
+`/api/docxy/*` pass-through checks separately — the endpoints behind it approve
+runs and open pull requests, so it cannot inherit trust from the page that
+called it.
+
+Better Auth's tables live in a dedicated `auth` Postgres schema, kept apart from
+the pipeline's own tables in `public`. See [guides/DATABASE.md](../guides/DATABASE.md).
 
 ## Where things live
 
 ```
 src/
   app/layout.tsx        fonts, metadata, the html shell
-  app/page.tsx          section order, the whole page in one file
+  app/page.tsx          section order, the whole landing page in one file
   app/globals.css       palette tokens and the .rule-h / .rule-v hairlines
-  lib/site.ts           every string on the page
+  app/login/page.tsx    sign-in, or the missing-configuration checklist
+  app/dashboard/        the operator views, all force-dynamic
+  app/api/auth/[...all] every Better Auth endpoint
+  app/api/docxy/        authenticated pass-through to the pipeline API
+  proxy.ts              the optimistic cookie gate on /dashboard
+  db/schema.ts          Better Auth's tables, in the `auth` schema
+  db/index.ts           the Neon connection
+  lib/auth.ts           Better Auth server config
+  lib/auth-client.ts    the browser client
+  lib/env.ts            what is configured, readable without a database
+  lib/site.ts           every string on the landing page
   components/
+    auth/               SignInPanel and the provider marks
+    dashboard/          Sidebar, panels, and the run timeline
     primitives.tsx      Rule, SideRails, Section, SectionHead, ButtonLink, CellGrid
     Navbar.tsx          top banner + sticky nav
     Hero.tsx            headline and the GitHub Actions run mock

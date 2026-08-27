@@ -2,9 +2,10 @@ import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Config } from '../config.js';
 import type { RunRecord } from '../types.js';
+import type { RunStorage } from './stores.js';
 
 /** Runs are plain JSON on disk: inspectable, diffable, and trivially replayable. */
-export class RunStore {
+export class RunStore implements RunStorage {
   private readonly dir: string;
 
   constructor(config: Config) {
