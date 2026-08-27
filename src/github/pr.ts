@@ -7,7 +7,7 @@ import { prBaseBranch, type Config } from '../config.js';
 import { resolveBaseRef } from '../git/worktree.js';
 import type { RunRecord } from '../types.js';
 import type { ProposedFile } from '../types.js';
-import { installationToken, readAppCredentials, scrubToken } from './app.js';
+import { githubFetch, installationToken, readAppCredentials, scrubToken } from './app.js';
 
 const exec = promisify(execFile);
 
@@ -16,10 +16,85 @@ async function git(cwd: string, args: string[]): Promise<string> {
   return stdout.trim();
 }
 
-export function buildPrBody(run: RunRecord): string {
+/**
+ * The remote branch is standing on work docxy did not write.
+ *
+ * Reported rather than forced past, and distinguished from an ordinary push
+ * failure because the answer is different: nothing here is retryable, and the
+ * branch needs a human to look at it.
+ */
+export class BranchConflictError extends Error {}
+
+/**
+ * Push over a branch this run published earlier — and only such a branch.
+ *
+ * `--force-with-lease` needs an expected value, and there is no remote-tracking
+ * ref to supply one: the push goes to a tokenized URL minted for this call, not
+ * to a configured remote. So the tip is read explicitly, checked for docxy's
+ * own authorship, and then leased against exactly what was read. A branch that
+ * moves between the read and the push refuses the push rather than resolving
+ * the race in our favour.
+ */
+async function republish(
+  worktree: string,
+  remote: string,
+  branch: string,
+  run: RunRecord,
+  botEmail: string,
+): Promise<void> {
+  const listed = await git(worktree, ['ls-remote', remote, `refs/heads/${branch}`]).catch(() => '');
+  const remoteSha = listed.split(/\s+/)[0] ?? '';
+  if (!remoteSha) {
+    // The branch is gone, or was never the reason for the rejection. Retry
+    // plainly; whatever fails now fails with its own message.
+    await git(worktree, ['push', remote, `HEAD:refs/heads/${branch}`]);
+    return;
+  }
+
+  await git(worktree, ['fetch', '--no-tags', '--force', remote, `refs/heads/${branch}`]);
+  const [committer = '', ...body] = (
+    await git(worktree, ['log', '-1', '--format=%ce%n%B', remoteSha])
+  ).split('\n');
+
+  // Two things have to hold: the App committed the tip, and the tip says it was
+  // drafted from this run's commit. The first rules out a collaborator's push,
+  // the second rules out an unrelated docxy branch that collided on the name.
+  const ours = committer.trim() === botEmail && body.join('\n').includes(run.commit.sha);
+  if (!ours) {
+    throw new BranchConflictError(
+      `The remote branch "${branch}" carries commits this run did not publish, so ` +
+        'pushing over it would destroy them. Nothing was pushed, and the proposal is ' +
+        'committed on that branch locally — inspect the remote branch, then delete or ' +
+        'rename it if the work on it is finished.',
+    );
+  }
+
+  await git(worktree, [
+    'push',
+    `--force-with-lease=refs/heads/${branch}:${remoteSha}`,
+    remote,
+    `HEAD:refs/heads/${branch}`,
+  ]);
+}
+
+export function buildPrBody(run: RunRecord, concerns: string[] = []): string {
   const lines: string[] = [];
   const c = run.classification;
   const cl = run.changelog;
+
+  // Ahead of everything else, because a draft opened over the pipeline's own
+  // objections must not read like a clean proposal.
+  if (concerns.length > 0) {
+    lines.push('> [!WARNING]', '> **This proposal did not pass the pipeline\'s own checks.**', '>');
+    for (const concern of concerns) lines.push(`> - ${concern}`);
+    lines.push('>', '> It is opened as a draft so the reasons are visible rather than lost', '> in a failed run. Read it before marking it ready.', '');
+  }
+
+  if (run.degraded && run.degraded.length > 0) {
+    lines.push('> [!NOTE]', '> **Some agents did not finish, so this proposal is incomplete.**', '>');
+    for (const item of run.degraded) lines.push(`> - \`${item.role}\` — ${item.reason}`);
+    lines.push('');
+  }
 
   lines.push(`## What changed`, '');
   lines.push(run.approval?.summary ?? c?.summary ?? 'Documentation and changelog update.');
@@ -85,6 +160,15 @@ export function buildPrBody(run: RunRecord): string {
 export interface PrResult {
   url: string;
   branch: string;
+  /** True when the pull request already existed and was reused. */
+  existing: boolean;
+}
+
+export interface OpenPrOptions {
+  /** Open as a draft. Used when the pipeline itself objected to the proposal. */
+  draft?: boolean;
+  /** Why it is a draft, rendered at the top of the body. */
+  concerns?: string[];
 }
 
 /**
@@ -97,19 +181,45 @@ export async function openPullRequest(
   config: Config,
   run: RunRecord,
   files: ProposedFile[],
+  options: OpenPrOptions = {},
 ): Promise<PrResult> {
   if (files.length === 0) throw new Error('There is nothing to open a pull request with.');
   if (run.approval?.status !== 'approved') {
     throw new Error('Refusing to open a pull request: the run is not approved.');
   }
 
+  // Nothing downstream can recover from a proposal that changes nothing, and
+  // `git commit` would fail with a message about an empty index that says
+  // nothing about why. Catch it here where the reason is still known.
+  const changed = files.filter((file) => file.after !== file.before);
+  if (changed.length === 0) {
+    throw new Error(
+      'Every proposed file is byte-for-byte identical to what is already committed, ' +
+        'so there is nothing to open a pull request with.',
+    );
+  }
+
+  /**
+   * The checkout this run actually read, which is not always the one this
+   * process was started in.
+   *
+   * A run records the repository it documented. Publishing used the *config's*
+   * path instead, so approving a webhook-driven run from a terminal sitting in
+   * some other repository resolved the branch, the base ref, and the target
+   * repository from whatever happened to be in that directory — an installation
+   * token request for the wrong repository at best, and a pull request opened
+   * against the wrong repository at worst.
+   */
+  const repoPath = run.repoPath || config.repoPath;
+
   // Check the remote before doing any work, so a repo with no origin fails with
   // an explanation instead of raw git stderr after a commit already exists.
   try {
-    await git(config.repoPath, ['remote', 'get-url', 'origin']);
+    await git(repoPath, ['remote', 'get-url', 'origin']);
   } catch {
     throw new Error(
-      'This repository has no "origin" remote, so there is nowhere to push a ' +
+      `The repository this run documented (${repoPath}) has no "origin" remote, ` +
+        'so there is nowhere to push a ' +
         'branch or open a pull request. Add one with `git remote add origin <url>`, ' +
         'or run the pipeline against a repository that has one.',
     );
@@ -130,30 +240,48 @@ export async function openPullRequest(
   }
 
   const base = prBaseBranch(config);
-  const baseRef = await resolveBaseRef(config.repoPath, base);
+  const baseRef = await resolveBaseRef(repoPath, base);
 
   const branch = `docxy/${run.commit.shortSha}-${run.id.slice(0, 8)}`;
   const worktree = await mkdtemp(join(tmpdir(), 'docxy-wt-'));
 
-  const repo = config.github.repo ?? (await inferRepo(config.repoPath));
+  // Inferred from the run's own checkout for the same reason. `GITHUB_REPOSITORY`
+  // still wins where an operator has been explicit.
+  const repo = config.github.repo ?? (await inferRepo(repoPath));
   // Minted here, at the moment it is used. An installation token lives an hour
   // and the approval gate can wait days, so one stored on the run record would
   // be long dead by the time a reviewer signs off.
   const appToken = await installationToken(app, [repoName(repo)]);
 
   try {
+    // A worktree left behind by a killed run holds a lock that blocks this one.
+    await git(repoPath, ['worktree', 'prune']).catch(() => {});
     // Detached at the resolved tip: the base branch may already be checked out
     // elsewhere, and git refuses to check out one branch in two worktrees.
-    await git(config.repoPath, ['worktree', 'add', '--detach', worktree, baseRef]);
-    await git(worktree, ['checkout', '-b', branch]);
+    await git(repoPath, ['worktree', 'add', '--detach', worktree, baseRef]);
+    // `-B`, not `-b`: publishing the same run twice (a retried push, a resumed
+    // approval) must land on the same branch rather than failing on a name that
+    // is already taken locally.
+    await git(worktree, ['checkout', '-B', branch]);
 
-    for (const file of files) {
+    for (const file of changed) {
       const target = join(worktree, file.path);
       await mkdir(dirname(target), { recursive: true });
       await writeFile(target, file.after, 'utf8');
     }
 
-    await git(worktree, ['add', '--', ...files.map((f) => f.path)]);
+    await git(worktree, ['add', '--', ...changed.map((f) => f.path)]);
+
+    // The base ref may already contain exactly this text — a re-run of a commit
+    // whose docs were fixed in the meantime. An empty commit would push a
+    // branch with no diff and GitHub would refuse the pull request.
+    const staged = await git(worktree, ['diff', '--cached', '--name-only']);
+    if (!staged) {
+      throw new Error(
+        `The proposal matches what \`${base}\` already contains, so the branch would ` +
+          'have no changes and there is nothing to open a pull request for.',
+      );
+    }
 
     const subject = `docs: update for ${run.commit.shortSha} — ${run.commit.subject}`.slice(0, 100);
     await git(worktree, [
@@ -170,17 +298,31 @@ export async function openPullRequest(
       }.`,
     ]);
 
+    // A tokenized remote rather than `origin`, so the push is the App's and not
+    // whatever the local credential helper would have supplied.
+    const remote = `https://x-access-token:${appToken}@github.com/${repo}.git`;
     try {
-      // A tokenized remote rather than `origin`, so the push is the App's and
-      // not whatever the local credential helper would have supplied.
-      await git(worktree, [
-        'push',
-        `https://x-access-token:${appToken}@github.com/${repo}.git`,
-        `HEAD:refs/heads/${branch}`,
-      ]);
+      try {
+        await git(worktree, ['push', remote, `HEAD:refs/heads/${branch}`]);
+      } catch (first) {
+        // The branch already exists with different content, which usually means
+        // this run was published before and is being republished. The name
+        // encodes this run's id, so an earlier attempt at the same proposal is
+        // by far the likeliest thing standing on it — but likeliest is not
+        // certain, and an unconditional `--force` answers a collaborator's
+        // commits by deleting them.
+        const stale =
+          first instanceof Error &&
+          /non-fast-forward|\brejected\b|already exists/i.test(first.message);
+        if (!stale) throw first;
+        await republish(worktree, remote, branch, run, app.botEmail);
+      }
     } catch (err) {
+      // Already precise about what is on the remote and why it was left alone.
+      if (err instanceof BranchConflictError) throw err;
       // The token is in the command line, so it is in git's error output too.
-      const detail = err instanceof Error ? err.message.split('\n').slice(-3).join(' ') : String(err);
+      const detail =
+        err instanceof Error ? err.message.split('\n').slice(-3).join(' ') : String(err);
       throw new Error(
         scrubToken(
           `Could not push the branch "${branch}". The proposal is committed on ` +
@@ -191,44 +333,120 @@ export async function openPullRequest(
     }
 
     // The installation token is what makes GitHub attribute the PR to the bot.
-    const body = buildPrBody(run);
-    return {
-      url: await createPullRequest(repo, appToken, branch, subject, body, base),
+    const body = buildPrBody(run, options.concerns ?? []);
+    const created = await createPullRequest(repo, appToken, {
       branch,
-    };
+      title: subject,
+      body,
+      base,
+      draft: options.draft ?? false,
+    });
+    return { ...created, branch };
   } finally {
-    await git(config.repoPath, ['worktree', 'remove', '--force', worktree]).catch(() => {});
+    await git(repoPath, ['worktree', 'remove', '--force', worktree]).catch(() => {});
     await rm(worktree, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+interface CreatePrInput {
+  branch: string;
+  title: string;
+  body: string;
+  base: string;
+  draft: boolean;
 }
 
 /**
  * Open the pull request. The token decides the author: an installation token
  * makes it the App, a personal token makes it whoever owns that token.
+ *
+ * Retried on 5xx and on the secondary rate limit, because the branch is already
+ * pushed by this point and losing the pull request to one bad response would
+ * mean re-running five agents to get back here.
  */
 async function createPullRequest(
   repo: string,
   token: string,
-  branch: string,
-  title: string,
-  body: string,
-  base: string,
-): Promise<string> {
-  const res = await fetch(`https://api.github.com/repos/${repo}/pulls`, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${token}`,
-      accept: 'application/vnd.github+json',
-      'content-type': 'application/json',
-      'user-agent': 'docxy',
-    },
-    body: JSON.stringify({ title, body, head: branch, base }),
-  });
-  if (!res.ok) {
-    throw new Error(`GitHub API returned HTTP ${res.status}: ${await res.text()}`);
+  input: CreatePrInput,
+): Promise<{ url: string; existing: boolean }> {
+  const headers = {
+    authorization: `Bearer ${token}`,
+    accept: 'application/vnd.github+json',
+    'content-type': 'application/json',
+    'user-agent': 'docxy',
+  };
+
+  let lastDetail = '';
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const res = await githubFetch(`https://api.github.com/repos/${repo}/pulls`, {
+      method: 'POST',
+      headers,
+      // Some plans do not allow drafts; a rejected draft is retried as a normal
+      // pull request below rather than lost.
+      body: JSON.stringify({
+        title: input.title,
+        body: input.body,
+        head: input.branch,
+        base: input.base,
+        draft: input.draft,
+      }),
+    });
+
+    if (res.ok) {
+      // SAFETY: the shape of a 2xx from this endpoint is GitHub's published
+      // contract, and `html_url` is read as optional with a fallback below.
+      const created = (await res.json()) as { html_url?: string };
+      return {
+        url: created.html_url ?? `https://github.com/${repo}/pulls`,
+        existing: false,
+      };
+    }
+
+    lastDetail = await res.text();
+
+    // 422 is what GitHub returns both for "a pull request already exists for
+    // this branch" and for "drafts are not available here". The first is a
+    // success in disguise; the second is worth one plain retry.
+    if (res.status === 422) {
+      const existing = await findOpenPullRequest(repo, token, input.branch, headers);
+      if (existing) return { url: existing, existing: true };
+      if (input.draft && /draft/i.test(lastDetail)) {
+        input = { ...input, draft: false };
+        continue;
+      }
+      break;
+    }
+
+    // Nothing about a 401/403/404 improves by asking again.
+    if (res.status < 500 && res.status !== 429) break;
+    await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
   }
-  const created = (await res.json()) as { html_url?: string };
-  return created.html_url ?? `https://github.com/${repo}/pulls`;
+
+  throw new Error(
+    `GitHub refused to open the pull request for "${input.branch}" against ` +
+      `"${input.base}". The branch is pushed, so the proposal is not lost — open it ` +
+      `by hand at https://github.com/${repo}/compare/${input.base}...${input.branch}\n` +
+      `GitHub said: ${lastDetail}`,
+  );
+}
+
+/** The open pull request for a branch, when one already exists. */
+async function findOpenPullRequest(
+  repo: string,
+  token: string,
+  branch: string,
+  headers: Record<string, string>,
+): Promise<string | null> {
+  const owner = repo.split('/')[0];
+  const res = await githubFetch(
+    `https://api.github.com/repos/${repo}/pulls?state=open&head=${owner}:${branch}`,
+    { headers },
+  );
+  if (!res.ok) return null;
+  // SAFETY: a 2xx from the pulls listing is an array; every field below is read
+  // as optional and the empty case falls through to null.
+  const list = (await res.json()) as Array<{ html_url?: string }>;
+  return list[0]?.html_url ?? null;
 }
 
 /** The `name` half of `owner/name`, which is what the token endpoint wants. */

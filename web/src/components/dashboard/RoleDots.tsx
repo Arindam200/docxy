@@ -11,8 +11,8 @@ import { duration, roleTitle, ROLE_ORDER } from "@/lib/format";
 
 const STATUS_CLASS: Record<RoleDot["status"], string> = {
   running: "bg-accent animate-pulse",
-  done: "bg-emerald-400",
-  failed: "bg-red-400",
+  done: "bg-ok",
+  failed: "bg-danger",
 };
 
 export function RoleDots({ roles }: { roles: RoleDot[] | undefined }) {

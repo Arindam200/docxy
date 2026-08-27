@@ -1,8 +1,8 @@
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Config } from '../config.js';
 import type { RunRecord } from '../types.js';
-import type { RunStorage } from './stores.js';
+import type { LogEntry, LogPage, LogQuery, RunStorage } from './stores.js';
 
 /** Runs are plain JSON on disk: inspectable, diffable, and trivially replayable. */
 export class RunStore implements RunStorage {
@@ -16,9 +16,25 @@ export class RunStore implements RunStorage {
     return join(this.dir, `${id}.json`);
   }
 
+  /**
+   * Written to a sibling and renamed into place.
+   *
+   * `save` is called at every role boundary while the record is still growing,
+   * so a process killed mid-write would otherwise leave truncated JSON — and a
+   * corrupt file is silently dropped from `list`, which is the worst way to
+   * lose a run: without a trace of it having existed.
+   */
   async save(run: RunRecord): Promise<void> {
     await mkdir(this.dir, { recursive: true });
-    await writeFile(this.file(run.id), `${JSON.stringify(run, null, 2)}\n`, 'utf8');
+    const target = this.file(run.id);
+    const staging = `${target}.${process.pid}.tmp`;
+    try {
+      await writeFile(staging, `${JSON.stringify(run, null, 2)}\n`, 'utf8');
+      await rename(staging, target);
+    } catch (err) {
+      await unlink(staging).catch(() => {});
+      throw err;
+    }
   }
 
   async load(id: string): Promise<RunRecord | null> {
@@ -29,8 +45,18 @@ export class RunStore implements RunStorage {
     }
   }
 
+  /**
+   * Whether a run belongs to one of the repositories the caller may see.
+   *
+   * `list` applies the same rule as it reads; this exists for the paths that
+   * address a run by id and so never pass through the listing at all.
+   */
+  private visible(run: RunRecord, repoPaths?: string[]): boolean {
+    return !repoPaths || repoPaths.length === 0 || repoPaths.includes(run.repoPath);
+  }
+
   /** Newest first. */
-  async list(limit = 50): Promise<RunRecord[]> {
+  async list(limit = 50, repoPaths?: string[]): Promise<RunRecord[]> {
     let names: string[];
     try {
       names = await readdir(this.dir);
@@ -38,6 +64,7 @@ export class RunStore implements RunStorage {
       return [];
     }
     const runs: RunRecord[] = [];
+    // `.tmp` files are half-written saves in flight; they are not runs yet.
     for (const name of names.filter((n) => n.endsWith('.json'))) {
       try {
         runs.push(JSON.parse(await readFile(join(this.dir, name), 'utf8')) as RunRecord);
@@ -45,10 +72,55 @@ export class RunStore implements RunStorage {
         // skip a corrupt record rather than failing the listing
       }
     }
-    return runs.sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, limit);
+    const wanted = repoPaths && repoPaths.length > 0 ? new Set(repoPaths) : null;
+    return runs
+      .filter((run) => !wanted || wanted.has(run.repoPath))
+      .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
+      .slice(0, limit);
   }
 
   async pending(): Promise<RunRecord[]> {
     return (await this.list(200)).filter((r) => r.status === 'awaiting-approval');
+  }
+
+  /**
+   * Flattened in memory, which is the honest cost of JSON files: there is no
+   * index to ask. The window is capped at fifty runs for exactly that reason.
+   */
+  async logs(query: LogQuery): Promise<LogPage> {
+    // A named run still has to sit inside the repositories the caller may see.
+    // Loading it by id alone would let anyone holding a run id read the events
+    // of a project they were never granted.
+    const named = query.runId ? await this.load(query.runId) : null;
+    const runs = query.runId
+      ? [named].filter((run) => run !== null).filter((run) => this.visible(run, query.repoPaths))
+      : await this.list(50, query.repoPaths);
+
+    const entries: LogEntry[] = runs.flatMap((run) =>
+      run.traces.flatMap((trace) =>
+        trace.events.map((event) => ({
+          at: event.at,
+          kind: event.kind,
+          text: event.text,
+          role: trace.role,
+          runId: run.id,
+          commit: run.commit.shortSha,
+          subject: run.commit.subject,
+          level: event.kind === 'error' ? ('error' as const) : ('info' as const),
+        })),
+      ),
+    );
+
+    const matched = entries.filter(
+      (entry) =>
+        (!query.kind || entry.kind === query.kind) && (!query.role || entry.role === query.role),
+    );
+    matched.sort((a, b) => b.at.localeCompare(a.at));
+
+    return {
+      entries: matched.slice(0, query.limit),
+      total: matched.length,
+      kinds: [...new Set(entries.map((entry) => entry.kind))].sort(),
+    };
   }
 }

@@ -1,87 +1,86 @@
-import { LuPlug } from "react-icons/lu";
+import { LuClock, LuPlug } from "react-icons/lu";
+
 import { fetchIntegrations } from "@/lib/docxy";
 import { Page, PageHead } from "@/components/dashboard/Page";
 import { IntegrationsGrid } from "@/components/dashboard/IntegrationsGrid";
+import { CATALOG } from "@/lib/integrations";
 import { site } from "@/lib/site";
 
 export const dynamic = "force-dynamic";
 
 export default async function IntegrationsPage() {
+  // The catalogue is static; only GitHub has a live status to report, and it
+  // comes from the App the pipeline actually publishes as.
   const result = await fetchIntegrations();
+  const app = result?.integrations.find((item) => item.id === "github-app");
 
-  const online = result !== null;
-  const integrations = result?.integrations ?? [];
-  const connected = integrations.filter((item) => item.connected).length;
-  const blocking = integrations.filter((item) => item.required && !item.connected);
+  const live = app
+    ? {
+        github: {
+          connected: app.connected,
+          detail: app.connected ? app.detail : undefined,
+          href: site.install,
+        },
+      }
+    : undefined;
+
+  const soon = CATALOG.filter((entry) => entry.status === "soon").length;
 
   return (
     <Page>
       <PageHead
         title="Integrations"
-        lede="Everything docxy talks to, whether it is wired up, and what each missing piece needs. Status is read live from the pipeline, so a card that says connected has answered."
+        lede="Where docxy can send its work, and what it can watch. Connect a service once and every run uses it."
       >
-        {online && (
-          <p className="text-xs text-muted tabular-nums">
-            <span className="text-foreground">{connected}</span> of {integrations.length} connected
-          </p>
-        )}
+        <p className="text-xs text-muted">
+          <span className="text-foreground">1</span> available · {soon} on the way
+        </p>
       </PageHead>
 
-      {!online && (
-        <div
-          role="alert"
-          className="border border-rule bg-surface px-4 py-3 text-sm leading-relaxed text-muted"
+      {/* The honest headline: one of these works today. */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border border-accent/30 bg-accent/5 px-4 py-3">
+        <span className="inline-flex items-center gap-1.5 border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-accent">
+          <span aria-hidden className="[&>svg]:h-3 [&>svg]:w-3">
+            <LuClock />
+          </span>
+          Coming soon
+        </span>
+        <p className="text-sm leading-relaxed text-muted">
+          GitHub is live today. The rest are being built — the cards below are what is planned, not
+          what is wired up.
+        </p>
+      </div>
+
+      <IntegrationsGrid entries={CATALOG} live={live}>
+        {/* The last cell rather than a banner below: it fills the short final
+            row, and asking for one belongs among the ones you can pick. */}
+        <section
+          aria-labelledby="integrations-request"
+          className="flex flex-col justify-center gap-3 bg-surface p-5"
         >
-          The docxy API is unreachable, so nothing here can be checked. Start it with{" "}
-          <code className="font-mono text-foreground">npm run serve</code> and refresh.
-        </div>
-      )}
-
-      {blocking.length > 0 && (
-        <div
-          role="alert"
-          className="border border-red-500/30 bg-red-500/5 px-4 py-3 text-sm leading-relaxed text-red-200"
-        >
-          {blocking.map((item) => item.name).join(" and ")}{" "}
-          {blocking.length === 1 ? "is" : "are"} required and not connected. The pipeline cannot
-          complete a run until {blocking.length === 1 ? "it is" : "they are"} set up.
-        </div>
-      )}
-
-      <IntegrationsGrid integrations={integrations} />
-
-      {/*
-        Connecting is a server-side act — env vars, then a restart — so the page
-        closes by saying so rather than offering a button that cannot do it.
-      */}
-      <section
-        aria-labelledby="integrations-how"
-        className="flex flex-col gap-4 border border-rule bg-surface px-5 py-4 sm:flex-row sm:items-center sm:justify-between"
-      >
-        <div className="flex items-start gap-3">
-          <span aria-hidden className="mt-0.5 text-accent [&>svg]:h-5 [&>svg]:w-5">
+          <span aria-hidden className="text-accent [&>svg]:h-5 [&>svg]:w-5">
             <LuPlug />
           </span>
           <div>
-            <h2 id="integrations-how" className="text-sm font-semibold tracking-tight">
-              How connecting works
+            <h2 id="integrations-request" className="text-sm font-semibold tracking-tight">
+              Need one that is not here?
             </h2>
-            <p className="mt-1 text-xs leading-relaxed text-muted">
-              Every integration is wired up with environment variables on the machine running the
-              pipeline, not from this page. Set the variables a card lists, restart the server, and
-              the status here follows. Missing something you need?
+            <p className="mt-1.5 text-xs leading-relaxed text-muted">
+              The order these ship in follows what people ask for. Tell us what your team would
+              connect docxy to, and it moves up the list.
             </p>
           </div>
-        </div>
-        <a
-          href={`${site.repo}/issues/new`}
-          target="_blank"
-          rel="noreferrer"
-          className="shrink-0 self-start border border-rule bg-surface-2 px-3 py-1.5 text-xs font-medium transition-colors hover:border-accent hover:text-accent sm:self-auto"
-        >
-          Request an integration
-        </a>
-      </section>
+          <a
+            href={`${site.repo}/issues/new`}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-auto border border-rule bg-surface-2 px-3 py-1.5 text-center text-xs font-medium transition-colors hover:border-accent hover:text-accent"
+          >
+            Request an integration
+          </a>
+        </section>
+      </IntegrationsGrid>
+
     </Page>
   );
 }

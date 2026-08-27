@@ -129,8 +129,23 @@ export interface ApprovalRequest {
 
 export type RunStatus = 'running' | 'awaiting-approval' | 'approved' | 'denied' | 'failed' | 'done';
 
-/** How a role failed, so the UI can choose what to put in front of the user. */
-export type RoleFailure = 'harness-error' | 'parse-error' | 'timeout' | 'aborted';
+/**
+ * How a role failed, so the UI can choose what to put in front of the user.
+ *
+ * These are deliberately finer-grained than "it errored": the retry policy
+ * branches on them, and a reader who sees `max-tokens` three runs running knows
+ * to look at budgets rather than at the harness.
+ */
+export type RoleFailure =
+  | 'harness-error'
+  | 'parse-error'
+  | 'timeout'
+  | 'aborted'
+  | 'max-tokens'
+  | 'context'
+  | 'rate-limit'
+  | 'cancelled'
+  | 'stalled';
 
 export interface RoleUsage {
   inputTokens: number;
@@ -173,6 +188,16 @@ export interface RoleTrace {
   durationMs?: number;
   usage?: RoleUsage;
   failure?: RoleFailure;
+  /** Attempts spent, including the one that succeeded. 1 on a clean first pass. */
+  attempts?: number;
+}
+
+/** How a proposal should be published, and what it must say when it is. */
+export interface PublicationIntent {
+  /** True when the pipeline itself objected, so the pull request opens unmergeable. */
+  draft: boolean;
+  /** The objections, verbatim, for the top of the pull request body. */
+  concerns: string[];
 }
 
 export interface RunRecord {
@@ -196,8 +221,28 @@ export interface RunRecord {
   /** Branch the docs were read from, when they live on their own branch. */
   docsBranch?: string;
   approval?: ApprovalRequest;
+  /**
+   * What publishing this proposal should do, decided when the run finished
+   * rather than when someone finally signs off.
+   *
+   * The gate can hold a run for days, and the reasons a proposal is unfit —
+   * the Coordinator's rejection, a failed validation check — are known only
+   * while the run is still in memory. Recording the decision here is what
+   * keeps an approved-but-unsound proposal opening as a draft that says why,
+   * instead of a clean pull request that says nothing.
+   */
+  publication?: PublicationIntent;
   pullRequestUrl?: string;
   error?: string;
+  /**
+   * Roles that failed but did not stop the run.
+   *
+   * A run where four of five roles did correct work is worth landing with a
+   * note, not discarding. This names what is missing so the pull request, the
+   * dashboard, and the Coordinator all say so rather than quietly shipping a
+   * thinner proposal than the pipeline promises.
+   */
+  degraded?: Array<{ role: RoleName; reason: string }>;
   /** Knowledge-map symbols already known before this run started. */
   priorSymbolCount: number;
   newSymbolCount: number;

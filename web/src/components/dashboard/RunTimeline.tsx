@@ -5,11 +5,11 @@ import { RoleDots } from "@/components/dashboard/RoleDots";
 
 const STATUS_STYLES: Record<RunSummary["status"], string> = {
   running: "text-accent",
-  "awaiting-approval": "text-amber-300",
-  approved: "text-emerald-300",
-  done: "text-emerald-300",
-  denied: "text-red-300",
-  failed: "text-red-300",
+  "awaiting-approval": "text-warn",
+  approved: "text-ok",
+  done: "text-ok",
+  denied: "text-danger",
+  failed: "text-danger",
 };
 
 export function StatusChip({ status }: { status: RunSummary["status"] }) {
@@ -57,7 +57,7 @@ export function RunTimeline({ runs }: { runs: RunSummary[] }) {
                     reading on a failure, so it sits with the subject rather
                     than being buried in the detail view. */}
                 {failed && (
-                  <span className="ml-2 text-xs text-red-300">{roleTitle(failed.role)} failed</span>
+                  <span className="ml-2 text-xs text-danger">{roleTitle(failed.role)} failed</span>
                 )}
               </span>
 

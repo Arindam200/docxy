@@ -122,14 +122,35 @@ survives.
 Everything docxy reads is documented in [`.env.example`](../.env.example). The ones
 that matter for a deployment:
 
-| Variable | Why |
-|---|---|
-| `TRUEFORGE_BASE_URL` | The harness. Defaults to localhost, which is wrong once deployed. |
-| `NEBIUS_API_KEY` | Model access. |
-| `DOCXY_PROJECT_KEY` | **Set this.** Sessions and the symbol map key on it, and it defaults to the checkout path — which is a fresh temp directory on every hosted run. Leave it unset and every commit silently starts from cold sessions and an empty map. Use `owner/repo`. |
-| `PORT` | Set by the platform. Read automatically. |
-| `DOCXY_APPROVAL_MODE` | `auto` (default) opens the PR straight away; `elevated` gates breaking changes; `always` gates everything. |
-| `DOCXY_DOCS_BRANCH` | Only if docs live on their own branch. |
+| Variable | Type | Default | Description |
+|---|---|---|---|
+| `TRUEFORGE_BASE_URL` | URL | `http://localhost:8790` | The harness. The default is wrong once deployed. |
+| `NEBIUS_API_KEY` | string | *required* | Model access. |
+| `DOCXY_REPO_PATH` | path | the working directory | **Give each repository a stable checkout directory.** Sessions and the symbol map key on this path. Clone to a fresh temp directory every run and each commit silently starts from cold sessions and an empty map. |
+| `DOCXY_PORT` | integer | `4317` | The port `docxy serve` listens on. |
+| `GITHUB_APP_ID` | string | *required* | The App's numeric id. `openPullRequest()` refuses to run without all three — there is no personal-token fallback. |
+| `GITHUB_APP_PRIVATE_KEY_PATH` | path | *required* | PEM downloaded when the App was registered. |
+| `GITHUB_APP_INSTALLATION_ID` | string | *required* | The installation on the account being documented. |
+| `GITHUB_WEBHOOK_SECRET` | string | *required* | Shared with the App's webhook. Unset, `POST /webhook` answers 503 to everything. |
+| `DATABASE_URL` | URL | none | Neon connection string. Unset, runs are JSON files under the state directory. |
+| `DOCXY_DOCS_BRANCH` | string | none | Only if docs live on their own branch. |
+| `DOCXY_REQUIRE_APPROVAL` | boolean | `false` | Hold every proposal behind a human sign-off before anything is published. |
+| `DOCXY_APPROVAL_STALE_MINUTES` | integer | `60` | Minutes before a pending request is *reported* stale. It is never auto-resolved. |
+
+> **The approval gate is off by default.** A run publishes on its own, and the
+> pull request is the review surface. Set `DOCXY_REQUIRE_APPROVAL=true` to hold
+> proposals back instead; `decideScope()` in `src/approval/gate.ts` then decides
+> whether releasing one takes one reviewer or two. What the default protects is
+> not review but *quality*: a proposal the Coordinator rejected or validation
+> failed still opens, as a draft with the reasons at the top of its body.
+>
+> `DOCXY_APPROVAL_MODE` is retired. A deployment that still sets it to
+> `elevated` or `always` is read as `DOCXY_REQUIRE_APPROVAL=true` and warned
+> about at startup, so a gate someone asked for is never quietly dropped — but
+> it will stop being read, so move across.
+>
+> There is no `DOCXY_PROJECT_KEY`. `grep -rhno 'DOCXY_[A-Z_]*'
+> --include='*.ts' src/ | sed 's/.*://' | sort -u` prints the real list.
 
 ---
 

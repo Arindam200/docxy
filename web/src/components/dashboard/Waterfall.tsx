@@ -11,8 +11,8 @@ import { duration, roleTitle } from "@/lib/format";
 
 const BAR_CLASS: Record<RoleTrace["status"], string> = {
   running: "bg-accent",
-  done: "bg-emerald-400/70",
-  failed: "bg-red-400/70",
+  done: "bg-ok/70",
+  failed: "bg-danger/70",
 };
 
 export function Waterfall({ traces }: { traces: RoleTrace[] }) {

@@ -184,7 +184,17 @@ export const CHANGELOG_AUTHOR: RoleDefinition = {
   spec: (config) => ({
     model: {
       name: config.models['changelog-author'],
-      params: { temperature: 0.3, maxTokens: 2000 },
+      // 2000 was too small, and so was 8000: this role runs on a reasoning
+      // model, which spends the budget thinking before it emits anything. The
+      // turn came back with `max_tokens breached` and an *empty* rawOutput — no
+      // partial entry, no repetition loop, just nothing. One changelog line
+      // needs few tokens to write and many to decide, and it decides against a
+      // session carrying every earlier commit in this repository.
+      //
+      // The budget is the floor of the fix, not the fix. The rest is session
+      // rotation (`DOCXY_SESSION_MAX_TURNS`) keeping the deliberation short,
+      // and a retry that starts over on a cold session when it is not.
+      params: { temperature: 0.3, maxTokens: 16_000 },
     },
     config: runtime(config),
     ...(skills(config, 'changelog-voice') ? { skills: skills(config, 'changelog-voice') } : {}),
@@ -200,7 +210,12 @@ one line. You are not summarizing the diff — you are naming the consequence.`,
 You are given the classification, the impact map, and the existing changelog for
 voice reference. Write exactly one entry. Propose the semver bump the
 classification implies — if the classification says breaking, the bump is major,
-without exception.`,
+without exception.
+
+The decision is small and the budget is not a place to think out loud. Do not
+re-derive the classification, do not enumerate the impact map, and do not draft
+several candidate lines to choose between. Pick the consequence a reader needs
+and write it once.`,
       schema: `
 ## Schema
 

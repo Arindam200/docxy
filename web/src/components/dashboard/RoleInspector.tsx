@@ -24,6 +24,14 @@ const FAILURE_HELP: Record<RoleFailure, string> = {
     "The response was not the JSON the pipeline expected, almost always prose wrapped around it or a truncated reply. The raw output shows which.",
   timeout: "The role did not answer in time. Whatever it had produced is below.",
   aborted: "The run was cancelled while this role was working.",
+  "max-tokens":
+    "The model spent its whole output budget without finishing. Retried on a fresh session — a session carrying many commits is the usual cause — and still could not finish.",
+  context:
+    "The prompt no longer fits the model's context window. The session was retired and rebuilt, and it still did not fit.",
+  "rate-limit": "The provider rate-limited every attempt. Nothing is wrong with the proposal; try again shortly.",
+  cancelled: "The harness cancelled the turn before it finished, usually a server-side execution timeout.",
+  stalled:
+    "The turn kept pausing for approvals or questions without ever settling on an answer. Nobody is attached to a pipeline run, so it was answered automatically and still did not converge.",
 };
 
 export function RoleInspector({
@@ -64,10 +72,10 @@ export function RoleInspector({
               aria-hidden
               className={`mr-1.5 inline-block h-1.5 w-1.5 rounded-full align-middle ${
                 item.status === "failed"
-                  ? "bg-red-400"
+                  ? "bg-danger"
                   : item.status === "running"
                     ? "bg-accent"
-                    : "bg-emerald-400"
+                    : "bg-ok"
               }`}
             />
             {roleTitle(item.role)}
@@ -90,10 +98,10 @@ function RolePanel({ trace, parsed }: { trace: RoleTrace; parsed: unknown }) {
           <span
             className={
               trace.status === "failed"
-                ? "text-red-300"
+                ? "text-danger"
                 : trace.status === "running"
                   ? "text-accent"
-                  : "text-emerald-300"
+                  : "text-ok"
             }
           >
             {trace.status}
@@ -112,8 +120,8 @@ function RolePanel({ trace, parsed }: { trace: RoleTrace; parsed: unknown }) {
       </dl>
 
       {trace.status === "failed" && (
-        <div role="alert" className="border-b border-rule bg-red-500/5 px-4 py-3">
-          <p className="text-xs font-medium text-red-300">
+        <div role="alert" className="border-b border-rule bg-danger/5 px-4 py-3">
+          <p className="text-xs font-medium text-danger">
             {trace.error ?? "This role failed without a message."}
           </p>
           {trace.failure && (
@@ -185,11 +193,11 @@ function Body({ text, missing }: { text: string | undefined; missing: string }) 
 }
 
 const KIND_CLASS: Record<string, string> = {
-  error: "text-red-300",
+  error: "text-danger",
   session: "text-accent",
   tool: "text-muted",
-  subagent: "text-amber-300",
-  result: "text-emerald-300",
+  subagent: "text-warn",
+  result: "text-ok",
 };
 
 function Events({ trace }: { trace: RoleTrace }) {

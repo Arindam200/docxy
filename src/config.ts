@@ -78,6 +78,39 @@ export interface Config {
   approval: {
     /** Minutes before a pending request is reported stale. It is never auto-resolved. */
     staleAfterMinutes: number;
+    /**
+     * Whether a human has to sign off before the pull request is opened.
+     *
+     * Off by default: the pipeline's job is to land a documentation pull
+     * request, and a pull request is itself a review surface — nothing is
+     * merged without someone approving it on GitHub. Turn this on to hold the
+     * proposal behind docxy's own gate as well.
+     */
+    required: boolean;
+  };
+  /** How hard the pipeline tries before it gives up on a role. */
+  agent: {
+    /** Attempts per role, including the first. */
+    maxAttempts: number;
+    /** Wall-clock ceiling for a single attempt. */
+    attemptTimeoutMs: number;
+    /**
+     * Wall-clock ceiling for a whole run.
+     *
+     * Per-attempt timeouts bound each role but not their sum: five roles, three
+     * attempts each, all crawling just inside their own deadline, is a run that
+     * never ends and blocks every push behind it. This is the outer bound.
+     */
+    runTimeoutMs: number;
+    /**
+     * Turns a session may carry before it is retired and rebuilt.
+     *
+     * Session reuse is what makes the second commit cheaper than the first, but
+     * the accumulated transcript is also an input that grows without bound —
+     * and an overfull session is what produced every `max_tokens breached`
+     * failure in this repository's history. Zero disables rotation.
+     */
+    sessionMaxTurns: number;
   };
   server: { port: number };
   github: { token?: string; repo?: string; baseBranch: string };
@@ -105,6 +138,31 @@ function envBool(key: string, fallback: boolean): boolean {
   const v = process.env[key];
   if (v === undefined || v === '') return fallback;
   return /^(1|true|yes|on)$/i.test(v);
+}
+
+/**
+ * Whether the approval gate holds proposals back.
+ *
+ * `DOCXY_REQUIRE_APPROVAL` replaced `DOCXY_APPROVAL_MODE`, whose `elevated` and
+ * `always` values *did* gate. Reading only the new name would answer a
+ * deployment that had asked for a gate by quietly not having one — the one
+ * direction this must never fail in — so the retired name still turns the gate
+ * on, loudly, until whoever set it has moved across.
+ */
+function approvalRequired(): boolean {
+  const explicit = process.env.DOCXY_REQUIRE_APPROVAL;
+  if (explicit !== undefined && explicit !== '') return envBool('DOCXY_REQUIRE_APPROVAL', false);
+
+  const retired = env('DOCXY_APPROVAL_MODE').trim().toLowerCase();
+  if (retired === '' || retired === 'auto') return false;
+
+  console.warn(
+    `DOCXY_APPROVAL_MODE is no longer read (it was set to "${retired}"). The approval ` +
+      'gate is now one setting: DOCXY_REQUIRE_APPROVAL=true. Treating this as ' +
+      'DOCXY_REQUIRE_APPROVAL=true so the gate you asked for is still there — set it ' +
+      'explicitly and drop DOCXY_APPROVAL_MODE.',
+  );
+  return true;
 }
 
 /**
@@ -145,8 +203,11 @@ export function loadConfig(overrides: Partial<{ repoPath: string }> = {}): Confi
       'change-analyst': roleModel('DOCXY_MODEL_CHANGE_ANALYST', 'deepseek-v4-pro'),
       'impact-mapper': roleModel('DOCXY_MODEL_IMPACT_MAPPER', 'deepseek-v4-pro'),
       'docs-updater': roleModel('DOCXY_MODEL_DOCS_UPDATER', 'deepseek-v4-pro'),
-      // The changelog entry is one line; the cheaper, faster sibling is plenty.
-      'changelog-author': roleModel('DOCXY_MODEL_CHANGELOG_AUTHOR', 'deepseek-v4-flash'),
+      // This role has a tiny visible output but must reliably finish strict JSON.
+      // Flash has entered a repetition loop here and exhausted whole turns, so
+      // use the structured-output-capable default unless an operator explicitly
+      // selects a proven alternative.
+      'changelog-author': roleModel('DOCXY_MODEL_CHANGELOG_AUTHOR', 'deepseek-v4-pro'),
     },
     // Verify these against your account with `docxy models`; ids move.
     registeredModels: [
@@ -187,6 +248,13 @@ export function loadConfig(overrides: Partial<{ repoPath: string }> = {}): Confi
     },
     approval: {
       staleAfterMinutes: envInt('DOCXY_APPROVAL_STALE_MINUTES', 60),
+      required: approvalRequired(),
+    },
+    agent: {
+      maxAttempts: Math.max(1, envInt('DOCXY_ROLE_MAX_ATTEMPTS', 3)),
+      attemptTimeoutMs: Math.max(30, envInt('DOCXY_ROLE_TIMEOUT_SECONDS', 420)) * 1000,
+      runTimeoutMs: Math.max(60, envInt('DOCXY_RUN_TIMEOUT_SECONDS', 2700)) * 1000,
+      sessionMaxTurns: Math.max(0, envInt('DOCXY_SESSION_MAX_TURNS', 12)),
     },
     server: { port: envInt('DOCXY_PORT', 4317) },
     github: {

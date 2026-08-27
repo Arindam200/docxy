@@ -35,33 +35,77 @@ Go to **https://github.com/settings/apps/new**
 
 | Field | Value | Notes |
 |---|---|---|
-| **GitHub App name** | `docxy` | **Globally unique across GitHub.** If taken, use `docxy-bot` or `docxy-arindam`. Whatever you pick becomes the slug, and your bot login becomes `<slug>[bot]`. This name appears on every PR — choose it deliberately. |
+| **GitHub App name** | `docxy` | **Globally unique across GitHub**, and it decides your bot's login. See the warning below — do not type `docxy[bot]`. |
 | **Homepage URL** | `https://github.com/Arindam200/docxy` | Any valid URL. Not used functionally. |
 | **Webhook → Active** | ☑ checked | Uncheck only if you want the bot identity but not the automatic trigger. |
 | **Webhook URL** | your Smee URL (Part 2) | Get this first, then come back. |
-| **Webhook secret** | a long random string | **Set this.** Without it anyone who finds your URL can forge events. Generate: `openssl rand -hex 32` |
+| **Webhook secret** | a long random string | **Set this.** The server returns 503 to every delivery while `GITHUB_WEBHOOK_SECRET` is unset, and without it anyone who finds your URL can forge events. Generate: `openssl rand -hex 32` |
+| **SSL verification** | Enabled | Smee serves valid TLS. Never disable it. |
+| **Redirect URI**, **Setup URL** | leave blank | This App is a bot identity, not a login provider. Nothing in `src/` implements an OAuth flow. |
+| **Request user authorization (OAuth)** | ☐ unchecked | Same reason. |
+| **Enable Device Flow** | ☐ unchecked | Same reason. |
 | **Where can this be installed?** | Only on this account | Unless you want others installing it. |
+
+> **The name is not the bot login — GitHub appends `[bot]` for you.**
+>
+> | You type | Slug | Your bot becomes |
+> |---|---|---|
+> | `docxy` | `docxy` | `docxy[bot]` |
+> | `docxy[bot]` | `docxy-bot` | `docxy-bot[bot]` ← almost certainly not what you wanted |
+>
+> Typing the `[bot]` suffix yourself gets it slugified into the name and then
+> suffixed again. If `docxy` is taken, prefer `docxy-app` or `docxy-arindam`
+> over anything containing `[bot]`.
+>
+> The slug is also what the downloaded private key is named after, so
+> `docxy-bot.2026-08-25.private-key.pem` in your Downloads folder is telling you
+> the slug is `docxy-bot`. Renaming later is possible — the App ID and private
+> key survive it — but the login on every PR you have already opened does not
+> change retroactively. Get it right before the first run.
+
+### What about the Client ID and client secret?
+
+Your App's settings page shows a **Client ID** and offers to generate a **client
+secret**. Docxy uses neither. They exist for Apps that sign users in, and every
+App gets them whether or not it wants them. Docxy authenticates as an
+*installation* — a JWT signed with the private key, exchanged for a short-lived
+installation token — which is a different mechanism entirely.
+
+Leave the client secret ungenerated. If you generated one and it leaked, rotate
+it and move on; nothing in this repo reads it.
 
 ### Repository permissions
 
-Set exactly these four. Leave everything else as **No access**.
+Set exactly these two. Leave everything else as **No access**.
 
 | Permission | Level | Why |
 |---|---|---|
 | **Metadata** | Read-only | Mandatory. GitHub sets it automatically. |
 | **Contents** | Read and write | Clone the repo; push the proposal branch. |
 | **Pull requests** | Read and write | Open the PR. |
-| **Checks** | Read and write | Only if you use the pre-PR approval gate. Skip if `DOCXY_APPROVAL_MODE=auto`. |
+
+These are exactly the two `installationToken()` asks for in `src/github/app.ts`.
+A token cannot exceed the installation's grant, so anything extra you tick here
+is scope on the install screen that no code path can use.
+
+> **Not Checks.** Earlier drafts of this guide asked for `Checks: read/write`
+> for the approval gate. Nothing in `src/` calls the Checks API — the gate lives
+> in docxy's own store and dashboard, never on the commit. Do not grant it.
+
+Organization, Account, and Enterprise permissions: **none**.
 
 > Ask for nothing more. Every extra permission is a line a stranger reads on the
 > install screen, and `Contents: write` is already the one that makes people pause.
 
 ### Subscribe to events
 
-- ☑ **Push**
-- ☑ **Installation** (keeps your records straight when someone adds/removes repos)
-- ☑ **Installation repositories**
-- ☑ **Check run** — only if using the approval gate
+- ☑ **Push** — the only event the server acts on; `src/server/index.ts` ignores
+  every other `x-github-event` with a 200 so GitHub does not retry it
+- ☑ **Installation** and ☑ **Installation repositories** — not handled yet, but
+  subscribing now costs nothing and saves a round trip later
+
+Adding events later needs no re-approval from installers, as long as the
+permissions behind them do not change. **Changing permissions does.**
 
 Click **Create GitHub App**.
 
@@ -85,9 +129,24 @@ mv ~/Downloads/docxy.*.private-key.pem ~/.docxy/app.pem
 chmod 600 ~/.docxy/app.pem
 ```
 
-> This key is equivalent to your App's password. Never commit it. `.docxy/` at
-> the repo root is already gitignored, but keeping it in `~/.docxy` outside the
-> repo is safer.
+> This key is equivalent to your App's password, and it is the one file in this
+> setup that cannot be rotated quietly — leaking it means revoking the key and
+> re-keying every deployment.
+>
+> **Move it out of the repository, do not just gitignore it.** `.gitignore`
+> covers `.docxy/`, but a `.pem` that lands at the repo root — which is where
+> browsers and `mv` put it if you are not careful — matches no rule and shows up
+> as an untracked file that `git add -A` will happily commit. `*.pem` is now in
+> `.gitignore` as a backstop, but the real fix is keeping the key in `~/.docxy`,
+> outside the working tree entirely.
+>
+> Confirm the key you saved is the one GitHub has — this prints the fingerprint
+> shown on the App's settings page:
+>
+> ```bash
+> openssl rsa -in ~/.docxy/app.pem -pubout -outform DER 2>/dev/null \
+>   | openssl dgst -sha256 -binary | openssl base64
+> ```
 
 ### 2c. Webhook secret
 
@@ -173,7 +232,20 @@ GITHUB_WEBHOOK_SECRET=<the openssl rand -hex 32 value>
 
 # Part 7 — The code
 
-## 7a. New file: `src/github/app.ts`
+> **This is already implemented.** Part 7 documents how the pieces fit together;
+> it is not a checklist of files to create. `src/github/app.ts`,
+> `src/github/pr.ts`, and the `/webhook` route in `src/server/index.ts` all exist
+> on disk and have moved ahead of the listings below — `app.ts` also exports
+> `scrubToken()` and `appStatus()`, and reports a readable error when the private
+> key path is wrong. **Read the files, not these excerpts**, and never paste a
+> listing from here over the real one.
+>
+> **One exception: 7c is not fully built.** The `/webhook` route exists and
+> verifies signatures, but `runPipelineForPush` does not — see the note in 7c.
+>
+> Skip to [Part 8](#part-8--run-it-locally) unless you want the rationale.
+
+## 7a. `src/github/app.ts` — the identity
 
 ```ts
 import { createSign, createHmac, timingSafeEqual } from 'node:crypto';
@@ -252,12 +324,12 @@ export function verifyWebhook(body: Buffer, header: string | undefined, secret: 
 }
 ```
 
-## 7b. Rewrite the publish path in `src/github/pr.ts`
+## 7b. `src/github/pr.ts` — the publish path
 
-Three changes:
+Four things make the PR the App's rather than yours:
 
-**1. Delete the `gh` CLI branch.** `hasGhCli()` and the `gh pr create` call go
-away entirely. That is what attributes the PR to you.
+**1. No `gh` CLI branch.** `hasGhCli()` and `gh pr create` are gone — that call
+is what attributed the PR to whoever ran it.
 
 **2. Push to a tokenized URL, not `origin`.** `git push origin` uses your
 credential helper — your account. Instead:
@@ -304,10 +376,22 @@ const res = await fetch(`https://api.github.com/repos/${repo}/pulls`, {
 Because the token is an installation token, GitHub attributes the PR to
 `docxy[bot]`.
 
-Keep a fallback: if `readAppCredentials()` returns `null`, use the current
-`gh`/`GITHUB_TOKEN` path, so local development without the App still works.
+**There is deliberately no fallback.** An earlier draft suggested dropping back
+to `gh`/`GITHUB_TOKEN` when `readAppCredentials()` returns `null`. The shipped
+code does the opposite — `openPullRequest()` throws, naming the three variables
+to set:
 
-## 7c. The webhook receiver
+```
+The docxy GitHub App is not configured, so there is no identity to open a
+pull request as. Set GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_PATH, and
+GITHUB_APP_INSTALLATION_ID …
+```
+
+A fallback is the failure mode this whole guide exists to prevent: it does not
+stop the run, it just quietly signs a machine's proposal with a human's name.
+Failing loudly is the feature.
+
+## 7c. `src/server/index.ts` — the webhook receiver
 
 Add to `src/server/index.ts` (or a new route file):
 
@@ -339,16 +423,44 @@ app.post('/webhook', async (c) => {
 });
 ```
 
-`runPipelineForPush` clones the repo with an installation token, sets
-`DOCXY_PROJECT_KEY` to `owner/repo`, and calls the existing `runPipeline`.
+> **`runPipelineForPush` does not exist yet — this part is aspirational.**
+>
+> What the shipped route actually does is call `startRun(payload.after)`
+> (`src/server/index.ts`), which passes the **server's own `config`** to
+> `runPipeline` and takes only the commit SHA from the payload. Nothing is
+> cloned. The run therefore executes against whatever `DOCXY_REPO_PATH` pointed
+> at when the server booted — and if that checkout is a different repository
+> from the one that was pushed, the SHA does not resolve and the run fails.
+>
+> Two consequences:
+>
+> - **One server serves one repository.** Start it with `DOCXY_REPO_PATH` set to
+>   the checkout you want documented, and only wire that repository's pushes to
+>   it. A single instance cannot fan out across an installation's repos.
+> - **The checkout must be able to see the pushed commit.** The webhook arrives
+>   the instant GitHub accepts the push; a local checkout that has not fetched
+>   yet does not have that SHA.
+>
+> Closing this gap is what turns the demo into a product: clone (or fetch) the
+> payload's repository with an installation token into a stable per-repository
+> directory, build a `Config` for it, and pass *that* to `runPipeline` instead of
+> the server's own.
 
 > **Dedupe on `x-github-delivery`.** GitHub retries deliveries. Without a dedupe
 > key a retry opens a second pull request for the same commit.
 
-> **`DOCXY_PROJECT_KEY` is not optional here.** It defaults to the checkout path,
-> and a webhook-driven run clones to a fresh temp directory every time. Leave it
-> unset and every push starts from cold sessions and an empty symbol map — with
-> no error at all. The pipeline appears to work and remembers nothing.
+> **Session reuse keys on the repository path.** `DOCXY_REPO_PATH` defaults to
+> the current working directory (`src/config.ts`), and a webhook-driven run
+> clones to a fresh temp directory every time — so each push starts from cold
+> sessions and an empty symbol map, with no error at all. Give hosted runs a
+> stable checkout directory per repository rather than a new `mkdtemp` each time.
+>
+> Earlier drafts of this guide told you to set `DOCXY_PROJECT_KEY` here. **That
+> variable does not exist.** Nothing in `src/` reads it. To see the real list:
+>
+> ```bash
+> grep -rhno 'DOCXY_[A-Z_]*' --include='*.ts' src/ | sed 's/.*://' | sort -u
+> ```
 
 ---
 
@@ -382,47 +494,72 @@ That is the whole flow, with nothing deployed.
 
 # Part 9 — Verify each piece
 
-Work down this list; each step isolates one failure.
+One script checks the whole credential chain. Save it as `verify-app.mts`
+anywhere outside `src/` and run it from the repository root:
 
-**1. Credentials load**
+```ts
+import { readFileSync } from 'node:fs';
+import { createHmac } from 'node:crypto';
+import { resolve } from 'node:path';
 
-```bash
-node -e 'const {readAppCredentials}=require("./dist/github/app.js");
-const c=readAppCredentials();
-console.log(c ? `ok: app ${c.appId}, install ${c.installationId}, bot ${c.slug}[bot]` : "MISSING");'
+for (const line of readFileSync('.env', 'utf8').split('\n')) {
+  const m = /^([A-Z0-9_]+)=(.*)$/.exec(line.trim());
+  if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2];
+}
+
+const { appStatus, readAppCredentials, installationToken, verifyWebhook } =
+  await import(resolve('src/github/app.ts'));
+
+const repo = process.env.DOCXY_VERIFY_REPO ?? 'Arindam200/docxy-demo';
+console.log('1. appStatus() ....', JSON.stringify(appStatus()));
+
+const creds = readAppCredentials();
+if (!creds) throw new Error('credentials are null — see "missing" above');
+
+const token = await installationToken(creds, [repo.split('/')[1]!]);
+console.log('2. token mints ....', `ok, length ${token.length}`);
+
+const res = await fetch(`https://api.github.com/repos/${repo}`, {
+  headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json',
+             'user-agent': 'docxy' },
+});
+const body = await res.json() as { full_name?: string; default_branch?: string };
+console.log('3. token sees repo', `HTTP ${res.status}, ${body.full_name}, default=${body.default_branch}`);
+
+const secret = process.env.GITHUB_WEBHOOK_SECRET ?? '';
+const payload = Buffer.from('{"zen":"test"}');
+const sig = 'sha256=' + createHmac('sha256', secret).update(payload).digest('hex');
+console.log('4. webhook HMAC ...', verifyWebhook(payload, sig, secret) ? 'verifies' : 'FAILED');
+console.log('5. bot identity ...', `${creds.slug}[bot] <${creds.botEmail}>`);
 ```
 
-**2. The JWT is accepted** (proves App ID and private key match)
-
 ```bash
-node -e '...' # or simply:
-gh api /repos/Arindam200/docxy-demo/installation --jq .id
+npx tsx verify-app.mts
 ```
 
-**3. A token mints**
+A fully configured App prints:
 
-```bash
-node --input-type=module -e '
-import { readAppCredentials, installationToken } from "./dist/github/app.js";
-const c = readAppCredentials();
-const t = await installationToken(c, ["docxy-demo"]);
-console.log("token ok, length", t.length);
-'
+```
+1. appStatus() .... {"configured":true,"slug":"docxy","appId":"…","installationId":"…",…,"missing":[]}
+2. token mints .... ok, length 390
+3. token sees repo HTTP 200, Arindam200/docxy-demo, default=main
+4. webhook HMAC ... verifies
+5. bot identity ... docxy[bot] <…+docxy[bot]@users.noreply.github.com>
 ```
 
-**4. The token can see the repo**
+Read it top-down; each line depends on the one above. `appStatus().missing`
+names the variable to fix. Line 2 failing while line 1 is clean means the App ID
+and private key do not match, or the App is not installed on that account.
 
-```bash
-curl -s -H "authorization: Bearer $TOKEN" \
-  https://api.github.com/repos/Arindam200/docxy-demo | jq .full_name
-```
+> **Two traps.** Run this against `src/`, not `dist/` — `npm run build` output
+> goes stale the moment you edit a source file, and this repo is ESM, so the
+> `require('./dist/github/app.js')` one-liners in older drafts of this guide fail
+> twice over. And use a script file rather than `npx tsx -e`: the `-e` form
+> compiles as CommonJS and rejects top-level `await`.
 
-**5. The PR is authored by the bot** — after a run:
-
-```bash
-gh pr view <n> --repo Arindam200/docxy-demo --json author -q .author.login
-# expect: docxy[bot]     (not Arindam200)
-```
+> **Line 4 does not prove GitHub agrees.** It checks your secret against your own
+> HMAC — it passes even if the App's **Webhook → Secret** field is empty. Only a
+> real delivery proves those match.
 
 **6. Webhooks arrive** — push, then check the Smee channel page in your browser,
 and your App's **Advanced → Recent Deliveries** tab, which shows every payload
@@ -441,7 +578,10 @@ and its response code.
 | PR still shows your username | The `gh` fallback is still being used. Confirm `readAppCredentials()` is not returning `null`. |
 | Webhook never arrives | Smee not running, wrong URL on the App, or webhook not marked Active. Check **Advanced → Recent Deliveries**. |
 | `401 bad signature` in your logs | `GITHUB_WEBHOOK_SECRET` does not match the App's. Also make sure you hash the **raw body**, not a re-serialized JSON object. |
-| Runs work but never remember anything | `DOCXY_PROJECT_KEY` unset. See Part 7c. |
+| `503 GITHUB_WEBHOOK_SECRET is not set` | The server refuses deliveries until the variable is set. Set it in `.env` **and** in the App's Webhook → Secret field. |
+| Bot is named `something-bot[bot]` | The App name contained `[bot]`. See the warning in Part 1. |
+| `Cannot find module .../dist/github/app.js` | Verifying against stale build output. Point at `src/` instead. |
+| Runs work but never remember anything | Each run started from a different checkout directory, so no session was reused. See Part 7c. |
 
 ---
 

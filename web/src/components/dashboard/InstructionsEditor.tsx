@@ -49,7 +49,7 @@ export function InstructionsEditor({
         <p className="text-xs text-muted" aria-live="polite">
           {state === "saving" && "Saving…"}
           {state === "saved" && "Saved — applies from the next run."}
-          {state === "error" && <span className="text-red-300">Could not save. Is the API up?</span>}
+          {state === "error" && <span className="text-danger">Could not save. Is the API up?</span>}
           {state === "idle" &&
             (updatedAt
               ? `Last updated ${new Date(updatedAt).toLocaleString()}`

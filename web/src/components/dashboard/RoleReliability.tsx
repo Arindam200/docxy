@@ -63,7 +63,7 @@ export function RoleReliability({ roles }: { roles: RoleStats[] }) {
                         {failures.map(([kind, count]) => (
                           <span
                             key={kind}
-                            className="border border-red-500/30 bg-red-500/10 px-1.5 py-px text-[10px] text-red-300"
+                            className="border border-danger/30 bg-danger/10 px-1.5 py-px text-[10px] text-danger"
                           >
                             {count} {FAILURE_LABELS[kind] ?? kind}
                           </span>

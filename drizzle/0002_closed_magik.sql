@@ -1,0 +1,1 @@
+ALTER TABLE "run_roles" ADD COLUMN "attempts" integer DEFAULT 1 NOT NULL;
