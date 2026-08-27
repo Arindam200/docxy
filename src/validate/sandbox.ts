@@ -24,27 +24,54 @@ export interface SandboxAvailability {
 }
 
 /**
- * Whether this harness has a sandbox provider configured.
+ * Whether this harness has a sandbox provider that can actually run something.
  *
- * Asked before every sandboxed check rather than cached across the process: the
- * provider is tenant-level configuration that an operator can add or remove
- * while a long-lived `docxy serve` is running, and answering from a stale cache
- * would send validation to the wrong place for the rest of the day.
+ * Asks the settings endpoint, not `/capabilities`. The capabilities document
+ * reports `sandbox.enabled: true` on a harness where no provider has ever been
+ * configured — it is describing what this build *supports*, not what it is
+ * holding, and its own SDK docstring disagrees with it. Trusting it sent every
+ * run into a sandbox that did not exist, which cost a session and a full model
+ * turn before failing into the local fallback the check should have chosen
+ * immediately.
+ *
+ * Asked fresh each time rather than cached: the provider is tenant-level
+ * configuration an operator can add or remove while a long-lived `docxy serve`
+ * is running, and a stale cache would send validation to the wrong place for
+ * the rest of the day.
  */
 export async function sandboxAvailability(client: TrueForge): Promise<SandboxAvailability> {
   try {
-    const res = await client.fetch('/api/v1/capabilities');
+    const res = await client.fetch('/api/v1/settings/sandbox-providers');
+
+    if (res.status === 404) {
+      return {
+        available: false,
+        reason:
+          'no sandbox provider is configured on the harness — ' +
+          'set DAYTONA_API_KEY and run `docxy setup`',
+      };
+    }
     if (!res.ok) {
       return { available: false, reason: `the harness returned HTTP ${res.status}` };
     }
-    // SAFETY: the shape is only read through optional chaining and compared
-    // against `true`, so any other payload answers "not available" rather than
-    // throwing — which is the safe direction for this question.
-    const body = (await res.json()) as { data?: { sandbox?: { enabled?: boolean } } };
-    if (body?.data?.sandbox?.enabled === true) return { available: true };
+
+    // SAFETY: every field is read through optional chaining and compared against
+    // a known literal, so an unexpected payload answers "not available" rather
+    // than throwing — the safe direction for this question.
+    const body = (await res.json()) as {
+      data?: { status?: string; statusReason?: string; status_reason?: string };
+    };
+    const status = body?.data?.status;
+    if (status === 'ready') return { available: true };
+
+    // Configured but not usable yet. Saying which is the difference between an
+    // operator waiting thirty seconds and an operator re-running setup.
+    const detail = body?.data?.statusReason ?? body?.data?.status_reason;
     return {
       available: false,
-      reason: 'no sandbox provider is configured on the harness (set DAYTONA_API_KEY and run `docxy setup`)',
+      reason:
+        `the sandbox provider is ${status ?? 'in an unknown state'}` +
+        (detail ? `: ${detail}` : ''),
     };
   } catch (err) {
     return {

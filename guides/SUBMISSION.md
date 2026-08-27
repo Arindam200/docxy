@@ -31,7 +31,7 @@ currently makes a case *against* doing it.
 |---|---|
 | Blocking gaps | **4** → **1 open** (the merge) |
 | Score-costing gaps | **3** → **2 open** |
-| Tests passing | 98 → **108** |
+| Tests passing | 98 → **116** |
 | Qodo-reviewed pull requests | 3 (merging in hand) |
 
 ---
@@ -104,7 +104,22 @@ deliberate. Nothing else in the submission recovers from that.
 - The test command stays local on purpose — it is the operator's own code, not
   the proposal's, and it needs the whole working tree.
 
-Ten tests cover the routing and the defaults; the suite is at 108.
+Ten tests cover the routing and the defaults, and seven more cover the
+availability check after it was caught reading the wrong endpoint —
+`/api/v1/capabilities` reports `sandbox.enabled: true` on a harness where no
+provider has ever been configured, describing what the build supports rather
+than what it holds. The settings endpoint is the one that knows. The suite is at
+116.
+
+**Two things are still needed before this can run for real:**
+
+1. A **Daytona API key** in `.env` as `DAYTONA_API_KEY`, then `docxy setup`.
+   The harness ships Daytona as its only sandbox provider preset.
+2. A **`DOCXY_DOCS_BUILD_COMMAND`**. It is unset, so the docs-build check is
+   skipped — and it is the only check that goes to the sandbox. Without it the
+   sandbox is configured and never exercised. `npm test` against `.demo-repo`,
+   or any command that reads the proposed markdown, is enough to make the beat
+   visible on camera.
 
 ---
 
@@ -383,7 +398,7 @@ than days and sit outside the judged set. Do both on Sunday, after submitting.
 
 Run against `fix/reliability-and-performance` at `ebda697`, 27 August 2026:
 
-- `npm test` — 98 passed, 0 failed (now **108** after the sandbox work)
+- `npm test` — 98 passed, 0 failed (now **116** after the sandbox work)
 - `npm run typecheck` — clean, both root and `web/`
 - `npm run build` in `web/` — clean, 17 routes
 - `git status` clean, in sync with `origin`

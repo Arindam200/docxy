@@ -21,6 +21,7 @@ import type { DocEdit, RoleTrace, RunRecord } from '../src/types.js';
 import { buildReport } from '../src/server/observability.js';
 import { sandboxEnabled } from '../src/agents/roles.js';
 import { validateProposal } from '../src/validate/index.js';
+import { sandboxAvailability } from '../src/validate/sandbox.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -555,6 +556,49 @@ check('empty history has no rates',
   check('no docs build command is skipped, not failed', build?.status === 'skipped');
 
   process.env = before;
+}
+
+// --- sandbox availability -------------------------------------------------
+// `/api/v1/capabilities` reports `sandbox.enabled: true` on a harness where no
+// provider has ever been configured — it describes what the build supports, not
+// what it holds. Reading it sent every run into a sandbox that did not exist,
+// costing a session and a full model turn before failing into the local
+// fallback the check should have picked immediately. The settings endpoint is
+// the one that knows.
+{
+  // SAFETY: `sandboxAvailability` reaches for exactly one member of the client,
+  // `fetch`, so a stub carrying only that member satisfies every path under test.
+  const clientWith = (status: number, body: unknown) =>
+    ({ fetch: async () => new Response(JSON.stringify(body), { status }) }) as never;
+
+  const missing = await sandboxAvailability(
+    clientWith(404, { error: { message: 'No sandbox provider configured' } }),
+  );
+  check('an unconfigured provider is unavailable', missing.available === false);
+  check('and says how to configure it',
+    (missing.reason ?? '').includes('docxy setup'));
+
+  const ready = await sandboxAvailability(clientWith(200, { data: { status: 'ready' } }));
+  check('a ready provider is available', ready.available === true);
+
+  const pending = await sandboxAvailability(
+    clientWith(200, { data: { status: 'pending', statusReason: 'image building' } }),
+  );
+  check('a pending provider is not yet available', pending.available === false);
+  check('and names what it is waiting on',
+    (pending.reason ?? '').includes('pending') && (pending.reason ?? '').includes('image building'));
+
+  const failed = await sandboxAvailability(clientWith(200, { data: { status: 'failed' } }));
+  check('a failed provider is not available', failed.available === false);
+
+  // The old bug in one line: this is the capabilities payload, and it must not
+  // be read as a configured provider.
+  const capsShaped = await sandboxAvailability(clientWith(200, { data: { enabled: true } }));
+  check('a payload with no status is not mistaken for a ready provider',
+    capsShaped.available === false);
+
+  const broken = await sandboxAvailability(clientWith(500, {}));
+  check('an erroring harness is unavailable, not assumed ready', broken.available === false);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

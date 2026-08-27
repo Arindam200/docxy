@@ -320,13 +320,13 @@ src/
   github/pr.ts           worktree-isolated branch and PR creation
   server/                timeline UI and approval endpoints
 skills/                  the four skill packs
-test/selftest.ts         108 checks over the pure logic and the docs-branch wiring
+test/selftest.ts         116 checks over the pure logic and the docs-branch wiring
 ```
 
 ## Tests
 
 ```bash
-npm test        # 108 checks: parsing, edits, links, changelog, gate, sandbox, docs branch
+npm test        # 116 checks: parsing, edits, links, changelog, gate, sandbox, docs branch
 npm run typecheck
 ```
 
