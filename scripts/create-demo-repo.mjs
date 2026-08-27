@@ -9,7 +9,12 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
-const target = resolve(process.argv[2] ?? '.demo-repo');
+// Flags are not the target. `npm run demo -- --force` put `--force` in argv[2],
+// so the script built the demo repository in a directory literally named
+// `--force`, recreated it there on every run, and printed a `--repo --force`
+// hint that could not work.
+const positional = process.argv.slice(2).find((arg) => !arg.startsWith('-'));
+const target = resolve(positional ?? '.demo-repo');
 
 if (existsSync(target)) {
   if (process.argv.includes('--force')) rmSync(target, { recursive: true, force: true });
