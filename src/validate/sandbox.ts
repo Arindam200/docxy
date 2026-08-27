@@ -19,65 +19,84 @@ const MAX_OUTPUT_LINES = 15;
 
 export interface SandboxAvailability {
   available: boolean;
+  /**
+   * Which backend will run it. `daytona` is a configured remote provider;
+   * `local` is the harness's own standalone sandbox — on macOS a Seatbelt
+   * confinement with an allow-listed filesystem and network egress, on Linux a
+   * bubblewrap namespace. Both are isolation; the report names which so nobody
+   * has to guess what "sandbox" meant on a given run.
+   */
+  backend?: 'daytona' | 'local';
   /** Why not, phrased for someone reading a validation report. */
   reason?: string;
 }
 
 /**
- * Whether this harness has a sandbox provider that can actually run something.
+ * Whether a session asking for a sandbox will get one.
  *
- * Asks the settings endpoint, not `/capabilities`. The capabilities document
- * reports `sandbox.enabled: true` on a harness where no provider has ever been
- * configured — it is describing what this build *supports*, not what it is
- * holding, and its own SDK docstring disagrees with it. Trusting it sent every
- * run into a sandbox that did not exist, which cost a session and a full model
- * turn before failing into the local fallback the check should have chosen
- * immediately.
+ * `/api/v1/capabilities` is the authority, and the SDK's docstring for it —
+ * "whether a sandbox provider is configured for this tenant" — is wrong in a way
+ * worth stating, because believing it costs a working sandbox. The harness
+ * answers `enabled: true` when *either* a remote provider is registered and
+ * ready **or** it is running standalone with local sandbox support compiled in.
+ * A harness with no provider configured at all still runs sandboxed code, and
+ * `/settings/sandbox-providers` 404s on exactly that harness.
  *
- * Asked fresh each time rather than cached: the provider is tenant-level
- * configuration an operator can add or remove while a long-lived `docxy serve`
- * is running, and a stale cache would send validation to the wrong place for
- * the rest of the day.
+ * So: ask capabilities whether a sandbox exists, then ask settings only to name
+ * which one. Getting this backwards sent validation to local `execFile` on a
+ * machine whose harness was ready to isolate it.
+ *
+ * Asked fresh each time rather than cached: a provider can be added or removed
+ * while a long-lived `docxy serve` is running, and a stale answer would send
+ * validation to the wrong place for the rest of the day.
  */
 export async function sandboxAvailability(client: TrueForge): Promise<SandboxAvailability> {
   try {
-    const res = await client.fetch('/api/v1/settings/sandbox-providers');
-
-    if (res.status === 404) {
-      return {
-        available: false,
-        reason:
-          'no sandbox provider is configured on the harness — ' +
-          'set DAYTONA_API_KEY and run `docxy setup`',
-      };
-    }
+    const res = await client.fetch('/api/v1/capabilities');
     if (!res.ok) {
       return { available: false, reason: `the harness returned HTTP ${res.status}` };
     }
 
-    // SAFETY: every field is read through optional chaining and compared against
-    // a known literal, so an unexpected payload answers "not available" rather
-    // than throwing — the safe direction for this question.
-    const body = (await res.json()) as {
-      data?: { status?: string; statusReason?: string; status_reason?: string };
-    };
-    const status = body?.data?.status;
-    if (status === 'ready') return { available: true };
+    // SAFETY: read through optional chaining and compared against `true`, so any
+    // other payload answers "not available" rather than throwing — the safe
+    // direction, since the fallback is local execution and not a failed run.
+    const body = (await res.json()) as { data?: { sandbox?: { enabled?: boolean } } };
+    if (body?.data?.sandbox?.enabled !== true) {
+      return {
+        available: false,
+        reason:
+          'the harness reports no sandbox — register a provider with ' +
+          '`docxy setup` (DAYTONA_API_KEY), or run the harness standalone, ' +
+          'which carries its own',
+      };
+    }
 
-    // Configured but not usable yet. Saying which is the difference between an
-    // operator waiting thirty seconds and an operator re-running setup.
-    const detail = body?.data?.statusReason ?? body?.data?.status_reason;
-    return {
-      available: false,
-      reason:
-        `the sandbox provider is ${status ?? 'in an unknown state'}` +
-        (detail ? `: ${detail}` : ''),
-    };
+    return { available: true, backend: await detectBackend(client) };
   } catch (err) {
     return {
       available: false,
       reason: `could not ask the harness: ${err instanceof Error ? err.message : String(err)}`,
     };
+  }
+}
+
+/**
+ * Name the backend behind an already-confirmed sandbox.
+ *
+ * Best-effort by design. This only labels a report; if the settings endpoint is
+ * unreachable the sandbox still works, and refusing to run over a cosmetic
+ * question would be the wrong trade.
+ */
+async function detectBackend(client: TrueForge): Promise<'daytona' | 'local'> {
+  try {
+    const res = await client.fetch('/api/v1/settings/sandbox-providers');
+    if (!res.ok) return 'local';
+    // SAFETY: optional chaining throughout; anything unexpected falls to the
+    // standalone answer, which is what a harness with no provider is running.
+    const body = (await res.json()) as { data?: { status?: string } };
+    return body?.data?.status === 'ready' ? 'daytona' : 'local';
+  } catch {
+    return 'local';
   }
 }
 
@@ -191,6 +210,7 @@ export async function runCommandInSandbox(
   if (!availability.available) {
     return { unavailable: availability.reason ?? 'the sandbox is unavailable' };
   }
+  const backend = availability.backend ?? 'local';
 
   let sessionId: string;
   try {
@@ -240,7 +260,7 @@ export async function runCommandInSandbox(
           name,
           status: 'skipped',
           where: 'sandbox',
-          detail: `the command did not run in the sandbox: ${tail || 'no reason given'}`,
+          detail: `the command did not run in the ${backend} sandbox: ${tail || 'no reason given'}`,
         },
       };
     }
@@ -252,8 +272,8 @@ export async function runCommandInSandbox(
         where: 'sandbox',
         detail:
           parsed.exitCode === 0
-            ? tail || `exited 0 in the sandbox (${parsed.filesWritten ?? payload.length} file(s) staged)`
-            : `exited ${parsed.exitCode} in the sandbox\n${tail}`,
+            ? tail || `exited 0 in the ${backend} sandbox (${parsed.filesWritten ?? payload.length} file(s) staged)`
+            : `exited ${parsed.exitCode} in the ${backend} sandbox\n${tail}`,
       },
     };
   } catch (err) {

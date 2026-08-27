@@ -93,6 +93,14 @@ export async function validateProposal(input: ValidateInput): Promise<Validation
   const { config, applied, changelogFile, classification, changelog, docsPath, stageable } = input;
   const checks: ValidationCheck[] = [];
 
+  // Kept as well as forwarded. The live stream shows the sandbox working; the
+  // record is what a reviewer opening the run tomorrow has instead.
+  const executionEvents: TraceEvent[] = [];
+  const collect = (event: TraceEvent): void => {
+    executionEvents.push(event);
+    input.onEvent?.(event);
+  };
+
   if (!config.validation.enabled) {
     return {
       ok: true,
@@ -178,14 +186,16 @@ export async function validateProposal(input: ValidateInput): Promise<Validation
       config,
     };
     if (input.client) buildInput.client = input.client;
-    if (input.onEvent) buildInput.onEvent = input.onEvent;
+    buildInput.onEvent = collect;
     if (input.signal) buildInput.signal = input.signal;
     checks.push(await runDocsBuild(buildInput));
   }
 
   checks.push(await runCommand('tests', config.validation.testCommand, config.repoPath));
 
-  return { ok: checks.every((c) => c.status !== 'fail'), checks };
+  const report: ValidationReport = { ok: checks.every((c) => c.status !== 'fail'), checks };
+  if (executionEvents.length > 0) report.events = executionEvents;
+  return report;
 }
 
 interface DocsBuildInput {

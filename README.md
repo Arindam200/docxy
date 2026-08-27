@@ -132,21 +132,34 @@ if you configure them.
 The checks divide by who wrote what they run over. Anchors, links and semver
 consistency only *read* the proposed text. The docs build **executes** it — a
 command, over prose a model finished writing a minute earlier — so that one runs
-**inside the harness sandbox**, not on the machine the pipeline happens to be
-installed on. Set `DAYTONA_API_KEY`, run `docxy setup`, and the sandbox provider
-is registered with the harness; every run from then on stages the proposal into a
-fresh sandbox, builds it there, and reports the exit code back.
+**inside the harness sandbox**, never against your checkout. A run stages the
+proposal into a fresh sandbox, builds it there, and reports the exit code back:
+
+```
+validation
+  ✓ edits-apply         3 file(s) patched cleanly
+  ✓ link-check          no broken relative links or anchors
+  ✓ semver-consistency  breaking -> major
+  ✓ docs-build          markdown files: 4 | unbalanced fences: []   [sandbox]
+```
+
+**This needs no third-party account.** A harness started with
+`npx @truefoundry/trueforge@latest` carries its own sandbox — a Seatbelt
+confinement on macOS, a bubblewrap namespace on Linux, both with an allow-listed
+filesystem and allow-listed network egress. That is where the build runs by
+default. Set `DAYTONA_API_KEY` and run `docxy setup` to use a remote Daytona
+sandbox instead; the run names which one it used, and `docxy doctor` tells you
+before a run does.
 
 Your own test suite is the exception, and stays local on purpose: it is your
 code, not the proposal's, already trusted enough to be checked out, and it needs
 the whole working tree rather than the handful of doc files a sandbox turn
 carries.
 
-With no sandbox provider configured, the build still runs — locally, and the
-report says so, tagging every executed check `sandbox` or `local`. A missing
-Daytona key is a property of the harness, not of the documentation, and failing a
-correct proposal over it would be the wrong answer. `docxy doctor` tells you
-which one you are getting before a run does.
+If no sandbox is reachable at all, the build still runs — locally, and the report
+says so, tagging every executed check `sandbox` or `local`. A harness without a
+sandbox is a property of the deployment, not of the documentation, and failing a
+correct proposal over it would be the wrong answer.
 
 ### 3. The pull request is the gate — and a graduated one is there if you want it
 
@@ -188,8 +201,9 @@ the dashboard, webhooks, and what to do when a role fails — see
 - Node 20.11+
 - A [Nebius Token Factory](https://tokenfactory.nebius.com) API key
 - The TrueForge harness running locally
-- A [Daytona](https://app.daytona.io) API key, to run the docs build in a
-  sandbox. Without one the build falls back to local execution and says so.
+- Optionally a [Daytona](https://app.daytona.io) API key, to run the docs build
+  in a remote sandbox. The standalone harness carries its own, so this is not
+  needed to get isolation.
 
 ### 1. Start the harness
 

@@ -113,6 +113,15 @@ export interface ValidationCheck {
 export interface ValidationReport {
   ok: boolean;
   checks: ValidationCheck[];
+  /**
+   * What the sandbox did, when a check ran in one.
+   *
+   * Validation is the only stage that executes anything, and its events were
+   * going to the live stream and nowhere else — so a run reopened an hour later
+   * showed `where: "sandbox"` with no trace of the sandbox behind it. Absent on
+   * runs where nothing executed remotely, and on records written before this.
+   */
+  events?: Array<{ at: string; kind: string; text: string }>;
 }
 
 export type ApprovalScope = 'routine' | 'elevated';

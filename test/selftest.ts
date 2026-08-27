@@ -559,45 +559,68 @@ check('empty history has no rates',
 }
 
 // --- sandbox availability -------------------------------------------------
-// `/api/v1/capabilities` reports `sandbox.enabled: true` on a harness where no
-// provider has ever been configured — it describes what the build supports, not
-// what it holds. Reading it sent every run into a sandbox that did not exist,
-// costing a session and a full model turn before failing into the local
-// fallback the check should have picked immediately. The settings endpoint is
-// the one that knows.
+// `/capabilities` is the authority and the SDK docstring for it is wrong: it
+// says "whether a sandbox provider is configured", but the harness answers true
+// when EITHER a remote provider is ready OR it is running standalone with local
+// sandbox support. Reading `/settings/sandbox-providers` instead — which 404s on
+// exactly that standalone harness — sent validation to local execFile on a
+// machine whose harness was ready to isolate it.
 {
   // SAFETY: `sandboxAvailability` reaches for exactly one member of the client,
   // `fetch`, so a stub carrying only that member satisfies every path under test.
-  const clientWith = (status: number, body: unknown) =>
-    ({ fetch: async () => new Response(JSON.stringify(body), { status }) }) as never;
+  const clientOf = (routes: Record<string, { status: number; body: unknown }>) =>
+    ({
+      fetch: async (path: string) => {
+        const hit = routes[path] ?? { status: 404, body: {} };
+        return new Response(JSON.stringify(hit.body), { status: hit.status });
+      },
+    }) as never;
 
-  const missing = await sandboxAvailability(
-    clientWith(404, { error: { message: 'No sandbox provider configured' } }),
+  const CAPS = '/api/v1/capabilities';
+  const PROV = '/api/v1/settings/sandbox-providers';
+
+  // The standalone case: no provider configured, sandbox still real.
+  const standalone = await sandboxAvailability(
+    clientOf({
+      [CAPS]: { status: 200, body: { data: { sandbox: { enabled: true } } } },
+      [PROV]: { status: 404, body: { error: { message: 'No sandbox provider configured' } } },
+    }),
   );
-  check('an unconfigured provider is unavailable', missing.available === false);
-  check('and says how to configure it',
-    (missing.reason ?? '').includes('docxy setup'));
+  check('a standalone harness with no provider still has a sandbox',
+    standalone.available === true);
+  check('and it is named as the local one', standalone.backend === 'local');
 
-  const ready = await sandboxAvailability(clientWith(200, { data: { status: 'ready' } }));
-  check('a ready provider is available', ready.available === true);
-
-  const pending = await sandboxAvailability(
-    clientWith(200, { data: { status: 'pending', statusReason: 'image building' } }),
+  const daytona = await sandboxAvailability(
+    clientOf({
+      [CAPS]: { status: 200, body: { data: { sandbox: { enabled: true } } } },
+      [PROV]: { status: 200, body: { data: { status: 'ready' } } },
+    }),
   );
-  check('a pending provider is not yet available', pending.available === false);
-  check('and names what it is waiting on',
-    (pending.reason ?? '').includes('pending') && (pending.reason ?? '').includes('image building'));
+  check('a ready remote provider is available', daytona.available === true);
+  check('and it is named as daytona', daytona.backend === 'daytona');
 
-  const failed = await sandboxAvailability(clientWith(200, { data: { status: 'failed' } }));
-  check('a failed provider is not available', failed.available === false);
+  // Configured but still building: capabilities is what decides, and a harness
+  // that says no sandbox gets none regardless of what settings holds.
+  const building = await sandboxAvailability(
+    clientOf({
+      [CAPS]: { status: 200, body: { data: { sandbox: { enabled: false } } } },
+      [PROV]: { status: 200, body: { data: { status: 'pending' } } },
+    }),
+  );
+  check('capabilities decides, not the provider record', building.available === false);
+  check('and it says how to get one', (building.reason ?? '').includes('docxy setup'));
 
-  // The old bug in one line: this is the capabilities payload, and it must not
-  // be read as a configured provider.
-  const capsShaped = await sandboxAvailability(clientWith(200, { data: { enabled: true } }));
-  check('a payload with no status is not mistaken for a ready provider',
-    capsShaped.available === false);
+  // Naming the backend is cosmetic; losing it must not cost a working sandbox.
+  const unnameable = await sandboxAvailability(
+    clientOf({
+      [CAPS]: { status: 200, body: { data: { sandbox: { enabled: true } } } },
+      [PROV]: { status: 500, body: {} },
+    }),
+  );
+  check('an unreadable provider record does not withdraw the sandbox',
+    unnameable.available === true && unnameable.backend === 'local');
 
-  const broken = await sandboxAvailability(clientWith(500, {}));
+  const broken = await sandboxAvailability(clientOf({ [CAPS]: { status: 500, body: {} } }));
   check('an erroring harness is unavailable, not assumed ready', broken.available === false);
 }
 

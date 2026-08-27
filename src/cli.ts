@@ -200,10 +200,21 @@ async function main(): Promise<void> {
       }
 
       const sandbox = await registerSandboxProvider(client, config);
+      if (sandbox.action === 'registered') {
+        console.log(`${c.green('✓')} Daytona sandbox provider registered`);
+      } else {
+        console.log(`${c.yellow('!')} No remote sandbox provider: ${sandbox.reason}`);
+      }
+
+      // What matters is whether a sandbox exists, not whose it is. A standalone
+      // harness carries its own, so "Daytona was refused" and "nothing will be
+      // isolated" are very different sentences and setup should not conflate them.
+      const ready = await sandboxAvailability(client);
       console.log(
-        sandbox.action === 'registered'
-          ? `${c.green('✓')} Daytona sandbox provider registered — the docs build runs there`
-          : `${c.yellow('!')} Sandbox not registered: ${sandbox.reason}`,
+        ready.available
+          ? `${c.green('✓')} Sandbox ready (${ready.backend}) — the docs build runs there`
+          : `${c.yellow('!')} ${ready.reason}\n` +
+            `  ${c.dim('the docs build still runs, locally, and the report says so')}`,
       );
       return;
     }
@@ -246,7 +257,8 @@ async function main(): Promise<void> {
         const sandbox = await sandboxAvailability(client);
         console.log(
           sandbox.available
-            ? `${c.green('✓')} sandbox ready — the docs build runs there, not on this machine`
+            ? `${c.green('✓')} sandbox ready (${sandbox.backend}) — the docs build runs there, ` +
+              `not against your checkout`
             : `${c.yellow('!')} ${sandbox.reason}\n` +
               `  ${c.dim('the docs build still runs, locally, and the report says so')}`,
         );

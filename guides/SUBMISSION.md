@@ -111,15 +111,26 @@ provider has ever been configured, describing what the build supports rather
 than what it holds. The settings endpoint is the one that knows. The suite is at
 116.
 
-**Two things are still needed before this can run for real:**
+**Verified end to end on 27 August.** Two runs against `.demo-repo`, both
+opening real pull requests ([#10](https://github.com/Arindam200/docxy-demo/pull/10),
+[#11](https://github.com/Arindam200/docxy-demo/pull/11)), with the docs build
+executing in the sandbox and the run record proving it:
 
-1. A **Daytona API key** in `.env` as `DAYTONA_API_KEY`, then `docxy setup`.
-   The harness ships Daytona as its only sandbox provider preset.
-2. A **`DOCXY_DOCS_BUILD_COMMAND`**. It is unset, so the docs-build check is
-   skipped — and it is the only check that goes to the sandbox. Without it the
-   sandbox is configured and never exercised. `npm test` against `.demo-repo`,
-   or any command that reads the proposed markdown, is enough to make the beat
-   visible on camera.
+```
+✓ docs-build   markdown files: 4 | unbalanced fences: []   where=sandbox
+```
+
+Two things turned up in the process that change the story for the better:
+
+- **Daytona is not required.** A harness started with
+  `npx @truefoundry/trueforge@latest` carries its own sandbox — Seatbelt on
+  macOS, bubblewrap on Linux, both with an allow-listed filesystem and
+  allow-listed network egress. Sandboxed execution needs no external account at
+  all, which is a stronger claim than the one the plan started with.
+- **`DOCXY_DOCS_BUILD_COMMAND` has to be set**, and it must not assume a
+  checkout — the sandbox receives the proposed markdown and nothing else, so
+  `npm test` would find no `package.json` there. `.env` now runs a fence-balance
+  check over the proposed files, which is real, fast, and reads well on camera.
 
 ---
 
@@ -299,10 +310,8 @@ slips, cut from the bottom of that day, never from the top of the next.
 
 Prove the sandbox against a real Daytona account, then close the loose ends.
 
-- [ ] **Get a Daytona key and run the pipeline end to end with it.** Everything so
-      far is verified by typecheck, 108 tests and code review — the sandbox path
-      itself has not yet executed against a live provider. Do this first; it is
-      the only remaining unknown in the P0 work
+- [x] ~~Run the pipeline end to end with a live sandbox~~ — done 27 Aug, two runs,
+      two pull requests, `where=sandbox` on the record
 - [ ] Act on Qodo's review of `feat/sandbox-validation`, then merge it
 - [ ] Give `.github/workflows/docxy.yml`'s protected `docxy-approval` environment
       a proper callout in the README — it is the strongest safety artifact in the
@@ -385,7 +394,7 @@ than days and sit outside the judged set. Do both on Sunday, after submitting.
 | ✅ | README section documenting the Qodo review findings | done |
 | ✅ | Open-source LICENSE file | done |
 | ✅ | Code executing in an isolated sandbox, on by default | done |
-| ☐ | Sandbox path exercised against a live Daytona account | Fri |
+| ✅ | Sandbox path exercised on a live run | done |
 | ✅ | A human gate before anything merges — at the PR, and at the CI environment | by design |
 | ☐ | Three-minute demo video showing tool, sandbox and pause | Sat |
 | ☐ | Writeup: what it does and how it uses TrueForge | Sat |

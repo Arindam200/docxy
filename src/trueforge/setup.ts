@@ -86,8 +86,8 @@ export async function registerNebiusProvider(
 }
 
 export interface SandboxSetupResult {
-  action: 'registered' | 'skipped';
-  /** Why it was skipped, when it was. */
+  action: 'registered' | 'skipped' | 'rejected';
+  /** Why it was skipped or rejected, when it was. */
   reason?: string;
 }
 
@@ -132,10 +132,18 @@ export async function registerSandboxProvider(
   });
 
   if (!res.ok) {
+    // Never fatal. A harness running standalone carries its own sandbox, so a
+    // rejected remote provider costs nothing that stops a run — and throwing
+    // here failed `docxy setup` outright, taking the model registration that had
+    // already succeeded down with it.
     const detail = await readJson(res);
-    throw new Error(
-      `Registering the Daytona sandbox provider failed (HTTP ${res.status}): ${JSON.stringify(detail)}`,
-    );
+    return {
+      action: 'rejected',
+      reason:
+        `the harness refused the Daytona provider (HTTP ${res.status}): ${JSON.stringify(detail)}. ` +
+        'Registration builds a snapshot on Daytona, which needs more than read access — ' +
+        'a key that can list sandboxes can still be refused here',
+    };
   }
   return { action: 'registered' };
 }
