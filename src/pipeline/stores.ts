@@ -20,9 +20,24 @@ import { SessionStore } from '../trueforge/session.js';
 export interface RunStorage {
   save(run: RunRecord): Promise<void>;
   load(id: string): Promise<RunRecord | null>;
-  /** Newest first. */
-  list(limit?: number): Promise<RunRecord[]>;
+  /**
+   * Newest first.
+   *
+   * `repoPaths` widens the listing beyond the configured repository. The
+   * dashboard needs it: docxy is synced to every repository the GitHub App is
+   * installed on, each of which runs against its own managed checkout, and a
+   * listing keyed only to the directory the server happens to have started in
+   * shows an empty dashboard for all of them.
+   */
+  list(limit?: number, repoPaths?: string[]): Promise<RunRecord[]>;
   pending(): Promise<RunRecord[]>;
+}
+
+/** A stored session and how much history it is carrying. */
+export interface StoredSession {
+  sessionId: string;
+  /** Turns already spent on it. Drives rotation before the context overflows. */
+  turns: number;
 }
 
 export interface SessionStorage {
@@ -31,8 +46,11 @@ export interface SessionStorage {
    * spec. A changed prompt or model yields a miss, so the caller starts a new
    * session instead of silently talking to an agent built from stale config.
    */
-  get(role: RoleName, specHash: string): Promise<string | undefined>;
+  get(role: RoleName, specHash: string): Promise<StoredSession | undefined>;
+  /** Record a new session for a role, resetting its turn count. */
   set(role: RoleName, sessionId: string, specHash: string): Promise<void>;
+  /** Count one completed turn against the role's current session. */
+  recordTurn(role: RoleName): Promise<void>;
   clear(): Promise<void>;
   all(): Promise<Partial<Record<RoleName, string>>>;
 }

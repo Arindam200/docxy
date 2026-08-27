@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import Script from "next/script";
 import { site } from "@/lib/site";
 import "./globals.css";
 
@@ -52,6 +53,16 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} h-full scroll-smooth`}
       suppressHydrationWarning
     >
+      <head>
+        {/*
+          Runs before first paint: reads the saved choice and, for "system",
+          the OS setting. Only ever adds or removes one class, so a failure
+          (private mode, storage blocked) leaves the default dark shell.
+        */}
+        <Script id="theme-init" strategy="beforeInteractive">
+          {`try{var t=localStorage.getItem('docxy-theme')||'system';var l=t==='light'||(t==='system'&&window.matchMedia('(prefers-color-scheme: light)').matches);document.documentElement.classList.toggle('theme-light',l)}catch(e){}`}
+        </Script>
+      </head>
       <body className="antialiased bg-white font-sans" suppressHydrationWarning>
         {children}
       </body>

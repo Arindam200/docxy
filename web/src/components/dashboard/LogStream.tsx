@@ -3,11 +3,11 @@ import type { LogEntry } from "@/lib/docxy";
 import { clockTime, roleTitle } from "@/lib/format";
 
 const KIND_CLASS: Record<string, string> = {
-  error: "text-red-300",
+  error: "text-danger",
   session: "text-accent",
-  subagent: "text-amber-300",
-  result: "text-emerald-300",
-  approval: "text-amber-300",
+  subagent: "text-warn",
+  result: "text-ok",
+  approval: "text-warn",
   sandbox: "text-muted",
   resume: "text-muted",
   tool: "text-muted",
@@ -32,7 +32,7 @@ export function LogStream({ entries }: { entries: LogEntry[] }) {
         <li
           key={`${entry.runId}-${entry.at}-${index}`}
           className={`flex flex-wrap items-baseline gap-x-3 gap-y-1 px-3 py-2 ${
-            entry.level === "error" ? "bg-red-500/5" : ""
+            entry.level === "error" ? "bg-danger/5" : ""
           }`}
         >
           <time className="w-20 shrink-0 tabular-nums text-muted">{clockTime(entry.at)}</time>

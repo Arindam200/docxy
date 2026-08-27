@@ -8,6 +8,18 @@ import {
   SiSemver,
   SiNeon,
 } from "react-icons/si";
+import {
+  SiBitbucket,
+  SiDiscord,
+  SiGitlab,
+  SiIntercom,
+  SiJira,
+  SiLinear,
+  SiNotion,
+  SiZapier,
+} from "react-icons/si";
+// Simple Icons dropped Slack's mark; Font Awesome still carries it.
+import { FaSlack } from "react-icons/fa6";
 import { LuPlug, LuWebhook } from "react-icons/lu";
 
 /**
@@ -52,4 +64,26 @@ export const integrationIcons: Record<string, ReactNode> = {
     <img src="/brand/trueforge.png" alt="" width={20} height={20} aria-hidden />
   ),
   plug: <LuPlug size={20} />,
+};
+
+/**
+ * The catalogue's brand marks, keyed by entry id.
+ *
+ * Brand hexes are picked for the dark ground: Slack's aubergine and Algolia's
+ * navy both disappear against it, so each falls back to the lighter mark from
+ * the same palette. Anything monochrome inherits `currentColor` and follows the
+ * card, which is what keeps a "coming soon" tile reading as muted.
+ */
+export const catalogIcons: Record<string, ReactNode> = {
+  github: <SiGithub size={22} />,
+  slack: <FaSlack size={22} color="#36C5F0" />,
+  discord: <SiDiscord size={22} color="#5865F2" />,
+  webhooks: <LuWebhook size={22} />,
+  notion: <SiNotion size={22} />,
+  linear: <SiLinear size={22} color="#7B87E8" />,
+  jira: <SiJira size={22} color="#2684FF" />,
+  zapier: <SiZapier size={22} color="#FF6A2B" />,
+  gitlab: <SiGitlab size={22} color="#FC6D26" />,
+  bitbucket: <SiBitbucket size={22} color="#2684FF" />,
+  intercom: <SiIntercom size={22} color="#3B9CF5" />,
 };

@@ -175,10 +175,11 @@ npx tsx src/cli.ts setup
 This registers Token Factory as a custom OpenAI-compatible provider and verifies
 that every model the roster wants actually resolves.
 
-Four models are registered: `deepseek-v4-pro` (the default for four of the five
-roles — 1M context and structured-output support, which matters because every
-role must emit strict JSON), `deepseek-v4-flash` (used by the Changelog Author,
-whose output is one line), plus `kimi-k3` and `qwen3-5` as alternatives.
+Four models are registered: `deepseek-v4-pro` (the default for all five roles —
+1M context and structured-output support, which matters because every role must
+emit strict JSON), plus `deepseek-v4-flash`, `kimi-k3`, and `qwen3-5` as
+alternatives. A short visible response is not a reason to use a weaker model:
+the Changelog Author has previously exhausted a turn in a Flash repetition loop.
 
 **Model ids move.** Check yours and adjust `.env` if `setup` reports anything
 unresolvable:

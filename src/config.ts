@@ -78,6 +78,31 @@ export interface Config {
   approval: {
     /** Minutes before a pending request is reported stale. It is never auto-resolved. */
     staleAfterMinutes: number;
+    /**
+     * Whether a human has to sign off before the pull request is opened.
+     *
+     * Off by default: the pipeline's job is to land a documentation pull
+     * request, and a pull request is itself a review surface — nothing is
+     * merged without someone approving it on GitHub. Turn this on to hold the
+     * proposal behind docxy's own gate as well.
+     */
+    required: boolean;
+  };
+  /** How hard the pipeline tries before it gives up on a role. */
+  agent: {
+    /** Attempts per role, including the first. */
+    maxAttempts: number;
+    /** Wall-clock ceiling for a single attempt. */
+    attemptTimeoutMs: number;
+    /**
+     * Turns a session may carry before it is retired and rebuilt.
+     *
+     * Session reuse is what makes the second commit cheaper than the first, but
+     * the accumulated transcript is also an input that grows without bound —
+     * and an overfull session is what produced every `max_tokens breached`
+     * failure in this repository's history. Zero disables rotation.
+     */
+    sessionMaxTurns: number;
   };
   server: { port: number };
   github: { token?: string; repo?: string; baseBranch: string };
@@ -145,8 +170,11 @@ export function loadConfig(overrides: Partial<{ repoPath: string }> = {}): Confi
       'change-analyst': roleModel('DOCXY_MODEL_CHANGE_ANALYST', 'deepseek-v4-pro'),
       'impact-mapper': roleModel('DOCXY_MODEL_IMPACT_MAPPER', 'deepseek-v4-pro'),
       'docs-updater': roleModel('DOCXY_MODEL_DOCS_UPDATER', 'deepseek-v4-pro'),
-      // The changelog entry is one line; the cheaper, faster sibling is plenty.
-      'changelog-author': roleModel('DOCXY_MODEL_CHANGELOG_AUTHOR', 'deepseek-v4-flash'),
+      // This role has a tiny visible output but must reliably finish strict JSON.
+      // Flash has entered a repetition loop here and exhausted whole turns, so
+      // use the structured-output-capable default unless an operator explicitly
+      // selects a proven alternative.
+      'changelog-author': roleModel('DOCXY_MODEL_CHANGELOG_AUTHOR', 'deepseek-v4-pro'),
     },
     // Verify these against your account with `docxy models`; ids move.
     registeredModels: [
@@ -187,6 +215,12 @@ export function loadConfig(overrides: Partial<{ repoPath: string }> = {}): Confi
     },
     approval: {
       staleAfterMinutes: envInt('DOCXY_APPROVAL_STALE_MINUTES', 60),
+      required: envBool('DOCXY_REQUIRE_APPROVAL', false),
+    },
+    agent: {
+      maxAttempts: Math.max(1, envInt('DOCXY_ROLE_MAX_ATTEMPTS', 3)),
+      attemptTimeoutMs: Math.max(30, envInt('DOCXY_ROLE_TIMEOUT_SECONDS', 420)) * 1000,
+      sessionMaxTurns: Math.max(0, envInt('DOCXY_SESSION_MAX_TURNS', 12)),
     },
     server: { port: envInt('DOCXY_PORT', 4317) },
     github: {

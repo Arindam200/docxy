@@ -71,8 +71,8 @@ export default async function RunPage({ params }: { params: Promise<{ id: string
           role="alert"
           className={`border px-4 py-3 text-sm leading-relaxed ${
             run.status === "denied" || run.error.startsWith("Coordinator rejected")
-              ? "border-amber-500/30 bg-amber-500/5 text-amber-200"
-              : "border-red-500/30 bg-red-500/5 text-red-200"
+              ? "border-warn/30 bg-warn/10 text-warn"
+              : "border-danger/30 bg-danger/5 text-danger"
           }`}
         >
           {run.error}
@@ -104,9 +104,9 @@ export default async function RunPage({ params }: { params: Promise<{ id: string
                 <span
                   className={`w-14 shrink-0 font-medium ${
                     check.status === "pass"
-                      ? "text-emerald-300"
+                      ? "text-ok"
                       : check.status === "fail"
-                        ? "text-red-300"
+                        ? "text-danger"
                         : "text-muted"
                   }`}
                 >

@@ -1,6 +1,6 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import type { Config, RoleName } from '../config.js';
-import type { SessionStorage } from '../pipeline/stores.js';
+import type { SessionStorage, StoredSession } from '../pipeline/stores.js';
 import { getDb } from './index.js';
 import { projectId } from './executor.js';
 import { agentSessions } from './schema.js';
@@ -20,27 +20,45 @@ export class PgSessionStore implements SessionStorage {
     return projectId(getDb(), this.config.repoPath);
   }
 
-  async get(role: RoleName, specHash: string): Promise<string | undefined> {
+  async get(role: RoleName, specHash: string): Promise<StoredSession | undefined> {
     const db = getDb();
     const [row] = await db
-      .select({ sessionId: agentSessions.sessionId, specHash: agentSessions.specHash })
+      .select({
+        sessionId: agentSessions.sessionId,
+        specHash: agentSessions.specHash,
+        turns: agentSessions.turns,
+      })
       .from(agentSessions)
       .where(and(eq(agentSessions.projectId, await this.project()), eq(agentSessions.role, role)))
       .limit(1);
 
     if (!row || row.specHash !== specHash) return undefined;
-    return row.sessionId;
+    return { sessionId: row.sessionId, turns: row.turns };
   }
 
   async set(role: RoleName, sessionId: string, specHash: string): Promise<void> {
     const db = getDb();
     await db
       .insert(agentSessions)
-      .values({ projectId: await this.project(), role, sessionId, specHash })
+      .values({ projectId: await this.project(), role, sessionId, specHash, turns: 0 })
       .onConflictDoUpdate({
         target: [agentSessions.projectId, agentSessions.role],
-        set: { sessionId, specHash, createdAt: new Date() },
+        // A new session starts cold, so the count starts over with it.
+        set: { sessionId, specHash, turns: 0, createdAt: new Date() },
       });
+  }
+
+  /**
+   * Incremented in the database rather than read-modify-written here: two runs
+   * on the same project would otherwise each read the same count and write back
+   * the same increment, losing one.
+   */
+  async recordTurn(role: RoleName): Promise<void> {
+    const db = getDb();
+    await db
+      .update(agentSessions)
+      .set({ turns: sql`${agentSessions.turns} + 1` })
+      .where(and(eq(agentSessions.projectId, await this.project()), eq(agentSessions.role, role)));
   }
 
   async clear(): Promise<void> {

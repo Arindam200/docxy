@@ -1,0 +1,1 @@
+ALTER TABLE "agent_sessions" ADD COLUMN "turns" integer DEFAULT 0 NOT NULL;

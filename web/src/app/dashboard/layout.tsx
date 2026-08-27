@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { Sidebar } from "@/components/dashboard/Sidebar";
+import { HeaderActions } from "@/components/dashboard/HeaderActions";
 import { getSessionUser } from "@/lib/auth";
 import { authReady } from "@/lib/env";
 import type { DashboardUser } from "@/lib/user";
@@ -37,24 +38,7 @@ export default async function DashboardLayout({
             <span className="text-muted">Dashboard</span>
           </div>
 
-          {user && (
-            <div className="hidden sm:flex items-center gap-2.5">
-              {user.image ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={user.image}
-                  alt=""
-                  referrerPolicy="no-referrer"
-                  className="h-6 w-6 rounded-full border border-rule"
-                />
-              ) : (
-                <span className="flex h-6 w-6 items-center justify-center rounded-full bg-accent-deep text-[10px] font-semibold">
-                  {(user.name[0] ?? "?").toUpperCase()}
-                </span>
-              )}
-              <span className="text-xs text-muted">{user.email}</span>
-            </div>
-          )}
+          <HeaderActions />
         </header>
 
         <div className="flex-1 min-h-0 overflow-y-auto">{children}</div>

@@ -60,7 +60,7 @@ export function RunTrend({
                   aria-hidden
                   style={{ height }}
                   className={`w-full transition-colors ${
-                    failed ? "bg-red-400/70 group-hover:bg-red-400" : "bg-accent/60 group-hover:bg-accent"
+                    failed ? "bg-danger/70 group-hover:bg-danger" : "bg-accent/60 group-hover:bg-accent"
                   }`}
                 />
                 <span className="font-mono text-[9px] text-muted">{run.shortSha.slice(0, 4)}</span>

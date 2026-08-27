@@ -69,7 +69,7 @@ creating its session for the first time.
 ### 3. Second commit: it remembers
 
 ```bash
-DOCXY_APPROVAL_MODE=elevated npx tsx src/cli.ts run HEAD --repo .demo-repo
+npx tsx src/cli.ts run HEAD --repo .demo-repo
 ```
 
 This is the beat worth pausing on. The summary line reads:
@@ -81,10 +81,15 @@ memory 6 symbol(s) carried in, 10 new mapping(s) learned
 Six symbols carried in — the first run taught it where `--output` is documented,
 and the second run did not re-derive that.
 
-`DOCXY_APPROVAL_MODE=elevated` is what makes the approval gate appear. The
-default is `auto`, which opens the pull request immediately — correct as a
-product default, but it skips the beat you want on camera. Elevated gates exactly
-this kind of change and nothing else.
+The approval gate is not optional and has no "off" setting — every run stops for
+sign-off. What the change itself decides is *how many* reviewers:
+`decideScope()` returns **elevated** (two sign-offs) when the change is
+classified breaking, touches documented public API, proposes a major bump, or
+the Coordinator asks for a second look, and **routine** (one) otherwise.
+
+So this commit reaches the two-sign-off gate on its merits. If your run prints
+`routine scope, 0/1` instead, the classifier read the change as smaller than the
+demo script assumes — pick a commit that edits a documented public symbol.
 
 ### 4. The gate
 
@@ -265,15 +270,17 @@ nobody actually reviewed anything.
 
 ## If something goes wrong
 
-**A role fails with `max_tokens breached`.** The model is looping, not running
-out of room — raising the cap gives it more room to loop. Point that role at a
-different model: `DOCXY_MODEL_CHANGELOG_AUTHOR=nebius/deepseek-v4-pro`. This is
-exactly what happened with the flash model on the Changelog Author.
+**A role fails with `max_tokens breached`.** The model may be looping, not
+running out of room — inspect the stored raw output before raising the cap. For
+the Changelog Author, use the default `nebius/deepseek-v4-pro`; if your `.env`
+explicitly pins Flash, remove that line or set
+`DOCXY_MODEL_CHANGELOG_AUTHOR=nebius/deepseek-v4-pro`. This is exactly what
+happened with the Flash model on the Changelog Author.
 
 **A prompt or model change seems to have no effect.** Sessions are created once
-and reused, and the agent spec is fixed at creation. Run
-`npx tsx src/cli.ts reset --sessions --repo .demo-repo` after editing
-`src/agents/roles.ts` or any model setting.
+and reused, but docxy hashes the role spec, so the next run creates a new session
+when its model or instructions change. To discard every role's accumulated
+memory deliberately, run `npx tsx src/cli.ts reset --sessions --repo .demo-repo`.
 
 **The pull request step fails.** Check `git -C .demo-repo remote -v` points at
 GitHub. Everything before that step still ran — the run record holds the full

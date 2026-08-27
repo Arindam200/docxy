@@ -8,13 +8,15 @@ import type {
   ImpactMap,
   RoleFailure,
   RoleTrace,
+  RoleUsage,
   RunRecord,
 } from '../types.js';
 import { readCommitDiff, renderDiffForPrompt } from '../git/diff.js';
 import { openDocsTree } from '../git/worktree.js';
 import { buildDocsOutline, readDocExcerpts, readRepoFile } from '../git/repo.js';
 import { resolveSession } from '../trueforge/session.js';
-import { runTurn } from '../trueforge/run.js';
+import { runTurn, type TurnUsage } from '../trueforge/run.js';
+import { planRetry, sleep, type AttemptFailure } from './retry.js';
 import { costOf, loadPrices, priceFor, round, type PriceTable } from '../trueforge/pricing.js';
 import {
   CHANGELOG_AUTHOR,
@@ -30,7 +32,9 @@ import { createStores } from './stores.js';
 import { applyChangelogEntry, applyDocEdits } from './apply.js';
 import type { ProposedFile } from '../types.js';
 import { validateProposal } from '../validate/index.js';
-import { createApprovalRequest, decideScope } from '../approval/gate.js';
+import { autoApprove, createApprovalRequest, decideScope } from '../approval/gate.js';
+import { openPullRequest } from '../github/pr.js';
+import { AgentOutputError } from '../agents/parse.js';
 
 export interface PipelineHooks {
   onRunUpdate?: (run: RunRecord) => void;
@@ -63,8 +67,52 @@ function truncate(text: string): string {
   return `${text.slice(0, BODY_LIMIT)}\n\n… truncated, ${text.length - BODY_LIMIT} more characters`;
 }
 
+/**
+ * Fold one turn's input-side breakdown into a role's running totals.
+ *
+ * The categories are the harness's own — `harness`, `instructions`, `messages`,
+ * `skills`, `toolDefinitions` — and it owns the list, so this stays a map keyed
+ * by whatever it reports rather than a shape this side would have to keep in
+ * step with it.
+ */
+function mergeBreakdown(into: RoleUsage['inputBreakdown'], from: TurnUsage['inputBreakdown']) {
+  const out = { ...(into ?? {}) };
+  for (const [key, value] of Object.entries(from)) out[key] = (out[key] ?? 0) + value;
+  return out;
+}
+
+/** A settled promise's rejection reason, which the standard library types as `any`. */
+function errorOf(reason: Error | string): Error {
+  return reason instanceof Error ? reason : new Error(String(reason));
+}
+
 function abortedBy(err: unknown): boolean {
   return err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError');
+}
+
+/**
+ * The two vocabularies line up almost one to one; the exceptions are the ones
+ * worth naming. `transient` is reported as `harness-error` because from a
+ * reader's side a dropped connection and a harness fault are the same event,
+ * and `context` keeps its own name because the fix for it is different.
+ */
+function asRoleFailure(kind: AttemptFailure): RoleFailure {
+  switch (kind) {
+    case 'parse-error':
+      return 'parse-error';
+    case 'max-tokens':
+      return 'max-tokens';
+    case 'context':
+      return 'context';
+    case 'rate-limit':
+      return 'rate-limit';
+    case 'cancelled':
+      return 'cancelled';
+    case 'stalled':
+      return 'stalled';
+    default:
+      return 'harness-error';
+  }
 }
 
 /**
@@ -128,38 +176,68 @@ export async function runPipeline(
   // Once per run, cached for an hour, and empty if the endpoint is unreachable.
   const prices = await loadPrices(config);
 
-  const persist = async (): Promise<void> => {
-    rollUp(run, config, prices);
-    await runs.save(run);
-    hooks.onRunUpdate?.(run);
+  /**
+   * Serialized, and never fatal.
+   *
+   * The Docs Updater and Changelog Author run concurrently and both write the
+   * same `RunRecord`; against Postgres each save deletes and re-inserts the
+   * run's roles and events inside a transaction, so two of them in flight at
+   * once either deadlock or lose a role's trace. Chaining them costs nothing —
+   * a save is milliseconds — and makes the record single-writer again.
+   *
+   * A failed save is reported and swallowed: losing the audit trail for a
+   * moment is bad, killing a run that is otherwise going fine is worse.
+   */
+  let writes: Promise<void> = Promise.resolve();
+  const persist = (): Promise<void> => {
+    writes = writes.then(async () => {
+      rollUp(run, config, prices);
+      try {
+        await runs.save(run);
+      } catch (err) {
+        console.error(
+          `could not persist run ${run.id.slice(0, 8)}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      hooks.onRunUpdate?.(run);
+    });
+    return writes;
   };
   await persist();
 
-  /** Run one role to completion, recording a trace entry either way. */
-  const invoke = async <T>(role: RoleDefinition, prompt: string): Promise<T> => {
-    const session = await resolveSession(client, config, sessions, role);
+  /**
+   * Run one role to completion, retrying on its own terms, and record one trace
+   * either way.
+   *
+   * Every failure used to be terminal, which is how a single `max_tokens`
+   * breach in the Changelog Author threw away three other roles' finished work.
+   * Each attempt is classified and answered differently — see `planRetry` — and
+   * the trace keeps every attempt's events so a run that needed three tries
+   * says so instead of looking like a clean pass.
+   */
+  const invoke = async <T>(role: RoleDefinition, basePrompt: string): Promise<T> => {
     const startedAt = new Date();
     const trace: RoleTrace = {
       role: role.name,
-      sessionId: session.id,
+      sessionId: '',
       startedAt: startedAt.toISOString(),
       status: 'running',
       events: [],
-      reusedSession: session.reused,
+      reusedSession: false,
       // Captured up front so a role that never returns still shows what it was
       // asked and which model was meant to answer.
-      prompt: truncate(prompt),
+      prompt: truncate(basePrompt),
       model: config.models[role.name],
+      attempts: 0,
     };
     run.traces.push(trace);
-    trace.events.push({
-      at: trace.startedAt,
-      kind: 'session',
-      text: session.reused
-        ? `reusing session ${session.id.slice(0, 8)} from an earlier commit`
-        : `created session ${session.id.slice(0, 8)}`,
-    });
     await persist();
+
+    const note = (kind: string, text: string): void => {
+      const event = { at: new Date().toISOString(), kind, text };
+      trace.events.push(event);
+      hooks.onRoleEvent?.(role.name, event);
+    };
 
     /** Stamp the outcome onto the trace. Runs on every path, success or not. */
     const finish = (status: RoleTrace['status'], failure?: RoleFailure): void => {
@@ -170,65 +248,147 @@ export async function runPipeline(
       if (failure) trace.failure = failure;
     };
 
-    try {
-      const result = await runTurn(client, session.id, prompt, {
-        onEvent: (event) => {
-          trace.events.push(event);
-          hooks.onRoleEvent?.(role.name, event);
-          hooks.onRunUpdate?.(run);
-        },
-      });
+    const maxAttempts = config.agent.maxAttempts;
+    let fresh = false;
+    let nudge = '';
+    let lastError: Error = new Error(`[${role.title}] never ran`);
 
-      if (result.turnId) trace.turnId = result.turnId;
-      // Recorded before anything can throw. The raw text is the field that
-      // explains a failure — a `max_tokens breached` error has as often meant a
-      // repetition loop as a budget that was too small — and it is what makes a
-      // successful run auditable rather than merely rendered.
-      trace.rawOutput = truncate(result.text);
-      trace.usage = {
-        inputTokens: result.usage.inputTokens,
-        outputTokens: result.usage.outputTokens,
-        cacheReadTokens: result.usage.cacheReadTokens,
-        cacheWriteTokens: result.usage.cacheWriteTokens,
-        inputBreakdown: result.usage.inputBreakdown,
-      };
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      trace.attempts = attempt;
+      const prompt = nudge ? `${basePrompt}\n\n${nudge}` : basePrompt;
 
-      if (result.error) {
-        finish('failed', 'harness-error');
-        await persist();
-        throw new Error(
-          `[${role.title}] the harness ended the turn in an error state: ${result.error}`,
-        );
-      }
-
-      let parsed: T;
+      let session;
       try {
-        parsed = extractJson<T>(role.title, result.text);
-      } catch (cause) {
-        finish('failed', 'parse-error');
-        trace.error = cause instanceof Error ? cause.message : String(cause);
+        session = await resolveSession(client, config, sessions, role, { fresh });
+      } catch (err) {
+        // Cannot even get a session: the harness is down or rejecting the spec.
+        // Retrying a fresh session cannot help if creation is what failed.
+        lastError = err instanceof Error ? err : new Error(String(err));
+        note('error', `could not open a session: ${lastError.message}`);
+        finish('failed', 'harness-error');
+        trace.error = lastError.message;
         await persist();
-        throw cause;
+        throw lastError;
       }
 
-      finish('done');
-      trace.events.push({
-        at: trace.finishedAt as string,
-        kind: 'result',
-        text:
-          `produced ${result.text.length} characters ` +
-          `(${result.usage.inputTokens} in / ${result.usage.outputTokens} out tokens)`,
-      });
+      trace.sessionId = session.id;
+      // Only the first attempt speaks to reuse honestly; a rotated session is a
+      // new one no matter what was stored before it.
+      if (attempt === 1) trace.reusedSession = session.reused;
+      note(
+        'session',
+        session.reused
+          ? `reusing session ${session.id.slice(0, 8)} (${session.priorTurns} turn(s) of history)`
+          : session.rotatedBecause === 'turn-limit'
+            ? `retired the previous session after ${config.agent.sessionMaxTurns} turns; created ${session.id.slice(0, 8)}`
+            : session.rotatedBecause === 'requested'
+              ? `started over on a fresh session ${session.id.slice(0, 8)}`
+              : `created session ${session.id.slice(0, 8)}`,
+      );
+      if (attempt > 1) note('retry', `attempt ${attempt} of ${maxAttempts}`);
       await persist();
-      return parsed;
-    } catch (err) {
-      // Already stamped by one of the branches above unless the failure came
-      // from the harness call itself.
-      if (trace.status === 'running') finish('failed', abortedBy(err) ? 'aborted' : 'harness-error');
-      trace.error ??= err instanceof Error ? err.message : String(err);
+
+      // A hung turn used to hang the whole run: `runTurn` accepted a signal and
+      // nothing ever passed one.
+      const timeout = AbortSignal.timeout(config.agent.attemptTimeoutMs);
+      let failure: AttemptFailure | undefined;
+      let raw = '';
+
+      try {
+        const result = await runTurn(client, session.id, prompt, {
+          signal: timeout,
+          onEvent: (event) => {
+            trace.events.push(event);
+            hooks.onRoleEvent?.(role.name, event);
+            hooks.onRunUpdate?.(run);
+          },
+        });
+
+        if (result.turnId) trace.turnId = result.turnId;
+        raw = result.text;
+        // Recorded before anything can throw. The raw text is the field that
+        // explains a failure — a `max_tokens breached` error has as often meant
+        // a repetition loop as a budget that was too small — and it is what
+        // makes a successful run auditable rather than merely rendered.
+        trace.rawOutput = truncate(result.text);
+        // Accumulated across attempts: a role that burned two budgets before
+        // succeeding cost all three, and the run's totals should say so.
+        trace.usage = {
+          inputTokens: (trace.usage?.inputTokens ?? 0) + result.usage.inputTokens,
+          outputTokens: (trace.usage?.outputTokens ?? 0) + result.usage.outputTokens,
+          cacheReadTokens: (trace.usage?.cacheReadTokens ?? 0) + result.usage.cacheReadTokens,
+          cacheWriteTokens: (trace.usage?.cacheWriteTokens ?? 0) + result.usage.cacheWriteTokens,
+          inputBreakdown: mergeBreakdown(trace.usage?.inputBreakdown, result.usage.inputBreakdown),
+        };
+
+        if (result.error) {
+          failure = result.errorKind ?? 'harness';
+          lastError = new Error(
+            `[${role.title}] the harness ended the turn in an error state: ${result.error}`,
+          );
+        } else {
+          try {
+            const parsed = extractJson<T>(role.title, result.text);
+            // The turn is only counted once it produced something usable, so a
+            // session is never retired on the strength of turns that failed.
+            await sessions.recordTurn(role.name).catch(() => {});
+            finish('done');
+            note(
+              'result',
+              `produced ${result.text.length} characters ` +
+                `(${result.usage.inputTokens} in / ${result.usage.outputTokens} out tokens)` +
+                (attempt > 1 ? ` on attempt ${attempt}` : ''),
+            );
+            await persist();
+            return parsed;
+          } catch (cause) {
+            failure = 'parse-error';
+            lastError = cause instanceof Error ? cause : new Error(String(cause));
+          }
+        }
+      } catch (err) {
+        if (abortedBy(err)) {
+          // A caller-side abort is a decision, not a fault. A timeout is ours,
+          // and is worth another attempt.
+          const timedOut = timeout.aborted;
+          lastError = new Error(
+            timedOut
+              ? `[${role.title}] no answer within ${Math.round(config.agent.attemptTimeoutMs / 1000)}s`
+              : `[${role.title}] the run was cancelled`,
+          );
+          if (!timedOut) {
+            finish('failed', 'aborted');
+            trace.error = lastError.message;
+            await persist();
+            throw lastError;
+          }
+          failure = 'transient';
+          note('error', lastError.message);
+        } else {
+          lastError = err instanceof Error ? err : new Error(String(err));
+          failure = 'harness';
+        }
+      }
+
+      trace.error = lastError.message;
+      const plan = planRetry(failure, attempt, maxAttempts, raw);
+      note(plan.retry ? 'retry' : 'error', `${failure}: ${plan.reason}`);
       await persist();
-      throw err;
+
+      if (!plan.retry) {
+        finish('failed', asRoleFailure(failure));
+        await persist();
+        throw lastError;
+      }
+
+      fresh = plan.freshSession;
+      nudge = plan.nudge ?? '';
+      if (plan.delayMs > 0) await sleep(plan.delayMs);
     }
+
+    finish('failed', 'harness-error');
+    await persist();
+    throw lastError;
   };
 
   try {
@@ -354,11 +514,40 @@ export async function runPipeline(
     }
     await persist();
 
-    if (docsResult.status === 'rejected') throw docsResult.reason;
-    if (changelogResult.status === 'rejected') throw changelogResult.reason;
+    /**
+     * One of these two failing is a thinner proposal, not a dead run.
+     *
+     * Both roles read the same classification and impact map and neither
+     * depends on the other's output, so the run can carry on with whichever
+     * survived — a docs-only pull request, or a changelog-only one. It fails
+     * only when there is nothing left to propose. This is the difference
+     * between four of five roles' work reaching a reviewer and none of it
+     * reaching anyone.
+     */
+    const degrade = (role: RoleName, reason: Error): void => {
+      run.degraded = [...(run.degraded ?? []), { role, reason: reason.message }];
+    };
 
-    const docs = docsResult.value;
-    const changelog = changelogResult.value;
+    // `invoke` rejects only with an `Error`; `Promise.allSettled` erases that,
+    // so it is re-established here rather than assumed downstream.
+    if (docsResult.status === 'rejected') {
+      degrade('docs-updater', errorOf(docsResult.reason));
+    }
+    if (changelogResult.status === 'rejected') {
+      degrade('changelog-author', errorOf(changelogResult.reason));
+    }
+
+    if (docsResult.status === 'rejected' && changelogResult.status === 'rejected') {
+      // Nothing to write. The Docs Updater's failure is the more informative of
+      // the two, so it is the one that names the run's error.
+      throw docsResult.reason;
+    }
+
+    const docs: DocsProposal =
+      docsResult.status === 'fulfilled' ? docsResult.value : { edits: [], skipped: [] };
+    const changelog =
+      changelogResult.status === 'fulfilled' ? changelogResult.value : undefined;
+    await persist();
 
     // 4. Validation -----------------------------------------------------------
     const applied = await applyDocEdits(docsTree.path, docs);
@@ -379,12 +568,28 @@ export async function runPipeline(
     await persist();
 
     // 5. Coordinator ----------------------------------------------------------
+    const unfinished = (run.degraded ?? []).map((d) => `${d.role}: ${d.reason}`);
     const verdict = await invoke<CoordinatorVerdict>(
       COORDINATOR,
       [
         'Review the pipeline output for the following commit and decide whether a human should see it.',
         '',
         `## Commit\n\n${diff.shortSha} ${diff.subject}`,
+        // Told explicitly, because otherwise a missing section reads as a role
+        // that had nothing to say rather than one that failed — and the
+        // Coordinator rejects the proposal for the wrong reason.
+        ...(unfinished.length > 0
+          ? [
+              '',
+              '## Roles that did not finish',
+              '',
+              'These specialists failed and their sections below are empty as a result.',
+              'Judge the proposal on what is present. Do not reject it for the absence',
+              'of work these roles would have done; note it in `concerns` instead.',
+              '',
+              unfinished.map((line) => `- ${line}`).join('\n'),
+            ]
+          : []),
         '',
         '## Change Analyst',
         '',
@@ -396,11 +601,11 @@ export async function runPipeline(
         '',
         '## Docs Updater',
         '',
-        JSON.stringify(docs, null, 2),
+        docsResult.status === 'fulfilled' ? JSON.stringify(docs, null, 2) : '(the role failed)',
         '',
         '## Changelog Author',
         '',
-        JSON.stringify(changelog, null, 2),
+        changelog ? JSON.stringify(changelog, null, 2) : '(the role failed)',
         '',
         '## Validation report',
         '',
@@ -412,25 +617,11 @@ export async function runPipeline(
     const { added } = await knowledge.merge(impact.symbolIndex, diff.sha);
     run.newSymbolCount = added;
 
-    // 7. Approval gate --------------------------------------------------------
+    // 7. Gate and publish -----------------------------------------------------
     const proposedFiles = changelogFile ? [...applied.files, changelogFile] : applied.files;
     // Recorded now so approval and pull request creation replay exactly what was
     // reviewed, rather than re-deriving it against a tree that may have moved.
     run.proposedFiles = proposedFiles;
-
-    if (verdict.recommendation === 'reject' || !validation.ok) {
-      run.status = 'failed';
-      run.error =
-        verdict.recommendation === 'reject'
-          ? `Coordinator rejected the proposal: ${(verdict.concerns ?? []).join('; ') || verdict.summary}`
-          : `Validation failed: ${validation.checks
-              .filter((c) => c.status === 'fail')
-              .map((c) => c.name)
-              .join(', ')}`;
-      run.finishedAt = new Date().toISOString();
-      await persist();
-      return { run, proposedFiles };
-    }
 
     if (proposedFiles.length === 0) {
       run.status = 'done';
@@ -440,9 +631,61 @@ export async function runPipeline(
       return { run, proposedFiles };
     }
 
+    const rejected = verdict.recommendation === 'reject';
+    const concerns = [
+      ...(rejected ? [`Coordinator rejected the proposal: ${(verdict.concerns ?? []).join('; ') || verdict.summary}`] : []),
+      ...(validation.ok
+        ? []
+        : [
+            `Validation failed: ${validation.checks
+              .filter((check) => check.status === 'fail')
+              .map((check) => check.name)
+              .join(', ')}`,
+          ]),
+    ];
+
     const { scope, rationale } = decideScope(classification, changelog, verdict.scope);
     run.approval = createApprovalRequest(run.id, scope, rationale, verdict.summary);
-    run.status = 'awaiting-approval';
+
+    if (config.approval.required) {
+      // The gate exists and somebody asked for it. Stop here; the server and the
+      // CLI both know how to carry an approved run the rest of the way.
+      run.status = 'awaiting-approval';
+      if (concerns.length > 0) run.error = concerns.join(' | ');
+      await persist();
+      return { run, proposedFiles };
+    }
+
+    // Unattended, which is the default. The gate is satisfied rather than
+    // skipped, so the run record still says who approved it and when, and the
+    // pull request itself becomes the review surface. A proposal the Coordinator
+    // rejected or validation failed still opens — as a draft, with the reasons
+    // at the top of the body, because a stalled pipeline tells nobody anything
+    // and an unmergeable draft tells them exactly what went wrong.
+    autoApprove(run.approval);
+    run.status = 'approved';
+    if (concerns.length > 0) run.error = concerns.join(' | ');
+    await persist();
+
+    try {
+      const pr = await openPullRequest(config, run, proposedFiles, {
+        draft: concerns.length > 0,
+        concerns,
+      });
+      run.pullRequestUrl = pr.url;
+      run.status = 'done';
+      run.error = concerns.length > 0 ? concerns.join(' | ') : undefined;
+    } catch (err) {
+      // The proposal is sound; publishing it is what failed. Say so precisely,
+      // and leave the run `approved` so the same files can be pushed again
+      // without re-running five agents.
+      run.status = 'approved';
+      run.error = `The proposal is ready but the pull request could not be opened: ${
+        err instanceof Error ? err.message : String(err)
+      }`;
+    }
+
+    run.finishedAt = new Date().toISOString();
     await persist();
 
     return { run, proposedFiles };

@@ -38,8 +38,8 @@ export default async function OverviewPage() {
               "pipeline"
             )}
             <span aria-hidden> · </span>
-            <span className={`inline-flex items-center gap-1.5 ${online ? "text-emerald-300" : "text-red-300"}`}>
-              <span aria-hidden className={`h-1.5 w-1.5 rounded-full ${online ? "bg-emerald-400" : "bg-red-400"}`} />
+            <span className={`inline-flex items-center gap-1.5 ${online ? "text-ok" : "text-danger"}`}>
+              <span aria-hidden className={`h-1.5 w-1.5 rounded-full ${online ? "bg-ok" : "bg-danger"}`} />
               {online ? "API connected" : "API offline"}
             </span>
           </>
@@ -77,7 +77,7 @@ export default async function OverviewPage() {
       {blocking.length > 0 && (
         <div
           role="alert"
-          className="border border-red-500/30 bg-red-500/5 px-4 py-3 text-sm leading-relaxed text-red-200"
+          className="border border-danger/30 bg-danger/5 px-4 py-3 text-sm leading-relaxed text-danger"
         >
           {blocking.map((item) => item.name).join(" and ")}{" "}
           {blocking.length === 1 ? "is" : "are"} not connected, so runs cannot complete.{" "}
