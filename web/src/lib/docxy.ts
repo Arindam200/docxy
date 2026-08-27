@@ -7,10 +7,23 @@
 
 const BASE = process.env.DOCXY_API_URL || "http://localhost:4317";
 
+/**
+ * These reads run on the server, so they reach the API directly rather than
+ * through the /api/docxy proxy — which means they carry the shared secret
+ * themselves. Without it every read here fails soft and the whole dashboard
+ * renders as "offline", which looks like the pipeline is down rather than like
+ * a missing environment variable.
+ */
+function authHeaders(): Record<string, string> {
+  const token = process.env.DOCXY_API_TOKEN?.trim();
+  return token ? { authorization: `Bearer ${token}` } : {};
+}
+
 async function get<T>(path: string): Promise<T | null> {
   try {
     const res = await fetch(`${BASE}${path}`, {
       cache: "no-store",
+      headers: authHeaders(),
       signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) return null;
