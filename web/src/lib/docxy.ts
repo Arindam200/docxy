@@ -14,6 +14,7 @@ async function get<T>(path: string): Promise<T | null> {
       signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) return null;
+    // SAFETY: the caller names the shape it expects, and this read fails soft — a non-2xx or a parse error returns null instead.
     return (await res.json()) as T;
   } catch {
     return null;

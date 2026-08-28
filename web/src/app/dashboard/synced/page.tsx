@@ -22,8 +22,6 @@ export default async function SyncedPage() {
   ]);
 
   const online = runs !== null;
-  const list = runs ?? [];
-  const lastRun = [...list].sort((a, b) => b.startedAt.localeCompare(a.startedAt))[0];
 
   return (
     <Page>

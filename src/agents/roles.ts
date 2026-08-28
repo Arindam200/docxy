@@ -56,17 +56,28 @@ function skills(config: Config, pack?: string): TrueForgeApi.Skill[] | undefined
   return [{ name: pack }];
 }
 
+/**
+ * Attach a role's skill pack, or leave the property off the spec entirely.
+ *
+ * Only meaningful when the harness serves skills from git; otherwise the packs
+ * are inlined into the instructions and there is nothing to name here. Said
+ * once, so each role below reads as the spec it is rather than as a spec with a
+ * conditional hole in the middle of it.
+ */
+function withSkills<T extends object>(config: Config, pack: string, spec: T) {
+  const packs = skills(config, pack);
+  if (!packs) return spec;
+  return { ...spec, skills: packs };
+}
+
 export const CHANGE_ANALYST: RoleDefinition = {
   name: 'change-analyst',
   title: 'Change Analyst',
   job: 'Classifies the diff and extracts the plain-language what and why',
   skillPack: 'breaking-change-policy',
-  spec: (config) => ({
+  spec: (config) => withSkills(config, 'breaking-change-policy', {
     model: { name: config.models['change-analyst'], params: { temperature: 0.1, maxTokens: 4000 } },
     config: runtime(config),
-    ...(skills(config, 'breaking-change-policy')
-      ? { skills: skills(config, 'breaking-change-policy') }
-      : {}),
     instructions: buildInstructions({
       skillPack: 'breaking-change-policy',
       persona: `
@@ -103,10 +114,9 @@ export const IMPACT_MAPPER: RoleDefinition = {
   title: 'Impact Mapper',
   job: 'Traces which docs and downstream code the change actually touches',
   skillPack: 'impact-map-hints',
-  spec: (config) => ({
+  spec: (config) => withSkills(config, 'impact-map-hints', {
     model: { name: config.models['impact-mapper'], params: { temperature: 0.1, maxTokens: 6000 } },
     config: runtime(config, { subagents: true }),
-    ...(skills(config, 'impact-map-hints') ? { skills: skills(config, 'impact-map-hints') } : {}),
     instructions: buildInstructions({
       skillPack: 'impact-map-hints',
       persona: `
@@ -142,10 +152,9 @@ export const DOCS_UPDATER: RoleDefinition = {
   title: 'Docs Updater',
   job: 'Drafts the specific edits to the affected doc sections',
   skillPack: 'docs-style',
-  spec: (config) => ({
+  spec: (config) => withSkills(config, 'docs-style', {
     model: { name: config.models['docs-updater'], params: { temperature: 0.2, maxTokens: 8000 } },
     config: runtime(config),
-    ...(skills(config, 'docs-style') ? { skills: skills(config, 'docs-style') } : {}),
     instructions: buildInstructions({
       skillPack: 'docs-style',
       persona: `
@@ -181,7 +190,7 @@ export const CHANGELOG_AUTHOR: RoleDefinition = {
   title: 'Changelog Author',
   job: 'Writes one user-facing entry and proposes a semver bump',
   skillPack: 'changelog-voice',
-  spec: (config) => ({
+  spec: (config) => withSkills(config, 'changelog-voice', {
     model: {
       name: config.models['changelog-author'],
       // 2000 was too small, and so was 8000: this role runs on a reasoning
@@ -197,7 +206,6 @@ export const CHANGELOG_AUTHOR: RoleDefinition = {
       params: { temperature: 0.3, maxTokens: 16_000 },
     },
     config: runtime(config),
-    ...(skills(config, 'changelog-voice') ? { skills: skills(config, 'changelog-voice') } : {}),
     instructions: buildInstructions({
       skillPack: 'changelog-voice',
       persona: `

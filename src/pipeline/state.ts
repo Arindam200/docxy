@@ -29,6 +29,7 @@ export class KnowledgeStore implements KnowledgeStorage {
 
   async load(): Promise<KnowledgeMap> {
     try {
+      // SAFETY: the map is read as `Partial`, so every key is checked before it is used.
       const parsed = JSON.parse(await readFile(this.file, 'utf8')) as Partial<KnowledgeMap>;
       return {
         symbols: parsed.symbols ?? {},

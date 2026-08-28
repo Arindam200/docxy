@@ -103,6 +103,7 @@ function ProfileMenu({ user }: { user: DashboardUser }) {
     if (!open) return;
 
     const onPointerDown = (event: MouseEvent) => {
+      // SAFETY: an event dispatched into this handler always carries a Node target, and `contains` only compares identity.
       if (!container.current?.contains(event.target as Node)) setOpen(false);
     };
     const onKeyDown = (event: KeyboardEvent) => {

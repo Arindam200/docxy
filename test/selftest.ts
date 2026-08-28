@@ -219,12 +219,17 @@ const cl3 = await applyChangelogEntry(repo, 'NEW.md',
 check('changelog creates Unreleased block', cl3.after.includes('## [Unreleased]') && cl3.after.includes('First entry'));
 
 // --- approval gate -------------------------------------------------------
+// SAFETY: the gate reads only the fields set here; the rest of a change spec does not affect the decision.
 const breaking = { kind: 'breaking', surface: 'public-api', summary: '', changedSymbols: [],
   breakingRationale: '', confidence: 0.9 } as any;
+// SAFETY: the gate reads only the fields set here; the rest of a change spec does not affect the decision.
 const chore = { kind: 'chore', surface: 'internal', summary: '', changedSymbols: [],
   breakingRationale: '', confidence: 0.9 } as any;
+// SAFETY: `decideScope` reads only `semverBump` off the impact report.
 check('breaking is elevated', decideScope(breaking, { semverBump: 'major' } as any, 'routine').scope === 'elevated');
+// SAFETY: `decideScope` reads only `semverBump` off the impact report.
 check('chore is routine', decideScope(chore, { semverBump: 'none' } as any, 'routine').scope === 'routine');
+// SAFETY: `decideScope` reads only `semverBump` off the impact report.
 check('coordinator can escalate', decideScope(chore, { semverBump: 'none' } as any, 'elevated').scope === 'elevated');
 
 const req = createApprovalRequest('run1', 'elevated', 'because', 'summary');
@@ -401,6 +406,7 @@ check('empty history has no rates',
 // narrow the listing rather than reach past the repository filter.
 {
   const dir = await mkdtemp(join(tmpdir(), 'docxy-runs-'));
+  // SAFETY: `RunStore` reads only `stateDir` off the config.
   const store = new RunStore({ stateDir: dir } as Config);
 
   const runIn = (id: string, repoPath: string): RunRecord => ({
