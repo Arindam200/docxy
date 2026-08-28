@@ -1,5 +1,6 @@
 import type { NextRequest } from "next/server";
-import { getSessionUser } from "@/lib/auth";
+import { authRequired, getSessionUser, operatorVerdict } from "@/lib/auth";
+import { apiHeaders } from "@/lib/docxy";
 import { authReady } from "@/lib/env";
 
 /**
@@ -15,54 +16,44 @@ import { authReady } from "@/lib/env";
 
 const BASE = process.env.DOCXY_API_URL || "http://localhost:4317";
 
-/** Mirrors the dashboard's own escape hatch, so the demo keeps working. */
-function authRequired(): boolean {
-  return process.env.DOCXY_REQUIRE_AUTH !== "0" && authReady();
-}
-
-/**
- * The addresses allowed to operate this deployment.
- *
- * Registration is open — email and password, no verification step — so a
- * signed-in user is only proof that somebody completed a signup form, not that
- * they are entitled to approve a pull request. Being signed in and being an
- * operator are two different questions and this answers the second one.
- */
-function allowedOperators(): string[] {
-  return (process.env.DOCXY_ALLOWED_EMAILS ?? "")
-    .split(",")
-    .map((entry) => entry.trim().toLowerCase())
-    .filter(Boolean);
-}
-
 async function forward(request: NextRequest, method: string): Promise<Response> {
   if (authRequired()) {
-    const user = await getSessionUser(request.headers).catch(() => null);
-    if (!user) {
-      return Response.json({ error: "Sign in to use the docxy API." }, { status: 401 });
-    }
-
-    // Closed by default. An empty allowlist on a deployment that has auth
-    // switched on means nobody has said who the operators are yet — and the
-    // safe reading of "unspecified" is nobody, not everybody. The demo path
-    // is DOCXY_REQUIRE_AUTH=0, which is explicit about what it gives up.
-    const operators = allowedOperators();
-    const email = user.email?.trim().toLowerCase();
-    if (operators.length === 0) {
+    // Sign-in is required but cannot be performed: the deployment is missing
+    // DATABASE_URL or BETTER_AUTH_SECRET. Refusing is the only safe reading —
+    // forwarding would hand the privileged API token to an unauthenticated
+    // caller, which is worse than the outage this reports.
+    if (!authReady()) {
       return Response.json(
         {
           error:
-            "No operators are configured. Set DOCXY_ALLOWED_EMAILS to the addresses " +
-            "allowed to use this dashboard.",
+            "This deployment cannot authenticate anyone yet: DATABASE_URL and " +
+            "BETTER_AUTH_SECRET must both be set. Set DOCXY_REQUIRE_AUTH=0 only if " +
+            "you intend this dashboard to be open.",
         },
-        { status: 403 },
+        { status: 503 },
       );
     }
-    if (!email || !operators.includes(email)) {
-      return Response.json(
-        { error: "This account is not an operator on this deployment." },
-        { status: 403 },
-      );
+
+    const user = await getSessionUser(request.headers).catch(() => null);
+    switch (operatorVerdict(user)) {
+      case "unauthenticated":
+        return Response.json({ error: "Sign in to use the docxy API." }, { status: 401 });
+      case "not-configured":
+        return Response.json(
+          {
+            error:
+              "No operators are configured. Set DOCXY_ALLOWED_EMAILS to the addresses " +
+              "allowed to use this dashboard.",
+          },
+          { status: 403 },
+        );
+      case "not-an-operator":
+        return Response.json(
+          { error: "This account is not an operator on this deployment." },
+          { status: 403 },
+        );
+      case "ok":
+        break;
     }
   }
 
@@ -83,13 +74,9 @@ async function forward(request: NextRequest, method: string): Promise<Response> 
     // The upstream API authenticates the proxy itself, not the end user: it has
     // no session of its own and no way to read one. This is the credential that
     // stops anyone who can route to the API from skipping the sign-in above.
-    const apiToken = process.env.DOCXY_API_TOKEN?.trim();
     const upstream = await fetch(`${BASE}${path}`, {
       method,
-      headers: {
-        "content-type": "application/json",
-        ...(apiToken ? { authorization: `Bearer ${apiToken}` } : {}),
-      },
+      headers: apiHeaders({ "content-type": "application/json" }),
       body: body?.byteLength ? body : undefined,
       cache: "no-store",
       signal: AbortSignal.timeout(10_000),

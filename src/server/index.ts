@@ -101,9 +101,15 @@ export interface ServerHandle {
  * mismatch, and the length of the secret is not the part worth hiding.
  */
 export function tokenMatches(expected: string, offered: string | undefined): boolean {
-  const value = offered?.replace(/^Bearer\s+/i, '') ?? '';
-  if (value.length !== expected.length) return false;
-  return timingSafeEqual(Buffer.from(value), Buffer.from(expected));
+  const value = offered?.replace(/^Bearer\s+/i, '').trim() ?? '';
+  // Compare the buffers' byte lengths, not the strings'. A JavaScript string
+  // length counts UTF-16 units, so a header of non-ASCII characters can match
+  // the expected length and still produce a longer buffer — and
+  // `timingSafeEqual` throws on that, turning a wrong password into a 500.
+  const a = Buffer.from(value, 'utf8');
+  const b = Buffer.from(expected, 'utf8');
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
 
 /**
@@ -119,6 +125,17 @@ export function repoAllowed(allowed: string[], repository: string): boolean {
 /** GitHub sends a full object name in `after`; anything else is not a push. */
 export function isCommitSha(value: string): boolean {
   return /^[0-9a-f]{40}$/.test(value);
+}
+
+/**
+ * Whether a bind address keeps the server on this machine.
+ *
+ * Anything else is reachable by something that is not this process's operator,
+ * which is what makes an absent API token a problem rather than a preference.
+ */
+export function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  return host === 'localhost' || host === '::1' || /^127\./.test(host);
 }
 
 export function createServer(client: TrueForge, config: Config): { app: Hono; bus: Broadcaster } {
@@ -966,6 +983,20 @@ export function startServer(client: TrueForge, config: Config): ServerHandle {
   // The deployed path is `standalone.ts`, which binds 0.0.0.0 and refuses to
   // start without the token.
   const hostname = process.env.DOCXY_HOST?.trim() || '127.0.0.1';
+
+  // The override has to fail closed the same way the deployed path does, or it
+  // is simply a second way to publish the approval endpoints unauthenticated —
+  // and the quieter one, since nothing about `DOCXY_HOST=0.0.0.0` announces
+  // that it is switching the lock off.
+  if (!isLoopbackHost(hostname) && !config.server.apiToken) {
+    throw new Error(
+      `DOCXY_HOST is set to ${hostname}, which is reachable from outside this machine, ` +
+        'but DOCXY_API_TOKEN is not set — the approval and run endpoints would be open ' +
+        'to anyone who can reach the port. Set DOCXY_API_TOKEN, or leave DOCXY_HOST unset ' +
+        'to listen on loopback only.',
+    );
+  }
+
   const server = serve({ fetch: app.fetch, port: config.server.port, hostname });
 
   // A listen failure arrives as an `error` event, and an `error` event with no

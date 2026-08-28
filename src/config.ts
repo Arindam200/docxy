@@ -294,7 +294,11 @@ export function loadConfig(overrides: Partial<{ repoPath: string }> = {}): Confi
     },
     server: {
       port: envInt('DOCXY_PORT', 4317),
-      apiToken: env('DOCXY_API_TOKEN') || undefined,
+      // Trimmed here, once. Both dashboard callers trim before sending, so a
+      // value with stray whitespace would otherwise be "configured" on this
+      // side and a different string on theirs — every request a 401, for a
+      // reason nothing reports. All-whitespace is no token at all.
+      apiToken: env('DOCXY_API_TOKEN').trim() || undefined,
       allowedRepos: splitList(env('DOCXY_ALLOWED_REPOS')).map((r) => r.toLowerCase()),
     },
     github: {

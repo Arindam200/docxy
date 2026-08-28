@@ -19,7 +19,7 @@ import { planRetry } from '../src/pipeline/retry.js';
 import type { RoleName } from '../src/config.js';
 import type { DocEdit, RoleTrace, RunRecord } from '../src/types.js';
 import { buildReport } from '../src/server/observability.js';
-import { isCommitSha, repoAllowed, tokenMatches } from '../src/server/index.js';
+import { isCommitSha, isLoopbackHost, repoAllowed, tokenMatches } from '../src/server/index.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -499,6 +499,37 @@ check('empty history has no rates',
   check('a prefix of the token is refused', tokenMatches(secret, 'Bearer a') === false);
   check('no header at all is refused', tokenMatches(secret, undefined) === false);
   check('an empty header is refused', tokenMatches(secret, '') === false);
+  check('surrounding whitespace is tolerated', tokenMatches(secret, `Bearer  ${secret} `));
+
+  // `timingSafeEqual` throws when the buffers differ in length, and a string's
+  // length is not its byte length: 32 non-ASCII characters weigh more than 32
+  // bytes. Comparing the strings first turned a wrong credential into a 500.
+  const wideButSameCharCount = 'é'.repeat(64);
+  let threw = false;
+  try {
+    check('a non-ASCII token of equal character count is refused',
+      tokenMatches(secret, `Bearer ${wideButSameCharCount}`) === false);
+  } catch {
+    threw = true;
+  }
+  check('comparing a non-ASCII token does not throw', threw === false);
+}
+
+// --- where the CLI is allowed to listen -----------------------------------
+// `docxy serve` may run without a token because it stays on this machine. The
+// host override has to fail closed the same way the deployed path does.
+{
+  check('loopback v4 is local', isLoopbackHost('127.0.0.1'));
+  check('any 127.x is local', isLoopbackHost('127.99.1.2'));
+  check('localhost is local', isLoopbackHost('localhost'));
+  check('loopback v6 is local', isLoopbackHost('::1'));
+  check('bracketed loopback v6 is local', isLoopbackHost('[::1]'));
+  check('case and padding do not matter', isLoopbackHost('  LocalHost '));
+  check('all interfaces is not local', isLoopbackHost('0.0.0.0') === false);
+  check('a LAN address is not local', isLoopbackHost('192.168.1.10') === false);
+  check('a hostname is not local', isLoopbackHost('docxy.internal') === false);
+  // 127 has to be an octet, not a prefix of one.
+  check('a lookalike address is not local', isLoopbackHost('1270.0.0.1') === false);
 }
 
 // --- which repositories a webhook may start a run for ---------------------
@@ -529,6 +560,16 @@ check('empty history has no rates',
 
   process.env.DOCXY_API_TOKEN = 'shhh';
   check('a configured token is read', loadConfig().server.apiToken === 'shhh');
+
+  // Both dashboard callers trim before sending. If this side kept the padding,
+  // the token would be "set" here and a different string there — every request
+  // a 401 with nothing to point at.
+  process.env.DOCXY_API_TOKEN = '  shhh  ';
+  check('a padded token is trimmed to match the dashboard',
+    loadConfig().server.apiToken === 'shhh');
+  process.env.DOCXY_API_TOKEN = '   ';
+  check('an all-whitespace token counts as unset',
+    loadConfig().server.apiToken === undefined);
 
   process.env.DOCXY_ALLOWED_REPOS = ' Arindam200/Docxy , arindam200/other ,, ';
   const repos = loadConfig().server.allowedRepos;
