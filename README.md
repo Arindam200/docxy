@@ -185,8 +185,29 @@ gate as well:
 - **Nothing expires.** A request nobody answers stays pending and is reported
   stale. It never auto-approves and never auto-discards.
 
-In CI this maps onto a protected GitHub environment, so GitHub itself holds the
-job open until a human clicks approve — see [`.github/workflows/docxy.yml`](.github/workflows/docxy.yml).
+### In CI, GitHub holds the job
+
+The strongest version of the gate is not docxy's own — it is the one the
+pipeline cannot talk its way past. [`.github/workflows/docxy.yml`](.github/workflows/docxy.yml)
+splits the work in two: one job drafts and validates the proposal, and a second,
+separate job opens the pull request. The second declares
+
+```yaml
+publish:
+  needs: propose
+  if: needs.propose.outputs.status == 'awaiting-approval'
+  environment: docxy-approval    # protected: required reviewers
+```
+
+A protected environment means **GitHub** suspends the job until a named human
+clicks approve. Not the agent, not this codebase, not a flag someone can flip in
+a config file — the CI platform, outside the process being gated. Nothing
+auto-approves it and nothing expires into approval. Set that environment's
+required reviewers to 2 and enable *prevent self-review*, and an elevated run
+needs two different people at the infrastructure level as well as at docxy's.
+
+That is the shape worth copying: the agent proposes in one job, and the
+authority to publish lives in another that the agent cannot reach.
 
 ---
 
@@ -379,6 +400,22 @@ rotation, staleness threshold, base branch, port.
 [guides/LOCAL-SETUP.md](guides/LOCAL-SETUP.md) covers the ones worth knowing
 early, and what to change when a role starts failing.
 
+## Guides
+
+| | |
+|---|---|
+| [LOCAL-SETUP.md](guides/LOCAL-SETUP.md) | From nothing to a documentation pull request on your own repository |
+| [GITHUB-APP.md](guides/GITHUB-APP.md) | Registering the App, so pull requests open as a bot and not as you |
+| [DATABASE.md](guides/DATABASE.md) | Moving runs, sessions and the symbol map from JSON to Postgres |
+| [DEPLOY.md](guides/DEPLOY.md) | Running the service somewhere other than your laptop |
+| [OBSERVABILITY.md](guides/OBSERVABILITY.md) | What each run records, and how the dashboard derives the rest |
+| [DEMO.md](guides/DEMO.md) | Recording the demo, with commands that have been run for real |
+| [WRITEUP.md](guides/WRITEUP.md) | What this is and how it uses the harness — the submission writeup |
+| [ORIGINAL-PLAN.md](guides/ORIGINAL-PLAN.md) | The plan as written before any code existed, and what changed |
+| [SUBMISSION.md](guides/SUBMISSION.md) | The hackathon audit: what was missing, what was fixed, what was decided |
+
+---
+
 ## Qodo Code Review Evidence
 
 Every substantive change in this repository landed through a pull request that
@@ -387,9 +424,13 @@ straight to `main`.
 
 | PR | What it changed | Qodo's verdict |
 |---|---|---|
-| [#1](https://github.com/Arindam200/docxy/pull/1) | Anti-slop oxlint rules, and every finding they surfaced fixed | Clean |
-| [#2](https://github.com/Arindam200/docxy/pull/2) | Retry, session rotation, and the operations dashboard | **15 findings** over 7 review passes |
-| [#3](https://github.com/Arindam200/docxy/pull/3) | Run queueing, Postgres persistence, publish-path fixes | 11 findings, then re-reviewed to **0 bugs, 0 rule violations** |
+| [#2](https://github.com/Arindam200/docxy/pull/2) ✅ merged | Retry, session rotation, and the operations dashboard | **15 findings** over 7 review passes |
+| [#3](https://github.com/Arindam200/docxy/pull/3) ✅ merged | Run queueing, Postgres persistence, publish-path fixes | 11 findings, then re-reviewed to **0 bugs, 0 rule violations** |
+| [#4](https://github.com/Arindam200/docxy/pull/4) ✅ merged | Neon persistence, Better Auth, a page per pipeline stage | **9 bugs**, 22 skill insights |
+| [#5](https://github.com/Arindam200/docxy/pull/5) | Authentication on the API's own endpoints | 6 bugs, in review |
+
+([#1](https://github.com/Arindam200/docxy/pull/1) added the anti-slop lint rules
+and was closed rather than merged — its rules landed with #2.)
 
 Three commits exist only to answer those reviews:
 [`f775f8c`](https://github.com/Arindam200/docxy/commit/f775f8c),

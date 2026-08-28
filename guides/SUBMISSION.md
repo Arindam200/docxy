@@ -228,7 +228,7 @@ line links to it.
 
 ---
 
-### P1 — PLAN.md promises a sandbox that was never built
+### P1 — PLAN.md promises a sandbox that was never built · **DONE**
 
 `PLAN.md` is checked in at the repo root and describes Daytona running the doc
 build, link-checker and test suite in a sandbox — architecture that does not exist.
@@ -240,10 +240,12 @@ A judge who opens both files finds two different projects. The README's version 
 the honest one, and the discrepancy reads as a broken promise rather than a
 changed plan.
 
-**Fix — 15 minutes.** Once the sandbox lands, either update `PLAN.md` to match
-what shipped or move it into `guides/` with a dated note saying it is the original
-proposal. Do not delete it — showing the plan and what changed is a credible move.
-Leaving it silently wrong is not.
+**Fixed.** Moved to [`guides/ORIGINAL-PLAN.md`](ORIGINAL-PLAN.md), unedited, under
+a header that says it is the 24 August proposal and tabulates the four things that
+changed once the harness was real: Daytona became optional, the Coordinator became
+five long-lived sessions orchestrated in code, the sandbox scope narrowed to the
+docs build, and the approval gate moved to the pull request. Showing the plan
+against what shipped is stronger than either deleting it or quietly rewriting it.
 
 ---
 
@@ -316,8 +318,8 @@ Prove the sandbox against a real Daytona account, then close the loose ends.
 - [ ] Give `.github/workflows/docxy.yml`'s protected `docxy-approval` environment
       a proper callout in the README — it is the strongest safety artifact in the
       repo and it is currently a footnote
-- [ ] Reconcile `PLAN.md` with what shipped, or move it to `guides/` with a dated
-      note saying it is the original proposal — P1
+- [x] ~~Reconcile `PLAN.md` with what shipped~~ — now
+      [`guides/ORIGINAL-PLAN.md`](ORIGINAL-PLAN.md)
 - [ ] *Only if the above is finished:* wire the Impact Mapper to the GitHub MCP
       server — P1
 
