@@ -441,6 +441,7 @@ straight to `main`.
 | [#3](https://github.com/Arindam200/docxy/pull/3) ✅ merged | Run queueing, Postgres persistence, publish-path fixes | 11 findings, then re-reviewed to **0 bugs, 0 rule violations** |
 | [#4](https://github.com/Arindam200/docxy/pull/4) ✅ merged | Neon persistence, Better Auth, a page per pipeline stage | **9 bugs**, 22 skill insights |
 | [#5](https://github.com/Arindam200/docxy/pull/5) | Authentication on the API's own endpoints | 6 bugs, in review |
+| [#6](https://github.com/Arindam200/docxy/pull/6) | Running the docs build in the harness sandbox | **8 bugs** — 7 taken, 1 answered |
 
 ([#1](https://github.com/Arindam200/docxy/pull/1) added the anti-slop lint rules
 and was closed rather than merged — its rules landed with #2.)
@@ -502,12 +503,29 @@ scope, two distinct sign-offs for elevated changes, and no expiry in either
 direction. That is a product decision, not an oversight, and it was recorded as
 one on #2 rather than quietly reverted.
 
+**"Host fallback defeats isolation"** *(#6, Security)* — the one that changed a
+default rather than fixing a bug. Any sandbox-unavailable result staged the
+proposal and ran the command on the host, on the reasoning that a missing sandbox
+is a property of the deployment and should not fail correct work. True, and it
+does not follow that the answer is to run it here anyway: an isolation boundary
+that disappears whenever it is least observed is not one. Host execution is now
+opt-in (`DOCXY_SANDBOX_FALLBACK=local`) and the default reports the build
+unvalidated instead.
+
 ### What we did not take
 
 Qodo's two remaining notes on #3 are architectural suggestions rather than
 defects — a durable database-backed job queue, and per-repository worker queues.
 Both are right for a multi-tenant deployment and both are past what this pipeline
-needs today. They are recorded here rather than silently dropped.
+needs today.
+
+On #6 it observed that the sandbox carries only the proposed files, so a
+full-tree build (`mkdocs build`, `npm run docs:build`) cannot run there. Correct,
+and it is the design: shipping the checkout into a sandbox on every commit costs
+more than the check is worth. Making it default-on did make it everyone's
+problem, so it is now stated plainly rather than implied.
+
+All of it is recorded here rather than silently dropped.
 
 ---
 
