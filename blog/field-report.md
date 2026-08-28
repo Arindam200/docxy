@@ -129,7 +129,7 @@ Qodo also caught that `exitCode: null` — the command never ran — became a `s
 
 ## What I'd keep from this
 
-**Grep your defaults, not your docs.** Every safety property I'd written about was true of the *configuration I ran locally* and false of the one that shipped. `DOCXY_SANDBOX` defaulting to `false` doesn't announce itself.
+**Grep your defaults, not your docs.** Every safety property I'd written about was true of the *configuration I ran locally* and false of the one that shipped. Worse, the sandbox wasn't even its own setting — it was wired to `DOCXY_USE_HARNESS_SKILLS`, a flag about where skill packs come from, which defaulted to `false`. Two unrelated decisions sharing one switch, and the safety-relevant one riding along silently.
 
 **A comment is not the system.** The SDK docstring was wrong, and I trusted it over an endpoint that was sitting right there returning contradictory JSON. Ten minutes with the harness bundle beat two rounds of guessing.
 
