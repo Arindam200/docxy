@@ -72,6 +72,7 @@ function useDismiss(open: boolean, close: () => void) {
     if (!open) return;
 
     const onPointerDown = (event: MouseEvent) => {
+      // SAFETY: an event dispatched into this handler always carries a Node target, and `contains` only compares identity.
       if (!container.current?.contains(event.target as Node)) close();
     };
     const onKeyDown = (event: KeyboardEvent) => {
@@ -93,6 +94,7 @@ const CONTROL =
   "flex h-8 items-center gap-1.5 border border-rule px-2 text-xs font-medium transition-colors hover:bg-surface-2";
 
 function ThemeMenu() {
+  // SAFETY: "system" is one of `Choice`'s values; without the assertion it widens to `string`.
   const choice = useSyncExternalStore(subscribe, readChoice, () => "system" as Choice);
   const [open, setOpen] = useState(false);
   const container = useDismiss(open, useCallback(() => setOpen(false), []));

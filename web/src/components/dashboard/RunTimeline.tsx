@@ -3,14 +3,14 @@ import type { RunSummary } from "@/lib/docxy";
 import { dateTime, duration, roleTitle, tokens } from "@/lib/format";
 import { RoleDots } from "@/components/dashboard/RoleDots";
 
-const STATUS_STYLES: Record<RunSummary["status"], string> = {
+const STATUS_STYLES = {
   running: "text-accent",
   "awaiting-approval": "text-warn",
   approved: "text-ok",
   done: "text-ok",
   denied: "text-danger",
   failed: "text-danger",
-};
+} satisfies Record<RunSummary["status"], string>;
 
 export function StatusChip({ status }: { status: RunSummary["status"] }) {
   return (

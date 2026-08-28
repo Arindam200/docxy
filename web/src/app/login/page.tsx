@@ -6,13 +6,14 @@ import { CredentialsForm } from "@/components/auth/CredentialsForm";
 import { SetupNotice } from "@/components/auth/SetupNotice";
 import { authReady, githubConfigured, googleConfigured, missingEnv } from "@/lib/env";
 import { safeNext } from "@/lib/redirect";
+import { lookup } from "@/lib/lookup";
 
 export const metadata: Metadata = {
   title: "Sign in · Docxy",
 };
 
 /** OAuth failures come back on the query string rather than in the response. */
-const ERRORS: Record<string, string> = {
+const ERRORS = {
   unconfigured:
     "That provider is not configured on this deployment yet. Sign in with an email and password instead.",
   access_denied: "The sign-in was cancelled before it finished. Please try again.",
@@ -27,7 +28,7 @@ const ERRORS: Record<string, string> = {
     "That account is not an operator on this deployment. Ask whoever runs it to add your address to DOCXY_ALLOWED_EMAILS.",
   no_operators:
     "This deployment has no operators configured yet. Whoever runs it needs to set DOCXY_ALLOWED_EMAILS.",
-};
+} satisfies Record<string, string>;
 
 export default async function LoginPage({
   searchParams,
@@ -37,7 +38,7 @@ export default async function LoginPage({
   const params = await searchParams;
   const next = safeNext(params.next);
   const error = params.error
-    ? (ERRORS[params.error] ?? "Something went wrong signing you in. Please try again.")
+    ? (lookup(ERRORS, params.error) ?? "Something went wrong signing you in. Please try again.")
     : undefined;
 
   return (

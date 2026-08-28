@@ -164,6 +164,7 @@ export async function installationToken(
     );
   }
 
+  // SAFETY: a 2xx from GitHub's token endpoint is its published shape, and `token` is checked for presence before use.
   const body = (await response.json()) as { token?: string };
   if (!body.token) throw new Error('GitHub returned an installation token response with no token.');
   return body.token;

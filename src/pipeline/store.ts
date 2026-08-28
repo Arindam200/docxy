@@ -39,6 +39,7 @@ export class RunStore implements RunStorage {
 
   async load(id: string): Promise<RunRecord | null> {
     try {
+      // SAFETY: these files are written only by `save` below, which serialises a RunRecord.
       return JSON.parse(await readFile(this.file(id), 'utf8')) as RunRecord;
     } catch {
       return null;
@@ -67,6 +68,7 @@ export class RunStore implements RunStorage {
     // `.tmp` files are half-written saves in flight; they are not runs yet.
     for (const name of names.filter((n) => n.endsWith('.json'))) {
       try {
+        // SAFETY: these files are written only by `save` below, which serialises a RunRecord.
         runs.push(JSON.parse(await readFile(join(this.dir, name), 'utf8')) as RunRecord);
       } catch {
         // skip a corrupt record rather than failing the listing

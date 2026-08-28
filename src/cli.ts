@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { loadConfig, prBaseBranch, ROLE_NAMES, type Config } from './config.js';
 import { createClient, assertReachable } from './trueforge/client.js';
-import { listAvailableModels, listNebiusModels, registerNebiusProvider } from './trueforge/setup.js';
+import { listAvailableModels, listNebiusModels, registerNebiusProvider, registerSandboxProvider } from './trueforge/setup.js';
+import { sandboxAvailability } from './validate/sandbox.js';
 import { runPipeline, rebuildProposedFiles } from './pipeline/index.js';
 import { createStores, type RunStorage } from './pipeline/stores.js';
 import type { RunRecord } from './types.js';
@@ -54,7 +55,13 @@ const c = {
   cyan: (s: string) => `\x1b[36m${s}\x1b[0m`,
 };
 
-function parseFlags(argv: string[]): { positional: string[]; flags: Record<string, string> } {
+/** A parsed argv: the bare words, and the `--name=value` pairs. */
+interface ParsedArgs {
+  positional: string[];
+  flags: Record<string, string>;
+}
+
+function parseFlags(argv: string[]): ParsedArgs {
   const positional: string[] = [];
   const flags: Record<string, string> = {};
   for (let i = 0; i < argv.length; i += 1) {
@@ -197,6 +204,40 @@ async function main(): Promise<void> {
       } else {
         console.log(`${c.green('✓')} All registered models resolve.`);
       }
+
+      const sandbox = await registerSandboxProvider(client, config);
+      if (sandbox.action === 'registered') {
+        console.log(`${c.green('✓')} Daytona sandbox provider registered`);
+      } else {
+        console.log(`${c.yellow('!')} No remote sandbox provider: ${sandbox.reason}`);
+      }
+
+      // What matters is whether a sandbox exists, not whose it is. A standalone
+      // harness carries its own, so "Daytona was refused" and "nothing will be
+      // isolated" are very different sentences and setup should not conflate them.
+      //
+      // And it must answer for the configuration that will actually run: probing
+      // the harness while DOCXY_SANDBOX is off reported a sandbox the docs build
+      // was never going to use, which is the opposite of the truth in the one
+      // direction a security status must never be wrong.
+      if (!config.sandbox.enabled) {
+        console.log(
+          `${c.yellow('!')} DOCXY_SANDBOX is off — the docs build runs on this machine, ` +
+            `over text a model wrote`,
+        );
+        return;
+      }
+      const ready = await sandboxAvailability(client);
+      console.log(
+        ready.available
+          ? `${c.green('✓')} Sandbox ready (${ready.backend}) — the docs build runs there`
+          : `${c.yellow('!')} ${ready.reason}\n` +
+            `  ${c.dim(
+              config.sandbox.fallback === 'local'
+                ? 'the docs build will run on this machine instead, and the report says so'
+                : 'the docs build will be reported unvalidated rather than run here',
+            )}`,
+      );
       return;
     }
 
@@ -228,6 +269,27 @@ async function main(): Promise<void> {
       } catch (err) {
         console.log(`${c.red('✗')} ${err instanceof Error ? err.message : String(err)}`);
       }
+      console.log(`\n${c.bold('Validation')}`);
+      if (!config.sandbox.enabled) {
+        console.log(
+          `${c.yellow('!')} DOCXY_SANDBOX is off — the docs build runs on this machine, ` +
+            `over text a model wrote`,
+        );
+      } else {
+        const sandbox = await sandboxAvailability(client);
+        console.log(
+          sandbox.available
+            ? `${c.green('✓')} sandbox ready (${sandbox.backend}) — the docs build runs there, ` +
+              `not against your checkout`
+            : `${c.yellow('!')} ${sandbox.reason}\n` +
+              `  ${c.dim(
+                config.sandbox.fallback === 'local'
+                  ? 'DOCXY_SANDBOX_FALLBACK=local — the docs build will run on this machine'
+                  : 'the docs build will be reported unvalidated rather than run here',
+              )}`,
+        );
+      }
+
       const github = appStatus();
       console.log(
         github.configured

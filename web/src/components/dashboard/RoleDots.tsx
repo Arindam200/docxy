@@ -9,11 +9,11 @@ import { duration, roleTitle, ROLE_ORDER } from "@/lib/format";
  * keeps its width and the gap reads as "not reached" instead of "missing".
  */
 
-const STATUS_CLASS: Record<RoleDot["status"], string> = {
+const STATUS_CLASS = {
   running: "bg-accent animate-pulse",
   done: "bg-ok",
   failed: "bg-danger",
-};
+} satisfies Record<RoleDot["status"], string>;
 
 export function RoleDots({ roles }: { roles: RoleDot[] | undefined }) {
   const byRole = new Map((roles ?? []).map((role) => [role.role, role]));

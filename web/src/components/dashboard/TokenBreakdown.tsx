@@ -1,3 +1,4 @@
+import { lookup } from "@/lib/lookup";
 import type { RoleTrace, RunTotals } from "@/lib/docxy";
 
 /**
@@ -8,21 +9,21 @@ import type { RoleTrace, RunTotals } from "@/lib/docxy";
  * it is a direct answer to whether the skill packs earn what they cost.
  */
 
-const LABELS: Record<string, string> = {
+const LABELS = {
   harness: "harness",
   instructions: "instructions",
   messages: "messages",
   skills: "skills",
   tool_definitions: "tool definitions",
-};
+} satisfies Record<string, string>;
 
-const EXPLAINS: Record<string, string> = {
+const EXPLAINS = {
   instructions: "the role's persona and task",
   skills: "the skill pack",
   messages: "the diff and doc excerpts",
   harness: "the harness's own scaffolding",
   tool_definitions: "tool schemas",
-};
+} satisfies Record<string, string>;
 
 export function TokenBreakdown({
   totals,
@@ -62,7 +63,7 @@ export function TokenBreakdown({
           <ul className="space-y-1.5">
             {rows.map(([key, value]) => (
               <li key={key} className="flex items-center gap-3 text-xs">
-                <span className="w-28 shrink-0 truncate">{LABELS[key] ?? key}</span>
+                <span className="w-28 shrink-0 truncate">{lookup(LABELS, key) ?? key}</span>
                 <span className="relative h-1.5 flex-1 rounded-sm bg-surface-2">
                   <span
                     className="absolute inset-y-0 left-0 rounded-sm bg-accent/60"
@@ -73,7 +74,7 @@ export function TokenBreakdown({
                   {value.toLocaleString()}
                 </span>
                 <span className="hidden w-44 shrink-0 text-muted sm:block">
-                  {EXPLAINS[key] ? `← ${EXPLAINS[key]}` : ""}
+                  {lookup(EXPLAINS, key) ? `← ${lookup(EXPLAINS, key)}` : ""}
                 </span>
               </li>
             ))}
