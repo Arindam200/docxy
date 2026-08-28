@@ -67,9 +67,11 @@ export default {
         "src/trueforge/session.ts",
         "src/trueforge/setup.ts",
         "scripts/backfill-postgres.ts",
-        // Wildcarded rather than named: `[id]` is Next's dynamic-segment
-        // directory, and the brackets are glob syntax here.
-        "web/src/app/dashboard/runs/*/page.tsx",
+        // `[id]` is Next's dynamic-segment directory, and square brackets are a
+        // character class to a glob — so they are escaped rather than replaced
+        // with a wildcard. A `*` here would match every one-level route under
+        // `runs/`, quietly exempting pages nobody meant to exempt.
+        "web/src/app/dashboard/runs/\\[id\\]/page.tsx",
         "web/src/components/dashboard/RoleInspector.tsx",
       ],
       rules: {
