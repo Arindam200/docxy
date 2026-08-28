@@ -14,6 +14,7 @@ import { costOf, priceFor } from '../src/trueforge/pricing.js';
 import { classifyTurnError } from '../src/trueforge/run.js';
 import { renderDiffForPrompt } from '../src/git/diff.js';
 import { nextPage } from '../src/github/checkout.js';
+import { normalizePem, readAppCredentials, appStatus } from '../src/github/app.js';
 import type { CommitDiff, DiffFile } from '../src/types.js';
 import { planRetry } from '../src/pipeline/retry.js';
 import type { RoleName } from '../src/config.js';
@@ -561,8 +562,12 @@ check('empty history has no rates',
 {
   const before = { ...process.env };
 
-  delete process.env.DOCXY_API_TOKEN;
-  delete process.env.DOCXY_ALLOWED_REPOS;
+  // Empty, not deleted. `loadConfig` layers the repository's own `.env` over
+  // whatever is absent, so deleting these hands the next read straight back to
+  // the operator's real token — green in CI, red on the machine that followed
+  // the deploy guide. An empty value is already "unset" to the parser below.
+  process.env.DOCXY_API_TOKEN = '';
+  process.env.DOCXY_ALLOWED_REPOS = '';
   check('no token configured leaves the API open to the proxy',
     loadConfig().server.apiToken === undefined);
   check('no allowlist configured means every repository', loadConfig().server.allowedRepos.length === 0);
@@ -780,6 +785,52 @@ check('empty history has no rates',
 
   const broken = await sandboxAvailability(clientOf({ [CAPS]: { status: 500, body: {} } }));
   check('an erroring harness is unavailable, not assumed ready', broken.available === false);
+}
+
+// --- github app credentials ----------------------------------------------
+{
+  const PEM = '-----BEGIN RSA PRIVATE KEY-----\nMIIBOgIBAAJBAK\n-----END RSA PRIVATE KEY-----';
+
+  check('a verbatim pem is left alone', normalizePem(PEM) === PEM);
+  check('escaped newlines are repaired',
+    normalizePem(PEM.replace(/\n/g, '\\n')) === PEM);
+  check('base64 is decoded',
+    normalizePem(Buffer.from(PEM, 'utf8').toString('base64')) === PEM);
+  check('a pem that merely looks base64ish is not decoded',
+    normalizePem(PEM).includes('-----BEGIN'));
+
+  // The environment is process-wide, so each case restores what it changed.
+  const saved = {
+    id: process.env.GITHUB_APP_ID,
+    key: process.env.GITHUB_APP_PRIVATE_KEY,
+    path: process.env.GITHUB_APP_PRIVATE_KEY_PATH,
+    install: process.env.GITHUB_APP_INSTALLATION_ID,
+  };
+  delete process.env.GITHUB_APP_PRIVATE_KEY_PATH;
+  process.env.GITHUB_APP_ID = '123';
+  process.env.GITHUB_APP_INSTALLATION_ID = '456';
+  process.env.GITHUB_APP_PRIVATE_KEY = PEM.replace(/\n/g, '\\n');
+
+  const fromEnv = readAppCredentials();
+  check('the key can come from the environment alone', fromEnv?.privateKey === PEM);
+  check('and that counts as configured', appStatus().configured === true);
+
+  delete process.env.GITHUB_APP_PRIVATE_KEY;
+  const neither = appStatus();
+  check('with neither source the checklist names both',
+    neither.configured === false &&
+    neither.missing.some((m) => m.includes('GITHUB_APP_PRIVATE_KEY or')));
+  check('and no credentials are returned', readAppCredentials() === null);
+
+  for (const [name, value] of [
+    ['GITHUB_APP_ID', saved.id],
+    ['GITHUB_APP_PRIVATE_KEY', saved.key],
+    ['GITHUB_APP_PRIVATE_KEY_PATH', saved.path],
+    ['GITHUB_APP_INSTALLATION_ID', saved.install],
+  ] as const) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

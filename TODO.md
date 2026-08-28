@@ -136,7 +136,79 @@ Six hours of buffer, not zero. Nothing new ships after this.
 
 ---
 
-## 5. Open tracks — after submitting, not before
+## 5. Deploy the managed version — Railway
+
+Everything backend still runs on your laptop: the harness on `:8790`, the API on
+`:4317`, and the checkouts under `~/.docxy`. This moves all three onto Railway
+and connects the dashboard that is already on Vercel.
+
+The code side is done and verified — `Dockerfile`, `railway.json`, and the App
+key can now come from `GITHUB_APP_PRIVATE_KEY` instead of a file, because a
+managed platform has nowhere to put a `.pem` before the process starts. The
+image was built and run: it boots, answers `/health`, clones over HTTPS, and
+lands checkouts on the volume. Full runbook in
+[guides/DEPLOY.md](guides/DEPLOY.md) — this is just the checklist.
+
+### The harness service
+
+- [ ] New service from the Docker image `tfy.jfrog.io/tfy-images/trueforge:0.1.4-fba492f`
+- [ ] `PORT=8790` and `HOST=::` — Railway's private network is IPv6-only and the
+      image defaults to `0.0.0.0`. Miss this and the harness is unreachable with
+      exactly the symptom of a wrong URL, which is a slow thing to debug.
+- [ ] Health check path `/healthz`
+- [ ] **No public domain.** TrueForge ships no machine authentication — no API
+      key, no bearer token, only a browser OIDC flow a server cannot complete.
+      Keeping it private is not extra hardening, it is the access control.
+
+### The docxy service
+
+- [ ] Deploy this repository; `railway.json` points it at the `Dockerfile`
+- [ ] **Attach a volume mounted at `/data`.** It is the container's `HOME`, and
+      `checkoutPathFor()` puts managed clones under it. Without the volume every
+      redeploy hands the next commit cold sessions and an empty symbol map —
+      losing the accumulation that is the whole point of the design, and the
+      strongest beat in the demo.
+- [ ] `TRUEFORGE_BASE_URL=http://harness.railway.internal:8790`
+- [ ] `NEBIUS_API_KEY`, `DOCXY_API_TOKEN`, `DOCXY_ALLOWED_EMAILS`, and the Neon
+      `DATABASE_URL` — without the last one, runs are JSON files the container
+      loses unless the volume happens to cover them
+- [ ] `GITHUB_APP_PRIVATE_KEY` — paste the PEM itself; no file to place first
+- [ ] Give **this** service a public domain. Unlike the harness it is
+      authenticated, and both the dashboard and GitHub's webhook reach it from
+      outside the private network.
+- [ ] `railway run npm run setup` — the Nebius provider lives in the harness's
+      own database, so a fresh harness has never heard of it
+
+### Vercel — the step with a blast radius
+
+Every dashboard page fetches `DOCXY_API_URL` and **fails soft**: a request that
+times out renders an empty "offline" state rather than an error. The default is
+`localhost:4317`, which on Vercel is the serverless function's own container. So
+a dashboard missing this does not look broken — it looks like a pipeline that
+has never run.
+
+- [ ] `DOCXY_API_URL=https://<your-docxy-service>.up.railway.app`
+- [ ] Confirm `DOCXY_API_TOKEN` is byte-identical to the Railway value. A
+      mismatch is a 401 on every read with nothing on the page to say so.
+- [ ] Load the dashboard and confirm runs actually appear
+
+### Then prove it end to end
+
+- [ ] `docxy doctor` against the deployed service says **sandbox ready**. In a
+      container the local sandbox is bubblewrap, which needs kernel privileges
+      a managed platform may not grant. If it is unavailable the docs-build
+      check fails *by design* and every proposal opens as a draft — correct
+      behaviour, wrong outcome for a live demo. `DAYTONA_API_KEY` sidesteps the
+      kernel question entirely.
+- [ ] Point the GitHub App's webhook at `https://<domain>/webhook`
+- [ ] Push a commit and watch a run appear with nobody at a terminal. That is
+      the thing a deployment buys that the CLI cannot: the CLI documents the
+      repository you are standing in, the deployment documents every repository
+      the App is installed on.
+
+---
+
+## 6. Open tracks — after submitting, not before
 
 - [ ] **Field Report** — [blog/field-report.md](blog/field-report.md) is written.
       Read it once in your own voice, then post to dev.to. Add the demo video
