@@ -12,6 +12,7 @@ import {
   LuLogOut,
   LuActivity,
   LuPlug,
+  LuScrollText,
   LuZap,
 } from "react-icons/lu";
 import { signOut } from "@/lib/auth-client";
@@ -29,6 +30,8 @@ const NAV: Array<{ href: string; label: string; icon: ReactNode }> = [
   { href: "/dashboard/instructions", label: "Instructions", icon: <LuBot /> },
   { href: "/dashboard/activity", label: "Activity", icon: <LuZap /> },
   { href: "/dashboard/observability", label: "Observability", icon: <LuActivity /> },
+  // Built, filterable, and until now reachable only by typing the URL.
+  { href: "/dashboard/logs", label: "Logs", icon: <LuScrollText /> },
   { href: "/dashboard/integrations", label: "Integrations", icon: <LuPlug /> },
 ];
 

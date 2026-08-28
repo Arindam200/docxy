@@ -6,10 +6,16 @@ rules, and what the remaining three days go on.
 Audited **27 August 2026** against `fix/reliability-and-performance` at
 `ebda697`. Deadline is **30 August, 20:00 London**.
 
-> **Status, 27 August, evening.** The sandbox, the Qodo evidence section and the
-> LICENSE have landed on `feat/sandbox-validation`. PR merging is in hand
-> separately. The approval-gate default is staying off — see
+> **Status, 28 August.** Every P0 and P1 in this document is closed except the
+> two that are not code: the demo video and the submission itself. The sandbox
+> work is [PR #6](https://github.com/Arindam200/docxy/pull/6), verified end to
+> end against a live harness. PRs #2, #3 and #4 are merged. The approval-gate
+> default stays off deliberately — see
 > [the decision below](#p0--the-approval-default-stays-off-a-decision-not-a-gap).
+>
+> The dashboard is live at **https://docxy-lilac.vercel.app** and now surfaces
+> the sandbox: a badge on the check, a Sandbox panel with the execution trail,
+> and a `sandbox` filter in Logs.
 
 [rules]: https://www.wemakedevs.org/hackathons/trueforge
 
@@ -249,7 +255,7 @@ against what shipped is stronger than either deleting it or quietly rewriting it
 
 ---
 
-### P1 — No MCP server is ever reached
+### P1 — No MCP server is ever reached · **deliberately not done**
 
 The rules list MCP servers first among the real tools an agent should reach. The
 codebase touches MCP only on the failure path: `src/trueforge/run.ts:334` handles
@@ -260,11 +266,19 @@ requests, and the rules name GitHub and APIs explicitly, so the base requirement
 met. But the Double-O track is judged on maximizing harness features, and MCP is
 the most visible one not being used.
 
-**Fix — 2 hours, only if Friday stays on schedule.** Point the Impact Mapper at
-the GitHub MCP server for repository search instead of local grep. It is the role
-with the most natural need for it, and it turns "we call an API" into "a role
-reaches a tool through the harness." Skip this without hesitation if the sandbox
-work slips — it is an upgrade, not a gap.
+**Recommendation: do not do this before the deadline.** It was scoped as an
+upgrade and it should stay unbuilt, for a specific reason rather than for lack of
+time.
+
+Sessions are keyed by a hash of the agent spec. Adding an MCP server to the
+Impact Mapper's spec changes that hash, which retires every Impact Mapper session
+and discards the accumulated symbol map — the thing that makes the second commit
+cheaper than the first, and the strongest beat in the demo. Two days out, that
+trades a verified demo for a marginal gain on an axis already satisfied: the
+GitHub App calls the REST API to open pull requests, and the rules name GitHub
+and APIs explicitly.
+
+If it is built later, warm the sessions again before recording anything.
 
 ---
 
@@ -292,72 +306,45 @@ All six are weighted equally.
 
 ---
 
-## Three days, in order
+## What is left
 
-Sequenced so everything blocking is done before anything optional starts. If a day
-slips, cut from the bottom of that day, never from the top of the next.
+Everything below needs a person. The code is done.
 
-### Thursday 27 August — tonight
+### 1. Put the live URL in the README — **5 minutes**
 
-- [x] ~~Add the MIT `LICENSE` file~~ — done
-- [x] ~~Write the **Qodo Code Review Evidence** section~~ — done
-- [x] ~~Sandbox the docs build, default it on, surface where each check ran~~ —
-      done, on `feat/sandbox-validation`
-- [ ] Merge PRs #1, #2 and #3 — **P0**, in hand separately
-- [ ] Open `feat/sandbox-validation` as a PR so **Qodo reviews the sandbox work
-      tonight**, not on Sunday. It is a safety-critical change; a review trail on
-      it is worth more than a review trail on anything else in the repo
+The app is deployed and healthy at **https://docxy-lilac.vercel.app** — `/`,
+`/login` and `/signup` all serve, and `/dashboard` correctly redirects to sign-in.
+It is not linked from the README, so nobody arriving at the repository knows it
+exists. Add it to the top.
 
-### Friday 28 August — full day
+(`docxy.vercel.app` is a different, stale project — `/login` 404s and
+`/dashboard` 500s there. Do not link that one.)
 
-Prove the sandbox against a real Daytona account, then close the loose ends.
+### 2. Record the demo — **blocking**
 
-- [x] ~~Run the pipeline end to end with a live sandbox~~ — done 27 Aug, two runs,
-      two pull requests, `where=sandbox` on the record
-- [ ] Act on Qodo's review of `feat/sandbox-validation`, then merge it
-- [ ] Give `.github/workflows/docxy.yml`'s protected `docxy-approval` environment
-      a proper callout in the README — it is the strongest safety artifact in the
-      repo and it is currently a footnote
-- [x] ~~Reconcile `PLAN.md` with what shipped~~ — now
-      [`guides/ORIGINAL-PLAN.md`](ORIGINAL-PLAN.md)
-- [ ] *Only if the above is finished:* wire the Impact Mapper to the GitHub MCP
-      server — P1
+Shot list in [WRITEUP.md](WRITEUP.md), commands in [DEMO.md](DEMO.md). Two things
+to rehearse rather than trust:
 
-### Saturday 29 August — full day
+- The two-commit reuse beat. Sessions are already warm from the 27 August runs,
+  so it should report *session reused* immediately — but run it once before
+  recording to be sure, because a cold session makes the beat vanish.
+- The sandbox badge. `DOCXY_DOCS_BUILD_COMMAND` must be set or the docs-build
+  check is skipped and the sandbox never appears. It is set in `.env` now.
 
-Rehearse, then record.
+Check the recording and the repo for keys before uploading.
 
-- [ ] Deploy the dashboard and put the URL at the top of the README
-- [ ] Run the two-commit demo end to end, twice, for real. Time it. The second run
-      must visibly say **session reused**
-- [ ] Record the three-minute video
-- [ ] Check the video and repo for keys and personal data before anything is
-      uploaded
-- [ ] Write the submission writeup: what the agent does, how TrueForge is central,
-      where the sandbox and the gate sit
+### 3. Submit — **by 14:00 London on 30 August**
 
-The video, shot by shot — [guides/DEMO.md](DEMO.md) has the working commands:
+Six hours of buffer, not zero. The writeup is [WRITEUP.md](WRITEUP.md); paste it.
 
-| Time | Shot |
-|---|---|
-| 0:00–0:25 | The problem, on a real stale doc |
-| 0:25–1:15 | One commit in; five roles report out on the timeline |
-| 1:15–1:50 | **The sandbox running the docs build.** Hold on this, and on the `sandbox` badge in the validation report — it is the shot the rules ask a judge to see |
-| 1:50–2:25 | **The gate.** The draft PR carrying its own objections, and the protected `docxy-approval` environment holding the publish job until a person clicks |
-| 2:25–3:00 | The second commit reusing what the first learned |
+### 4. Then the open tracks, after submitting
 
-### Sunday 30 August — until 20:00
-
-Submit early, then spend the rest on the open tracks.
-
-- [ ] **Submit by 14:00 London.** Six hours of buffer, not zero. Nothing new ships
-      after this point
-- [ ] Write the Field Report blog post — the honest version, including what this
-      audit found and what changed on Friday. It is an open track, it costs two
-      hours, and a post about discovering your own safety defaults were backwards
-      reads better than a feature tour
-- [ ] Post the demo clip tagging WeMakeDevs, TrueFoundry and Qodo, for the Radio
-      Traffic track
+- **Field Report** — the blog post. The honest version writes itself: a
+  submission audit found the safety story was backwards, the sandbox was off by
+  default with a paragraph defending it, and the fix turned up an SDK docstring
+  that was wrong in a way that cost a working sandbox. That reads better than a
+  feature tour.
+- **Radio Traffic** — post the demo clip tagging WeMakeDevs, TrueFoundry and Qodo.
 
 ---
 
@@ -390,18 +377,17 @@ than days and sit outside the judged set. Do both on Sunday, after submitting.
 | ✅ | Public repository with a README a stranger can follow | done |
 | ✅ | Built during the hackathon window — first commit 25 August | done |
 | ✅ | TrueForge central to the project, not a thin model wrapper | done |
-| ✅ | Qodo reviewing pull requests | done |
-| ✅ | Reaches a real tool — GitHub REST via the App | done |
-| ☐ | At least one **merged** Qodo-reviewed pull request | Thu |
+| ✅ | At least one **merged** Qodo-reviewed PR | #2, #3, #4 merged |
 | ✅ | README section documenting the Qodo review findings | done |
-| ✅ | Open-source LICENSE file | done |
-| ✅ | Code executing in an isolated sandbox, on by default | done |
-| ✅ | Sandbox path exercised on a live run | done |
+| ✅ | Reaches a real tool — GitHub REST via the App | done |
+| ✅ | Code executing in an isolated sandbox, on by default | done, verified live |
 | ✅ | A human gate before anything merges — at the PR, and at the CI environment | by design |
-| ☐ | Three-minute demo video showing tool, sandbox and pause | Sat |
-| ☐ | Writeup: what it does and how it uses TrueForge | Sat |
-| ☐ | No API keys or personal data in the repo or the video | Sat |
-| ☐ | Submitted before 20:00 London | Sun |
+| ✅ | Open-source LICENSE file | done |
+| ✅ | Writeup: what it does and how it uses TrueForge | [WRITEUP.md](WRITEUP.md) |
+| ☐ | Live dashboard linked from the README | deployed, needs the link |
+| ☐ | Three-minute demo video showing tool, sandbox and pause | you |
+| ☐ | No API keys or personal data in the repo or the video | check before upload |
+| ☐ | Submitted before 20:00 London | 30 Aug |
 
 ---
 

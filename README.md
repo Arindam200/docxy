@@ -13,6 +13,9 @@ last reviews their work before anything is published. Everything is validated
 first, and **a proposal that fails those checks opens as a draft that says why,
 never as a clean pull request.**
 
+**→ [See it running](https://docxy-lilac.vercel.app)** — the dashboard, with the
+timeline, the validation report, and the sandbox each run executed in.
+
 **→ [Set it up locally](guides/LOCAL-SETUP.md)** — from nothing to a
 documentation pull request on your own repository.
 

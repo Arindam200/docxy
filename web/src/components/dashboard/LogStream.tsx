@@ -8,7 +8,9 @@ const KIND_CLASS: Record<string, string> = {
   subagent: "text-warn",
   result: "text-ok",
   approval: "text-warn",
-  sandbox: "text-muted",
+  // The one kind that proves code ran somewhere it could not do harm. It was
+  // styled the same as `resume` and `tool`, which buried it.
+  sandbox: "text-ok",
   resume: "text-muted",
   tool: "text-muted",
   mcp: "text-muted",

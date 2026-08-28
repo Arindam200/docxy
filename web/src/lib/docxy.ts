@@ -144,7 +144,12 @@ export interface RunDetail extends RunSummary {
     skipped: Array<{ path: string; reason: string }>;
   };
   changelog?: { entry: string; section: string; semverBump: string; bumpRationale: string };
-  validation?: { ok: boolean; checks: ValidationCheck[] };
+  validation?: {
+    ok: boolean;
+    checks: ValidationCheck[];
+    /** What the sandbox did, when a check ran in one. */
+    events?: Array<{ at: string; kind: string; text: string }>;
+  };
   approval?: {
     id: string;
     scope: string;

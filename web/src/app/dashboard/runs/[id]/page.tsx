@@ -7,6 +7,7 @@ import { StatusChip } from "@/components/dashboard/RunTimeline";
 import { Waterfall } from "@/components/dashboard/Waterfall";
 import { TokenBreakdown } from "@/components/dashboard/TokenBreakdown";
 import { RoleInspector } from "@/components/dashboard/RoleInspector";
+import { SandboxTrail } from "@/components/dashboard/SandboxTrail";
 
 export const dynamic = "force-dynamic";
 
@@ -139,6 +140,10 @@ export default async function RunPage({ params }: { params: Promise<{ id: string
             ))}
           </ul>
         </section>
+      )}
+
+      {run.validation && (
+        <SandboxTrail checks={run.validation.checks} events={run.validation.events} />
       )}
 
       {run.approval && (
