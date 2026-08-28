@@ -56,6 +56,25 @@ if (!Number.isFinite(port) || port <= 0) {
   throw new Error(`PORT is not a usable port number: ${process.env.PORT}`);
 }
 
+/**
+ * Refuse to expose an unauthenticated API.
+ *
+ * This entry point binds every interface by design, and the routes behind it
+ * sign off proposals, start runs and rewrite the instructions the agents read.
+ * `docxy serve` may leave `DOCXY_API_TOKEN` unset because it stays on
+ * loopback; here that combination puts approval endpoints on the public
+ * internet. Failing to boot is the loud version of a problem whose quiet
+ * version is silent and much worse.
+ */
+if (!config.server.apiToken) {
+  throw new Error(
+    'DOCXY_API_TOKEN is not set. This entry point binds 0.0.0.0, and the API it ' +
+      'serves can approve proposals and open pull requests, so it will not start ' +
+      'without a shared secret. Generate one with `openssl rand -hex 32` and set it ' +
+      'here and on the dashboard, which sends it as a bearer token.',
+  );
+}
+
 // 0.0.0.0, not localhost: a container's loopback is not reachable from outside it.
 serve({ fetch: app.fetch, port, hostname: '0.0.0.0' }, (info) => {
   console.log(`docxy listening on 0.0.0.0:${info.port}`);

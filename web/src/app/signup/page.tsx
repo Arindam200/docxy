@@ -4,7 +4,7 @@ import Link from "next/link";
 import { AuthShell } from "@/components/auth/AuthShell";
 import { CredentialsForm } from "@/components/auth/CredentialsForm";
 import { SetupNotice } from "@/components/auth/SetupNotice";
-import { authReady, githubConfigured, googleConfigured, missingEnv } from "@/lib/env";
+import { authReady, githubConfigured, googleConfigured, missingEnv, signupOpen } from "@/lib/env";
 import { safeNext } from "@/lib/redirect";
 
 export const metadata: Metadata = {
@@ -40,7 +40,9 @@ export default async function SignupPage({
         </>
       }
     >
-      {authReady() ? (
+      {!authReady() ? (
+        <SetupNotice missing={missingEnv()} />
+      ) : signupOpen() ? (
         <CredentialsForm
           mode="signup"
           next={next}
@@ -48,7 +50,17 @@ export default async function SignupPage({
           github={githubConfigured()}
         />
       ) : (
-        <SetupNotice missing={missingEnv()} />
+        /* Registration is closed, so showing a form that will be refused on
+           submit only wastes the reader's time. Say it here instead. */
+        <div className="rounded-lg border border-rule bg-surface/50 p-4 text-sm leading-relaxed text-muted">
+          <p className="font-medium text-foreground">Registration is closed on this deployment.</p>
+          <p className="mt-2">
+            Accounts are created by whoever runs this instance, because an operator can
+            approve pull requests. Ask them for access, or set{" "}
+            <code className="rounded bg-background px-1 py-0.5 text-xs">DOCXY_ALLOW_SIGNUP=1</code>{" "}
+            if that is you.
+          </p>
+        </div>
       )}
       <p className="text-center text-xs leading-relaxed text-muted">
         Your name, email, and avatar are used only to identify your reviews and sign-offs.

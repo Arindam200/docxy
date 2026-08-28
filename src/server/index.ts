@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Hono } from 'hono';
@@ -92,6 +93,52 @@ export interface ServerHandle {
   port: number;
 }
 
+/**
+ * Constant-time comparison of the API's shared secret against what a caller
+ * offered. Exported so the rule can be tested without standing a server up.
+ *
+ * Length is checked first because `timingSafeEqual` throws on a length
+ * mismatch, and the length of the secret is not the part worth hiding.
+ */
+export function tokenMatches(expected: string, offered: string | undefined): boolean {
+  const value = offered?.replace(/^Bearer\s+/i, '').trim() ?? '';
+  // Compare the buffers' byte lengths, not the strings'. A JavaScript string
+  // length counts UTF-16 units, so a header of non-ASCII characters can match
+  // the expected length and still produce a longer buffer — and
+  // `timingSafeEqual` throws on that, turning a wrong password into a 500.
+  const a = Buffer.from(value, 'utf8');
+  const b = Buffer.from(expected, 'utf8');
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+/**
+ * Whether a push delivery names a repository this deployment will act on.
+ *
+ * An empty allowlist keeps the multi-repo behaviour the webhook was built for;
+ * a populated one is an operator naming the repositories in play.
+ */
+export function repoAllowed(allowed: string[], repository: string): boolean {
+  return allowed.length === 0 || allowed.includes(repository.toLowerCase());
+}
+
+/** GitHub sends a full object name in `after`; anything else is not a push. */
+export function isCommitSha(value: string): boolean {
+  return /^[0-9a-f]{40}$/.test(value);
+}
+
+/**
+ * Whether a bind address keeps the server on this machine.
+ *
+ * Anything else is reachable by something that is not this process's operator,
+ * which is what makes an absent API token a problem rather than a preference.
+ */
+export function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  // `127.` with the dot, so `1270.0.0.1` is not mistaken for a loopback octet.
+  return host === 'localhost' || host === '::1' || host.startsWith('127.');
+}
+
 /** The app to serve, and the bus the pipeline publishes run events onto. */
 export interface ServerParts {
   app: Hono;
@@ -154,7 +201,56 @@ export function createServer(client: TrueForge, config: Config): ServerParts {
     return c.json({ error: message }, 500);
   });
 
+  /**
+   * The API's own front door.
+   *
+   * Better Auth guards the Next.js proxy, but the proxy is not the only way
+   * here: the deployed entry point binds `0.0.0.0`, and these routes approve
+   * runs, open pull requests and rewrite the standing instructions the agents
+   * read. A caller that can reach the port would otherwise skip the sign-in
+   * entirely, which makes the approval gate decorative.
+   *
+   * `/webhook` is exempt because it carries its own proof — an HMAC over the
+   * body with the App's secret — and GitHub cannot be asked to send a bearer
+   * token. `/` and `/health` are exempt because they are the landing page and
+   * the platform's liveness probe, and neither reads a run.
+   */
+  app.use('/api/*', async (c, next) => {
+    const expected = config.server.apiToken;
+    if (!expected) return next();
+
+    if (!tokenMatches(expected, c.req.header('authorization'))) {
+      return c.json({ error: 'This API requires DOCXY_API_TOKEN as a bearer token.' }, 401);
+    }
+    return next();
+  });
+
+  /**
+   * The built-in page, and why it stands down when a token is set.
+   *
+   * This page drives itself from the browser: `fetch('/api/...')` and an
+   * `EventSource` on `/api/events`, neither carrying a credential. That is
+   * exactly right for `docxy serve` on loopback, and impossible once the API
+   * wants a bearer token — `EventSource` cannot send headers at all, so the
+   * live feed would fail no matter what the page did.
+   *
+   * A token means this is a deployment, and a deployment's operator UI is the
+   * Next dashboard. Serving a second dashboard that silently 401s on every
+   * panel is worse than not serving one, so it says what it is instead.
+   */
   app.get('/', async (c) => {
+    if (config.server.apiToken) {
+      return c.html(
+        `<!doctype html><meta charset="utf-8"><title>docxy API</title>` +
+          `<style>body{font:16px/1.6 system-ui,sans-serif;max-width:34rem;margin:20vh auto;padding:0 1.5rem}` +
+          `code{background:#f4f4f5;padding:.15em .4em;border-radius:.25rem}</style>` +
+          `<h1>docxy API</h1>` +
+          `<p>This API requires <code>DOCXY_API_TOKEN</code> as a bearer token, so the ` +
+          `built-in page cannot drive it from a browser. Use the dashboard, which holds ` +
+          `the token server-side.</p>` +
+          `<p><code>GET /health</code> is open and reports whether the harness is reachable.</p>`,
+      );
+    }
     const html = await readFile(join(PACKAGE_ROOT, 'src/server/public/index.html'), 'utf8');
     return c.html(html);
   });
@@ -643,6 +739,23 @@ export function createServer(client: TrueForge, config: Config): ServerParts {
     if (!commit) {
       return c.json({ ok: true, ignored: 'payload named no commit' });
     }
+    // `after` is interpolated into git commands and used as a queue key. GitHub
+    // only ever sends a full object name here, so anything else did not come
+    // from a push this should act on.
+    if (!isCommitSha(commit)) {
+      return c.json({ ok: true, ignored: 'payload named no usable commit' });
+    }
+
+    // The webhook secret belongs to the App, not to a repository, so every
+    // installation of this App produces deliveries that pass the HMAC above.
+    // Token minting already bounds what can actually be cloned — it is scoped
+    // to one `GITHUB_APP_INSTALLATION_ID` — but an operator who has named the
+    // repositories in play gets to have that enforced before any work queues.
+    if (!repoAllowed(config.server.allowedRepos, repository)) {
+      // 200, not 403: the delivery is genuine and correctly signed, it is just
+      // not ours to act on. Rejecting it would make GitHub retry it forever.
+      return c.json({ ok: true, ignored: `${repository} is not in DOCXY_ALLOWED_REPOS` });
+    }
 
     // The delivery names a commit the checkout has probably never seen — it was
     // authored wherever the pusher was, not here. Sync it first or the run dies
@@ -875,7 +988,27 @@ export function createServer(client: TrueForge, config: Config): ServerParts {
 
 export function startServer(client: TrueForge, config: Config): ServerHandle {
   const { app } = createServer(client, config);
-  const server = serve({ fetch: app.fetch, port: config.server.port });
+  // Loopback, deliberately. `serve` is the developer-at-a-terminal path and may
+  // run without `DOCXY_API_TOKEN`; Node's default of every interface would put
+  // unauthenticated approval endpoints on whatever network the laptop is on.
+  // The deployed path is `standalone.ts`, which binds 0.0.0.0 and refuses to
+  // start without the token.
+  const hostname = process.env.DOCXY_HOST?.trim() || '127.0.0.1';
+
+  // The override has to fail closed the same way the deployed path does, or it
+  // is simply a second way to publish the approval endpoints unauthenticated —
+  // and the quieter one, since nothing about `DOCXY_HOST=0.0.0.0` announces
+  // that it is switching the lock off.
+  if (!isLoopbackHost(hostname) && !config.server.apiToken) {
+    throw new Error(
+      `DOCXY_HOST is set to ${hostname}, which is reachable from outside this machine, ` +
+        'but DOCXY_API_TOKEN is not set — the approval and run endpoints would be open ' +
+        'to anyone who can reach the port. Set DOCXY_API_TOKEN, or leave DOCXY_HOST unset ' +
+        'to listen on loopback only.',
+    );
+  }
+
+  const server = serve({ fetch: app.fetch, port: config.server.port, hostname });
 
   // A listen failure arrives as an `error` event, and an `error` event with no
   // listener is a process-level throw — so the commonest mistake in local

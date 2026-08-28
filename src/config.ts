@@ -149,7 +149,35 @@ export interface Config {
      */
     sessionMaxTurns: number;
   };
-  server: { port: number };
+  server: {
+    port: number;
+    /**
+     * Shared secret the dashboard proxy presents to this API.
+     *
+     * The Hono app answers `/api/runs/:id/approve`, `/api/runs` and
+     * `PUT /api/instructions` — sign-off, execution and the standing
+     * instructions the agents read. Better Auth guards the Next.js proxy in
+     * front of it, but the proxy is not the only way in: the deployed entry
+     * point binds `0.0.0.0`, so anything that can route to the port speaks to
+     * these endpoints directly. Authentication at the proxy alone is a lock on
+     * one of two doors.
+     *
+     * Unset leaves the API open, which is only safe on loopback — so
+     * `standalone.ts` refuses to boot without it.
+     */
+    apiToken?: string;
+    /**
+     * Repositories a push webhook is allowed to start a run for.
+     *
+     * Empty means "any repository this GitHub App installation can mint a token
+     * for", which is the multi-repo behaviour the webhook was built for. The
+     * blast radius is already bounded — `installationToken` mints against a
+     * fixed `GITHUB_APP_INSTALLATION_ID`, so a repository outside that
+     * installation fails before it can be cloned — but an operator who knows
+     * exactly which repositories should be in play can say so here.
+     */
+    allowedRepos: string[];
+  };
   github: { token?: string; repo?: string; baseBranch: string };
   /**
    * Serve the skill packs as git-backed harness skills instead of inlining them
@@ -184,6 +212,14 @@ function envBool(key: string, fallback: boolean): boolean {
   const v = process.env[key];
   if (v === undefined || v === '') return fallback;
   return /^(1|true|yes|on)$/i.test(v);
+}
+
+/** A comma-separated env var as a trimmed list, with the blanks dropped. */
+function splitList(raw: string): string[] {
+  return raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 /**
@@ -312,7 +348,15 @@ export function loadConfig(overrides: Partial<{ repoPath: string }> = {}): Confi
       runTimeoutMs: Math.max(60, envInt('DOCXY_RUN_TIMEOUT_SECONDS', 2700)) * 1000,
       sessionMaxTurns: Math.max(0, envInt('DOCXY_SESSION_MAX_TURNS', 12)),
     },
-    server: { port: envInt('DOCXY_PORT', 4317) },
+    server: {
+      port: envInt('DOCXY_PORT', 4317),
+      // Trimmed here, once. Both dashboard callers trim before sending, so a
+      // value with stray whitespace would otherwise be "configured" on this
+      // side and a different string on theirs — every request a 401, for a
+      // reason nothing reports. All-whitespace is no token at all.
+      apiToken: env('DOCXY_API_TOKEN').trim() || undefined,
+      allowedRepos: splitList(env('DOCXY_ALLOWED_REPOS')).map((r) => r.toLowerCase()),
+    },
     github: {
       token: env('GITHUB_TOKEN') || env('GH_TOKEN') || undefined,
       repo: env('GITHUB_REPOSITORY') || undefined,

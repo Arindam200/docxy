@@ -19,6 +19,7 @@ import { planRetry } from '../src/pipeline/retry.js';
 import type { RoleName } from '../src/config.js';
 import type { DocEdit, RoleTrace, RunRecord } from '../src/types.js';
 import { buildReport } from '../src/server/observability.js';
+import { isCommitSha, isLoopbackHost, repoAllowed, tokenMatches } from '../src/server/index.js';
 import { sandboxEnabled } from '../src/agents/roles.js';
 import { validateProposal } from '../src/validate/index.js';
 import { sandboxAvailability } from '../src/validate/sandbox.js';
@@ -488,6 +489,103 @@ check('empty history has no rates',
   check('the last page ends the walk',
     nextPage('<https://api.github.com/x?page=1>; rel="prev"') === null);
   check('no link header ends the walk', nextPage(null) === null);
+}
+
+// --- the API's own front door --------------------------------------------
+// Better Auth guards the dashboard proxy, but the Hono API listens separately
+// and answers approve, deny, run and instructions. Anything that could route to
+// the port used to skip the sign-in entirely.
+{
+  const secret = 'a'.repeat(64);
+  check('the right token is accepted', tokenMatches(secret, `Bearer ${secret}`));
+  check('the scheme is optional', tokenMatches(secret, secret));
+  check('the scheme is case-insensitive', tokenMatches(secret, `bearer ${secret}`));
+  check('a wrong token of equal length is refused',
+    tokenMatches(secret, `Bearer ${'b'.repeat(64)}`) === false);
+  check('a truncated token is refused', tokenMatches(secret, `Bearer ${'a'.repeat(63)}`) === false);
+  // A prefix of the secret must not pass: the length check is what makes the
+  // comparison safe to run at all, not a shortcut around it.
+  check('a prefix of the token is refused', tokenMatches(secret, 'Bearer a') === false);
+  check('no header at all is refused', tokenMatches(secret, undefined) === false);
+  check('an empty header is refused', tokenMatches(secret, '') === false);
+  check('surrounding whitespace is tolerated', tokenMatches(secret, `Bearer  ${secret} `));
+
+  // `timingSafeEqual` throws when the buffers differ in length, and a string's
+  // length is not its byte length: 32 non-ASCII characters weigh more than 32
+  // bytes. Comparing the strings first turned a wrong credential into a 500.
+  const wideButSameCharCount = 'é'.repeat(64);
+  let threw = false;
+  try {
+    check('a non-ASCII token of equal character count is refused',
+      tokenMatches(secret, `Bearer ${wideButSameCharCount}`) === false);
+  } catch {
+    threw = true;
+  }
+  check('comparing a non-ASCII token does not throw', threw === false);
+}
+
+// --- where the CLI is allowed to listen -----------------------------------
+// `docxy serve` may run without a token because it stays on this machine. The
+// host override has to fail closed the same way the deployed path does.
+{
+  check('loopback v4 is local', isLoopbackHost('127.0.0.1'));
+  check('any 127.x is local', isLoopbackHost('127.99.1.2'));
+  check('localhost is local', isLoopbackHost('localhost'));
+  check('loopback v6 is local', isLoopbackHost('::1'));
+  check('bracketed loopback v6 is local', isLoopbackHost('[::1]'));
+  check('case and padding do not matter', isLoopbackHost('  LocalHost '));
+  check('all interfaces is not local', isLoopbackHost('0.0.0.0') === false);
+  check('a LAN address is not local', isLoopbackHost('192.168.1.10') === false);
+  check('a hostname is not local', isLoopbackHost('docxy.internal') === false);
+  // 127 has to be an octet, not a prefix of one.
+  check('a lookalike address is not local', isLoopbackHost('1270.0.0.1') === false);
+}
+
+// --- which repositories a webhook may start a run for ---------------------
+// The webhook secret belongs to the App, not to a repository, so every
+// installation of it produces deliveries that pass the signature check.
+{
+  const allowed = ['arindam200/docxy', 'arindam200/other'];
+  check('a listed repository is accepted', repoAllowed(allowed, 'Arindam200/docxy'));
+  check('an unlisted repository is refused', repoAllowed(allowed, 'someone/else') === false);
+  check('an empty allowlist keeps multi-repo behaviour', repoAllowed([], 'anyone/anything'));
+
+  const sha = '0'.repeat(40);
+  check('a full object name is a commit', isCommitSha(sha));
+  check('a short sha is not', isCommitSha('0123abc') === false);
+  check('a branch name is not', isCommitSha('HEAD') === false);
+  check('an argument-looking value is not', isCommitSha('--upload-pack=touch /tmp/x') === false);
+}
+
+// --- the API token and repository allowlist read from the environment -----
+{
+  const before = { ...process.env };
+
+  delete process.env.DOCXY_API_TOKEN;
+  delete process.env.DOCXY_ALLOWED_REPOS;
+  check('no token configured leaves the API open to the proxy',
+    loadConfig().server.apiToken === undefined);
+  check('no allowlist configured means every repository', loadConfig().server.allowedRepos.length === 0);
+
+  process.env.DOCXY_API_TOKEN = 'shhh';
+  check('a configured token is read', loadConfig().server.apiToken === 'shhh');
+
+  // Both dashboard callers trim before sending. If this side kept the padding,
+  // the token would be "set" here and a different string there — every request
+  // a 401 with nothing to point at.
+  process.env.DOCXY_API_TOKEN = '  shhh  ';
+  check('a padded token is trimmed to match the dashboard',
+    loadConfig().server.apiToken === 'shhh');
+  process.env.DOCXY_API_TOKEN = '   ';
+  check('an all-whitespace token counts as unset',
+    loadConfig().server.apiToken === undefined);
+
+  process.env.DOCXY_ALLOWED_REPOS = ' Arindam200/Docxy , arindam200/other ,, ';
+  const repos = loadConfig().server.allowedRepos;
+  check('the allowlist is split, trimmed and lowercased',
+    repos.length === 2 && repos[0] === 'arindam200/docxy' && repos[1] === 'arindam200/other');
+
+  process.env = before;
 }
 
 // --- sandbox execution ----------------------------------------------------
