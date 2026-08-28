@@ -310,17 +310,30 @@ All six are weighted equally.
 
 Everything below needs a person. The code is done.
 
-### 1. Put the live URL in the README — **5 minutes**
+### 1. Merge the sandbox work — **waiting on Qodo**
+
+[PR #6](https://github.com/Arindam200/docxy/pull/6) carries the sandbox, the
+dashboard changes and the docs. Qodo reviewed it and found eight bugs; seven are
+fixed in `a358381` and the eighth — that the sandbox carries only the proposed
+files, so a full-tree docs build cannot run there — is answered on the record as
+a design limit rather than patched. Merge once the re-review comes back clean.
+
+The sharpest finding is worth knowing before the demo: the host fallback
+defeated the isolation. Any unavailable sandbox used to stage the proposal and
+run the command here instead. It is opt-in now
+(`DOCXY_SANDBOX_FALLBACK=local`), and the default reports the build unvalidated.
+That is the safer default and it is also the better story on camera.
+
+### 2. Put the live URL in the README — **done**
 
 The app is deployed and healthy at **https://docxy-lilac.vercel.app** — `/`,
-`/login` and `/signup` all serve, and `/dashboard` correctly redirects to sign-in.
-It is not linked from the README, so nobody arriving at the repository knows it
-exists. Add it to the top.
+`/login` and `/signup` all serve, and `/dashboard` correctly redirects to
+sign-in. The README now links it at the top.
 
 (`docxy.vercel.app` is a different, stale project — `/login` 404s and
 `/dashboard` 500s there. Do not link that one.)
 
-### 2. Record the demo — **blocking**
+### 3. Record the demo — **blocking**
 
 Shot list in [WRITEUP.md](WRITEUP.md), commands in [DEMO.md](DEMO.md). Two things
 to rehearse rather than trust:
@@ -333,11 +346,11 @@ to rehearse rather than trust:
 
 Check the recording and the repo for keys before uploading.
 
-### 3. Submit — **by 14:00 London on 30 August**
+### 4. Submit — **by 14:00 London on 30 August**
 
 Six hours of buffer, not zero. The writeup is [WRITEUP.md](WRITEUP.md); paste it.
 
-### 4. Then the open tracks, after submitting
+### 5. Then the open tracks, after submitting
 
 - **Field Report** — the blog post. The honest version writes itself: a
   submission audit found the safety story was backwards, the sandbox was off by
@@ -384,7 +397,7 @@ than days and sit outside the judged set. Do both on Sunday, after submitting.
 | ✅ | A human gate before anything merges — at the PR, and at the CI environment | by design |
 | ✅ | Open-source LICENSE file | done |
 | ✅ | Writeup: what it does and how it uses TrueForge | [WRITEUP.md](WRITEUP.md) |
-| ☐ | Live dashboard linked from the README | deployed, needs the link |
+| ✅ | Live dashboard linked from the README | done |
 | ☐ | Three-minute demo video showing tool, sandbox and pause | you |
 | ☐ | No API keys or personal data in the repo or the video | check before upload |
 | ☐ | Submitted before 20:00 London | 30 Aug |
