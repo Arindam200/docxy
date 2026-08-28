@@ -59,6 +59,7 @@ export async function registerNebiusProvider(
   };
 
   const existing = await client.fetch('/api/v1/settings/model-providers');
+  // SAFETY: every field below is optional and read through `?.`, so a file with any other shape reads as absent rather than throwing.
   const listed = (await readJson(existing)) as { data?: Array<{ name?: string }> } | null;
   const alreadyThere =
     Array.isArray(listed?.data) &&
@@ -175,6 +176,7 @@ export async function listNebiusModels(config: Config): Promise<string[]> {
   if (!res.ok) {
     throw new Error(`Nebius /models returned HTTP ${res.status}: ${await res.text()}`);
   }
+  // SAFETY: a 2xx from this endpoint is the harness's own listing shape, and every field read off it is optional.
   const body = (await res.json()) as { data?: Array<{ id?: string }> };
   return (body.data ?? []).map((m) => m.id ?? '').filter(Boolean).sort();
 }

@@ -92,7 +92,13 @@ export interface ServerHandle {
   port: number;
 }
 
-export function createServer(client: TrueForge, config: Config): { app: Hono; bus: Broadcaster } {
+/** The app to serve, and the bus the pipeline publishes run events onto. */
+export interface ServerParts {
+  app: Hono;
+  bus: Broadcaster;
+}
+
+export function createServer(client: TrueForge, config: Config): ServerParts {
   const app = new Hono();
   const { runs, knowledge: knowledgeStore } = createStores(config);
   const bus = new Broadcaster();
@@ -177,6 +183,7 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
   });
 
   app.put('/api/instructions', async (c) => {
+    // SAFETY: a body that is not JSON falls back to `{}`, and every field below is optional and checked before use.
     const body = (await c.req.json().catch(() => ({}))) as { instructions?: string };
     if (typeof body.instructions !== 'string') {
       return c.json({ error: 'A string body field `instructions` is required.' }, 400);
@@ -567,6 +574,7 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
   };
 
   app.post('/api/runs', async (c) => {
+    // SAFETY: a body that is not JSON falls back to `{}`, and every field below is optional and checked before use.
     const body = (await c.req.json().catch(() => ({}))) as { commit?: string; force?: boolean };
     const ref = body.commit || 'HEAD';
 
@@ -762,6 +770,7 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
     const run = await scopedRun(c.req.param('id'));
     if (!run?.approval) return c.json({ error: 'No such run, or it has no approval request.' }, 404);
 
+    // SAFETY: a body that is not JSON falls back to `{}`, and every field below is optional and checked before use.
     const body = (await c.req.json().catch(() => ({}))) as { by?: string };
     const by = (body.by || '').trim();
     if (!by) return c.json({ error: 'A reviewer name is required to sign off.' }, 400);
@@ -804,6 +813,7 @@ export function createServer(client: TrueForge, config: Config): { app: Hono; bu
     const run = await scopedRun(c.req.param('id'));
     if (!run?.approval) return c.json({ error: 'No such run, or it has no approval request.' }, 404);
 
+    // SAFETY: a body that is not JSON falls back to `{}`, and every field below is optional and checked before use.
     const body = (await c.req.json().catch(() => ({}))) as { by?: string; reason?: string };
     const by = (body.by || '').trim();
     const reason = (body.reason || '').trim();

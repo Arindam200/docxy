@@ -34,7 +34,6 @@ import type { ProposedFile } from '../types.js';
 import { validateProposal } from '../validate/index.js';
 import { autoApprove, createApprovalRequest, decideScope } from '../approval/gate.js';
 import { openPullRequest } from '../github/pr.js';
-import { AgentOutputError } from '../agents/parse.js';
 
 export interface PipelineHooks {
   onRunUpdate?: (run: RunRecord) => void;
@@ -96,7 +95,7 @@ function truncate(text: string): string {
  * step with it.
  */
 function mergeBreakdown(into: RoleUsage['inputBreakdown'], from: TurnUsage['inputBreakdown']) {
-  const out = { ...(into ?? {}) };
+  const out = { ...into };
   for (const [key, value] of Object.entries(from)) out[key] = (out[key] ?? 0) + value;
   return out;
 }
@@ -218,11 +217,13 @@ export async function runPipeline(
     commit: { sha: diff.sha, shortSha: diff.shortSha, subject: diff.subject },
     startedAt: new Date().toISOString(),
     status: 'running',
-    ...(docsTree.branch ? { docsBranch: docsTree.branch } : {}),
     traces: [],
     priorSymbolCount: Object.keys(priorMap.symbols).length,
     newSymbolCount: 0,
   };
+  // Only a run that is documenting a separate docs branch carries the name of
+  // one; the rest have no such field rather than one holding `undefined`.
+  if (docsTree.branch) run.docsBranch = docsTree.branch;
 
   /**
    * Free-form standing instructions, as saved from the dashboard.

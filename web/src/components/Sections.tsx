@@ -90,13 +90,13 @@ const flow = [
   { stage: "pull request merges", kind: "event" },
 ] as const;
 
-const kindStyle: Record<string, string> = {
+const kindStyle = {
   event: "bg-zinc-50 text-zinc-500 border-zinc-200 font-mono text-xs",
   role: "bg-white text-zinc-900 border-zinc-300 text-sm font-semibold",
   parallel: "bg-white text-zinc-900 border-zinc-300 text-sm font-semibold",
   check: "bg-white text-zinc-900 border-zinc-300 text-sm font-semibold",
   gate: "bg-zinc-950 text-white border-zinc-950 text-sm font-semibold",
-};
+} satisfies Record<string, string>;
 
 export function HowItWorks() {
   return (

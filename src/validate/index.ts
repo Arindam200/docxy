@@ -21,6 +21,7 @@ async function runCommand(
     return { name, status: 'skipped', detail: 'no command configured' };
   }
   try {
+    // SAFETY: `shell: true` is a valid option this overload's types omit; the call is otherwise an ordinary exec.
     const { stdout, stderr } = await exec(command, {
       cwd,
       shell: true,
@@ -30,6 +31,7 @@ async function runCommand(
     const tail = `${stdout}${stderr}`.trim().split('\n').slice(-8).join('\n');
     return { name, status: 'pass', where: 'local', detail: tail || 'exited 0' };
   } catch (err) {
+    // SAFETY: a rejection from `exec` carries these three fields, and each is read as optional below.
     const e = err as { stdout?: string; stderr?: string; message?: string };
     const output = `${e.stdout ?? ''}${e.stderr ?? ''}`.trim();
     const tail = (output || e.message || 'command failed').split('\n').slice(-15).join('\n');

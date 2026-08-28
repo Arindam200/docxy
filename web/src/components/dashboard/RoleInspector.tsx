@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { RoleFailure, RoleTrace } from "@/lib/docxy";
 import { clockTime, duration, roleTitle } from "@/lib/format";
+import { lookup } from "@/lib/lookup";
 
 /**
  * One role, in full: what it was asked, what came back, what the pipeline made
@@ -17,7 +18,7 @@ import { clockTime, duration, roleTitle } from "@/lib/format";
 
 type Tab = "prompt" | "raw" | "parsed" | "events";
 
-const FAILURE_HELP: Record<RoleFailure, string> = {
+const FAILURE_HELP = {
   "harness-error":
     "The harness ended the turn in an error state. Read the raw output before the message — it usually explains what the message does not.",
   "parse-error":
@@ -32,7 +33,7 @@ const FAILURE_HELP: Record<RoleFailure, string> = {
   cancelled: "The harness cancelled the turn before it finished, usually a server-side execution timeout.",
   stalled:
     "The turn kept pausing for approvals or questions without ever settling on an answer. Nobody is attached to a pipeline run, so it was answered automatically and still did not converge.",
-};
+} satisfies Record<RoleFailure, string>;
 
 export function RoleInspector({
   traces,
@@ -192,13 +193,13 @@ function Body({ text, missing }: { text: string | undefined; missing: string }) 
   );
 }
 
-const KIND_CLASS: Record<string, string> = {
+const KIND_CLASS = {
   error: "text-danger",
   session: "text-accent",
   tool: "text-muted",
   subagent: "text-warn",
   result: "text-ok",
-};
+} satisfies Record<string, string>;
 
 function Events({ trace }: { trace: RoleTrace }) {
   if (trace.events.length === 0) {
@@ -210,7 +211,7 @@ function Events({ trace }: { trace: RoleTrace }) {
       {trace.events.map((event, index) => (
         <li key={`${event.at}-${index}`} className="flex gap-3 text-[11px]">
           <time className="w-20 shrink-0 tabular-nums text-muted">{clockTime(event.at)}</time>
-          <span className={`w-20 shrink-0 font-mono ${KIND_CLASS[event.kind] ?? "text-muted"}`}>
+          <span className={`w-20 shrink-0 font-mono ${lookup(KIND_CLASS, event.kind) ?? "text-muted"}`}>
             {event.kind}
           </span>
           <span className="min-w-0 flex-1 break-words leading-relaxed">{event.text}</span>

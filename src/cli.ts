@@ -55,7 +55,13 @@ const c = {
   cyan: (s: string) => `\x1b[36m${s}\x1b[0m`,
 };
 
-function parseFlags(argv: string[]): { positional: string[]; flags: Record<string, string> } {
+/** A parsed argv: the bare words, and the `--name=value` pairs. */
+interface ParsedArgs {
+  positional: string[];
+  flags: Record<string, string>;
+}
+
+function parseFlags(argv: string[]): ParsedArgs {
   const positional: string[] = [];
   const flags: Record<string, string> = {};
   for (let i = 0; i < argv.length; i += 1) {

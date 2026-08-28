@@ -18,7 +18,7 @@ export default async function RunPage({ params }: { params: Promise<{ id: string
 
   // The role a tab shows under "Parsed" is whichever run-level field that role
   // produced; the Coordinator's verdict survives only as the approval summary.
-  const parsed: Record<string, unknown> = {
+  const parsed = {
     "change-analyst": run.classification,
     "impact-mapper": run.impact,
     "docs-updater": run.docs,
@@ -26,7 +26,7 @@ export default async function RunPage({ params }: { params: Promise<{ id: string
     coordinator: run.approval
       ? { summary: run.approval.summary, scope: run.approval.scope }
       : undefined,
-  };
+  } satisfies Record<string, unknown>;
 
   return (
     <Page>

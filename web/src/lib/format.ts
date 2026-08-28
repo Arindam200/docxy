@@ -1,4 +1,5 @@
 /** Formatting shared across dashboard views. Pure, so it runs on either side. */
+import { lookup } from "./lookup";
 
 export function duration(ms: number | undefined): string {
   if (ms === undefined || ms < 0) return "—";
@@ -50,16 +51,16 @@ export function dateTime(iso: string): string {
   });
 }
 
-const ROLE_TITLES: Record<string, string> = {
+const ROLE_TITLES = {
   coordinator: "Coordinator",
   "change-analyst": "Change Analyst",
   "impact-mapper": "Impact Mapper",
   "docs-updater": "Docs Updater",
   "changelog-author": "Changelog Author",
-};
+} satisfies Record<string, string>;
 
 export function roleTitle(role: string): string {
-  return ROLE_TITLES[role] ?? role;
+  return lookup(ROLE_TITLES, role) ?? role;
 }
 
 /** Pipeline order, which is the order the dots and the waterfall read in. */

@@ -9,11 +9,11 @@ import { duration, roleTitle } from "@/lib/format";
  * explains why the wall-clock time is shorter than the sum of the parts.
  */
 
-const BAR_CLASS: Record<RoleTrace["status"], string> = {
+const BAR_CLASS = {
   running: "bg-accent",
   done: "bg-ok/70",
   failed: "bg-danger/70",
-};
+} satisfies Record<RoleTrace["status"], string>;
 
 export function Waterfall({ traces }: { traces: RoleTrace[] }) {
   if (traces.length === 0) return null;

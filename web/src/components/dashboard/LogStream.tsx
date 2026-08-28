@@ -1,8 +1,9 @@
 import Link from "next/link";
 import type { LogEntry } from "@/lib/docxy";
 import { clockTime, roleTitle } from "@/lib/format";
+import { lookup } from "@/lib/lookup";
 
-const KIND_CLASS: Record<string, string> = {
+const KIND_CLASS = {
   error: "text-danger",
   session: "text-accent",
   subagent: "text-warn",
@@ -14,7 +15,7 @@ const KIND_CLASS: Record<string, string> = {
   resume: "text-muted",
   tool: "text-muted",
   mcp: "text-muted",
-};
+} satisfies Record<string, string>;
 
 export function LogStream({ entries }: { entries: LogEntry[] }) {
   if (entries.length === 0) {
@@ -39,7 +40,7 @@ export function LogStream({ entries }: { entries: LogEntry[] }) {
         >
           <time className="w-20 shrink-0 tabular-nums text-muted">{clockTime(entry.at)}</time>
 
-          <span className={`w-20 shrink-0 ${KIND_CLASS[entry.kind] ?? "text-muted"}`}>
+          <span className={`w-20 shrink-0 ${lookup(KIND_CLASS, entry.kind) ?? "text-muted"}`}>
             {entry.kind}
           </span>
 

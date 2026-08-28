@@ -19,6 +19,7 @@
     "setup": "tsx src/cli.ts setup",
     "serve": "tsx src/cli.ts serve",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "oxlint .",
     "test": "tsx test/selftest.ts",
     "demo": "node scripts/create-demo-repo.mjs",
     "db:generate": "drizzle-kit generate",
