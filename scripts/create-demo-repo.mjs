@@ -9,7 +9,12 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
-const target = resolve(process.argv[2] ?? '.demo-repo');
+// Flags are not the target. `npm run demo -- --force` put `--force` in argv[2],
+// so the script built the demo repository in a directory literally named
+// `--force`, recreated it there on every run, and printed a `--repo --force`
+// hint that could not work.
+const positional = process.argv.slice(2).find((arg) => !arg.startsWith('-'));
+const target = resolve(positional ?? '.demo-repo');
 
 if (existsSync(target)) {
   if (process.argv.includes('--force')) rmSync(target, { recursive: true, force: true });
@@ -157,8 +162,16 @@ git(
   'feat!: rename --output to --format and add csv\n\nThe --output flag is gone. Callers must pass --format instead.\nAlso adds a csv format alongside table and json.',
 );
 
+// guides/DEMO.md says the remote is "already wired", and it was not: a rebuilt
+// demo repository had no `origin`, so the run reached the end of the pipeline
+// and failed at the one step the demo exists to show. Wiring it here is what
+// makes that sentence true.
+const remote = process.env.DOCXY_DEMO_REMOTE ?? 'https://github.com/Arindam200/docxy-demo.git';
+if (remote) git('remote', 'add', 'origin', remote);
+
 const log = execFileSync('git', ['log', '--oneline'], { cwd: target, encoding: 'utf8' });
 console.log(`Demo repository created at ${target}\n`);
+if (remote) console.log(`origin → ${remote}\n`);
 console.log(log);
 console.log(`Run the pipeline against it:
 

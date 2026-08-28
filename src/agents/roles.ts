@@ -39,14 +39,27 @@ function buildInstructions(role: {
 }
 
 /**
- * Shared runtime settings. Sandbox stays off by default: the harness requires it
- * for git-backed skills, and this pipeline inlines its skill packs instead so it
- * runs without a sandbox provider account.
+ * Whether a *drafting* role's session gets a sandbox.
+ *
+ * Only git-backed skills need one here. The five drafting roles read a diff and
+ * emit JSON; they execute nothing, so a sandbox buys them latency and a
+ * provisioned resource and no safety.
+ *
+ * `DOCXY_SANDBOX` deliberately does not appear in this decision. It governs
+ * where the docs build runs, and wiring it in here made every ordinary drafting
+ * turn depend on sandbox availability — the opposite of the validation-only
+ * promise the flag is documented with. The validator asks for its own sandbox
+ * directly, because for that one session the sandbox *is* the point.
  */
+export function sandboxEnabled(config: Config): boolean {
+  return config.useHarnessSkills;
+}
+
+/** Shared runtime settings for the five drafting roles. */
 function runtime(config: Config, opts: { subagents?: boolean } = {}): TrueForgeApi.RuntimeConfig {
   return {
     iterationLimit: 40,
-    sandbox: { enabled: config.useHarnessSkills },
+    sandbox: { enabled: sandboxEnabled(config) },
     dynamicSubAgents: { enabled: opts.subagents ?? false },
   };
 }

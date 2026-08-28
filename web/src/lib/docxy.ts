@@ -115,6 +115,11 @@ export interface ValidationCheck {
   name: string;
   status: "pass" | "fail" | "skipped";
   detail: string;
+  /**
+   * Where the check ran. Absent on checks that execute nothing, and on runs
+   * recorded before validation could run anywhere but the pipeline's own host.
+   */
+  where?: "sandbox" | "local";
 }
 
 /** The whole run record, as `GET /api/runs/:id` returns it. */
@@ -139,7 +144,12 @@ export interface RunDetail extends RunSummary {
     skipped: Array<{ path: string; reason: string }>;
   };
   changelog?: { entry: string; section: string; semverBump: string; bumpRationale: string };
-  validation?: { ok: boolean; checks: ValidationCheck[] };
+  validation?: {
+    ok: boolean;
+    checks: ValidationCheck[];
+    /** What the sandbox did, when a check ran in one. */
+    events?: Array<{ at: string; kind: string; text: string }>;
+  };
   approval?: {
     id: string;
     scope: string;

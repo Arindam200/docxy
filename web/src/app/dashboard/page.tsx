@@ -3,6 +3,7 @@ import { timeAgo, tokens } from "@/lib/format";
 import { Page, PageHead } from "@/components/dashboard/Page";
 import { StatCard } from "@/components/dashboard/StatCard";
 import { RunTimeline } from "@/components/dashboard/RunTimeline";
+import { Capabilities, NoRunsYet } from "@/components/dashboard/Capabilities";
 
 export const dynamic = "force-dynamic";
 
@@ -96,8 +97,14 @@ export default async function OverviewPage() {
             View all
           </a>
         </div>
-        <RunTimeline runs={list.slice(0, 5)} />
+        {list.length > 0 ? (
+          <RunTimeline runs={list.slice(0, 5)} />
+        ) : (
+          <NoRunsYet hasRepo={Boolean(config?.repoPath)} />
+        )}
       </section>
+
+      <Capabilities />
     </Page>
   );
 }

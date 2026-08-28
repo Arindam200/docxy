@@ -19,6 +19,9 @@ import { planRetry } from '../src/pipeline/retry.js';
 import type { RoleName } from '../src/config.js';
 import type { DocEdit, RoleTrace, RunRecord } from '../src/types.js';
 import { buildReport } from '../src/server/observability.js';
+import { sandboxEnabled } from '../src/agents/roles.js';
+import { validateProposal } from '../src/validate/index.js';
+import { sandboxAvailability } from '../src/validate/sandbox.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -479,6 +482,200 @@ check('empty history has no rates',
   check('the last page ends the walk',
     nextPage('<https://api.github.com/x?page=1>; rel="prev"') === null);
   check('no link header ends the walk', nextPage(null) === null);
+}
+
+// --- sandbox execution ----------------------------------------------------
+// The docs build is the one check that runs a command over text a model wrote.
+// It belongs in the sandbox, and the two reasons to have a sandbox — executing
+// validation, and serving git-backed skills — used to share one flag, so a
+// deployment could not have either without the other.
+{
+  const before = process.env;
+  process.env = { ...process.env };
+
+  const reload = () => loadConfig();
+
+  delete process.env.DOCXY_SANDBOX;
+  delete process.env.DOCXY_USE_HARNESS_SKILLS;
+  check('the sandbox is on by default', reload().sandbox.enabled === true);
+
+  process.env.DOCXY_SANDBOX = 'false';
+  check('the sandbox can be turned off', reload().sandbox.enabled === false);
+
+  // The drafting roles execute nothing, so DOCXY_SANDBOX — which governs where
+  // the docs build runs — must not provision them a sandbox each. Wiring it in
+  // here made ordinary drafting depend on sandbox availability.
+  delete process.env.DOCXY_SANDBOX;
+  check('a drafting role gets no sandbox just because the build wants one',
+    sandboxEnabled(reload()) === false);
+
+  // Skills are served from inside a sandbox, so asking for them asks for one.
+  process.env.DOCXY_USE_HARNESS_SKILLS = 'true';
+  check('harness skills do require a sandbox', sandboxEnabled(reload()) === true);
+
+  // The fallback is the security-relevant default: host execution has to be
+  // asked for, never inherited.
+  delete process.env.DOCXY_USE_HARNESS_SKILLS;
+  delete process.env.DOCXY_SANDBOX_FALLBACK;
+  check('an unreachable sandbox does not fall back to the host by default',
+    reload().sandbox.fallback === 'skip');
+  process.env.DOCXY_SANDBOX_FALLBACK = 'local';
+  check('host execution can be asked for explicitly', reload().sandbox.fallback === 'local');
+  process.env.DOCXY_SANDBOX_FALLBACK = 'nonsense';
+  check('an unrecognised fallback stays safe', reload().sandbox.fallback === 'skip');
+  delete process.env.DOCXY_SANDBOX_FALLBACK;
+
+  delete process.env.DOCXY_SANDBOX;
+  delete process.env.DOCXY_USE_HARNESS_SKILLS;
+  process.env.DAYTONA_API_KEY = 'dt-test-key';
+  check('the Daytona key is read', reload().sandbox.daytonaApiKey === 'dt-test-key');
+
+  process.env = before;
+}
+
+// --- validation reports where it ran --------------------------------------
+// A report that does not say where a command executed cannot be audited: the
+// same "docs-build passed" means two different things on a machine with a
+// sandbox and one without.
+{
+  const before = process.env;
+  process.env = { ...process.env };
+  delete process.env.DOCXY_DOCS_BUILD_COMMAND;
+  process.env.DOCXY_TEST_COMMAND = 'true';
+
+  const config = loadConfig();
+  const report = await validateProposal({
+    config,
+    applied: { files: [], problems: [] },
+    changelogFile: null,
+    classification: {
+      kind: 'fix',
+      surface: 'docs-only',
+      summary: 's',
+      changedSymbols: [],
+      breakingRationale: '',
+      confidence: 1,
+    },
+    changelog: undefined,
+    docsPath: config.repoPath,
+    stageable: false,
+    // No client: nothing can reach a sandbox, so every command runs locally.
+  });
+
+  const tests = report.checks.find((c) => c.name === 'tests');
+  check('a locally executed check says so', tests?.where === 'local');
+  check('a check that executes nothing claims no location',
+    report.checks.find((c) => c.name === 'link-check')?.where === undefined);
+
+  const build = report.checks.find((c) => c.name === 'docs-build');
+  check('no docs build command is skipped, not failed', build?.status === 'skipped');
+
+  process.env = before;
+}
+
+// --- an unvalidated build never reads as validated ------------------------
+// `ValidationReport.ok` rejects only `fail`, so anything that reports itself
+// `skipped` sails through. A configured docs build that could not run is not a
+// skipped one — it is a proposal nobody checked, and it used to publish clean.
+{
+  const before = process.env;
+  process.env = { ...process.env };
+  process.env.DOCXY_DOCS_BUILD_COMMAND = 'echo hi';
+  delete process.env.DOCXY_TEST_COMMAND;
+  delete process.env.DOCXY_SANDBOX_FALLBACK;
+
+  const config = loadConfig();
+  const report = await validateProposal({
+    config,
+    applied: { files: [], problems: [] },
+    changelogFile: null,
+    classification: {
+      kind: 'fix', surface: 'docs-only', summary: 's',
+      changedSymbols: [], breakingRationale: '', confidence: 1,
+    },
+    changelog: undefined,
+    docsPath: config.repoPath,
+    stageable: false,
+    // A client that cannot answer: the sandbox is unreachable, so the fallback
+    // policy is what decides.
+    // SAFETY: `sandboxAvailability` reaches only for `fetch`.
+    client: { fetch: async () => new Response('{}', { status: 500 }) } as never,
+  });
+
+  const build = report.checks.find((c) => c.name === 'docs-build');
+  check('an unreachable sandbox fails the build rather than skipping it',
+    build?.status === 'fail');
+  check('and the run is not ok', report.ok === false);
+  check('and it says host execution was declined, not attempted',
+    (build?.detail ?? '').includes('DOCXY_SANDBOX_FALLBACK'));
+
+  process.env = before;
+}
+
+// --- sandbox availability -------------------------------------------------
+// `/capabilities` is the authority and the SDK docstring for it is wrong: it
+// says "whether a sandbox provider is configured", but the harness answers true
+// when EITHER a remote provider is ready OR it is running standalone with local
+// sandbox support. Reading `/settings/sandbox-providers` instead — which 404s on
+// exactly that standalone harness — sent validation to local execFile on a
+// machine whose harness was ready to isolate it.
+{
+  // SAFETY: `sandboxAvailability` reaches for exactly one member of the client,
+  // `fetch`, so a stub carrying only that member satisfies every path under test.
+  const clientOf = (routes: Record<string, { status: number; body: unknown }>) =>
+    ({
+      fetch: async (path: string) => {
+        const hit = routes[path] ?? { status: 404, body: {} };
+        return new Response(JSON.stringify(hit.body), { status: hit.status });
+      },
+    }) as never;
+
+  const CAPS = '/api/v1/capabilities';
+  const PROV = '/api/v1/settings/sandbox-providers';
+
+  // The standalone case: no provider configured, sandbox still real.
+  const standalone = await sandboxAvailability(
+    clientOf({
+      [CAPS]: { status: 200, body: { data: { sandbox: { enabled: true } } } },
+      [PROV]: { status: 404, body: { error: { message: 'No sandbox provider configured' } } },
+    }),
+  );
+  check('a standalone harness with no provider still has a sandbox',
+    standalone.available === true);
+  check('and it is named as the local one', standalone.backend === 'local');
+
+  const daytona = await sandboxAvailability(
+    clientOf({
+      [CAPS]: { status: 200, body: { data: { sandbox: { enabled: true } } } },
+      [PROV]: { status: 200, body: { data: { status: 'ready' } } },
+    }),
+  );
+  check('a ready remote provider is available', daytona.available === true);
+  check('and it is named as daytona', daytona.backend === 'daytona');
+
+  // Configured but still building: capabilities is what decides, and a harness
+  // that says no sandbox gets none regardless of what settings holds.
+  const building = await sandboxAvailability(
+    clientOf({
+      [CAPS]: { status: 200, body: { data: { sandbox: { enabled: false } } } },
+      [PROV]: { status: 200, body: { data: { status: 'pending' } } },
+    }),
+  );
+  check('capabilities decides, not the provider record', building.available === false);
+  check('and it says how to get one', (building.reason ?? '').includes('docxy setup'));
+
+  // Naming the backend is cosmetic; losing it must not cost a working sandbox.
+  const unnameable = await sandboxAvailability(
+    clientOf({
+      [CAPS]: { status: 200, body: { data: { sandbox: { enabled: true } } } },
+      [PROV]: { status: 500, body: {} },
+    }),
+  );
+  check('an unreadable provider record does not withdraw the sandbox',
+    unnameable.available === true && unnameable.backend === 'local');
+
+  const broken = await sandboxAvailability(clientOf({ [CAPS]: { status: 500, body: {} } }));
+  check('an erroring harness is unavailable, not assumed ready', broken.available === false);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

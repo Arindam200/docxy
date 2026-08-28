@@ -13,6 +13,9 @@ last reviews their work before anything is published. Everything is validated
 first, and **a proposal that fails those checks opens as a draft that says why,
 never as a clean pull request.**
 
+**→ [See it running](https://docxy-lilac.vercel.app)** — the dashboard, with the
+timeline, the validation report, and the sandbox each run executed in.
+
 **→ [Set it up locally](guides/LOCAL-SETUP.md)** — from nothing to a
 documentation pull request on your own repository.
 
@@ -62,7 +65,8 @@ this project builds.
                               ▼
                     ┌──────────────────────┐
                     │      Validation      │  anchors resolve · links resolve
-                    │                      │  semver consistent · build · tests
+                    │   (docs build in a   │  semver consistent · tests
+                    │        sandbox)      │  docs build runs in the sandbox
                     └──────────┬───────────┘
                                ▼
                     ┌──────────────────────┐
@@ -128,9 +132,47 @@ classification paired with anything below a `major` bump is rejected as
 internally inconsistent. Your repo's own docs-build and test commands run too,
 if you configure them.
 
-Validation runs **against the working copy on disk**, not a remote sandbox, so it
-needs no third-party account. TrueForge's own sandbox can be switched on with
-`DOCXY_USE_HARNESS_SKILLS=true` if you'd rather run it there.
+The checks divide by who wrote what they run over. Anchors, links and semver
+consistency only *read* the proposed text. The docs build **executes** it — a
+command, over prose a model finished writing a minute earlier — so that one runs
+**inside the harness sandbox**, never against your checkout. A run stages the
+proposal into a fresh sandbox, builds it there, and reports the exit code back:
+
+```
+validation
+  ✓ edits-apply         3 file(s) patched cleanly
+  ✓ link-check          no broken relative links or anchors
+  ✓ semver-consistency  breaking -> major
+  ✓ docs-build          markdown files: 4 | unbalanced fences: []   [sandbox]
+```
+
+**This needs no third-party account.** A harness started with
+`npx @truefoundry/trueforge@latest` carries its own sandbox — a Seatbelt
+confinement on macOS, a bubblewrap namespace on Linux, both with an allow-listed
+filesystem and allow-listed network egress. That is where the build runs by
+default. Set `DAYTONA_API_KEY` and run `docxy setup` to use a remote Daytona
+sandbox instead; the run names which one it used, and `docxy doctor` tells you
+before a run does.
+
+**The sandbox receives the proposed files and nothing else.** Not the repository,
+not `package.json`, not `node_modules`. So `DOCXY_DOCS_BUILD_COMMAND` has to be a
+command that works on markdown alone — a linter, a fence or front-matter check, a
+link checker. A full site build (`mkdocs build`, `npm run docs:build`) needs a
+tree that is not there and will report that it could not run. That is a real
+limit of this design, not an oversight: shipping the whole checkout into a
+sandbox on every commit costs more than the check is worth, and the check that
+matters — does the *proposed prose* hold up — does not need it.
+
+**If the sandbox cannot run it, the build is reported unvalidated.** It does not
+quietly run here instead. An isolation boundary that disappears when nobody is
+watching is not one, so the check fails, says why, and the proposal opens as a
+draft carrying the reason. `DOCXY_SANDBOX_FALLBACK=local` opts into host
+execution for operators who would rather have the coverage, and the report then
+tags the check `local` instead of `sandbox`.
+
+Your own test suite is the exception, and stays on the host on purpose: it is
+your code, not the proposal's, already trusted enough to be checked out, and it
+needs the whole working tree.
 
 ### 3. The pull request is the gate — and a graduated one is there if you want it
 
@@ -156,8 +198,29 @@ gate as well:
 - **Nothing expires.** A request nobody answers stays pending and is reported
   stale. It never auto-approves and never auto-discards.
 
-In CI this maps onto a protected GitHub environment, so GitHub itself holds the
-job open until a human clicks approve — see [`.github/workflows/docxy.yml`](.github/workflows/docxy.yml).
+### In CI, GitHub holds the job
+
+The strongest version of the gate is not docxy's own — it is the one the
+pipeline cannot talk its way past. [`.github/workflows/docxy.yml`](.github/workflows/docxy.yml)
+splits the work in two: one job drafts and validates the proposal, and a second,
+separate job opens the pull request. The second declares
+
+```yaml
+publish:
+  needs: propose
+  if: needs.propose.outputs.status == 'awaiting-approval'
+  environment: docxy-approval    # protected: required reviewers
+```
+
+A protected environment means **GitHub** suspends the job until a named human
+clicks approve. Not the agent, not this codebase, not a flag someone can flip in
+a config file — the CI platform, outside the process being gated. Nothing
+auto-approves it and nothing expires into approval. Set that environment's
+required reviewers to 2 and enable *prevent self-review*, and an elevated run
+needs two different people at the infrastructure level as well as at docxy's.
+
+That is the shape worth copying: the agent proposes in one job, and the
+authority to publish lives in another that the agent cannot reach.
 
 ---
 
@@ -172,6 +235,9 @@ the dashboard, webhooks, and what to do when a role fails — see
 - Node 20.11+
 - A [Nebius Token Factory](https://tokenfactory.nebius.com) API key
 - The TrueForge harness running locally
+- Optionally a [Daytona](https://app.daytona.io) API key, to run the docs build
+  in a remote sandbox. The standalone harness carries its own, so this is not
+  needed to get isolation.
 
 ### 1. Start the harness
 
@@ -272,8 +338,10 @@ instructions at session creation.
 
 They're written in TrueForge's git-backed skill format, so they can be promoted
 to real harness skills (`DOCXY_USE_HARNESS_SKILLS=true`) once this repo is
-public. Inlining is the default because harness skills require a sandbox, and
-this way the pipeline runs with no external account beyond Nebius.
+public. Inlining is the default because it keeps a role's judgment visible in
+this repository rather than in harness configuration — and because the two are
+now independent settings, turning it on or off says nothing about where
+validation executes.
 
 **Editing a skill pack is the intended way to tune the pipeline for your repo** —
 start with `skills/breaking-change-policy/SKILL.md`.
@@ -300,13 +368,13 @@ src/
   github/pr.ts           worktree-isolated branch and PR creation
   server/                timeline UI and approval endpoints
 skills/                  the four skill packs
-test/selftest.ts         40 checks over the pure logic and the docs-branch wiring
+test/selftest.ts         116 checks over the pure logic and the docs-branch wiring
 ```
 
 ## Tests
 
 ```bash
-npm test        # 40 checks: parsing, edits, links, changelog, gate, docs branch
+npm test        # 116 checks: parsing, edits, links, changelog, gate, sandbox, docs branch
 npm run typecheck
 ```
 
@@ -345,6 +413,122 @@ rotation, staleness threshold, base branch, port.
 [guides/LOCAL-SETUP.md](guides/LOCAL-SETUP.md) covers the ones worth knowing
 early, and what to change when a role starts failing.
 
+## Guides
+
+| | |
+|---|---|
+| [LOCAL-SETUP.md](guides/LOCAL-SETUP.md) | From nothing to a documentation pull request on your own repository |
+| [GITHUB-APP.md](guides/GITHUB-APP.md) | Registering the App, so pull requests open as a bot and not as you |
+| [DATABASE.md](guides/DATABASE.md) | Moving runs, sessions and the symbol map from JSON to Postgres |
+| [DEPLOY.md](guides/DEPLOY.md) | Running the service somewhere other than your laptop |
+| [OBSERVABILITY.md](guides/OBSERVABILITY.md) | What each run records, and how the dashboard derives the rest |
+| [DEMO.md](guides/DEMO.md) | Recording the demo, with commands that have been run for real |
+| [WRITEUP.md](guides/WRITEUP.md) | What this is and how it uses the harness — the submission writeup |
+| [ORIGINAL-PLAN.md](guides/ORIGINAL-PLAN.md) | The plan as written before any code existed, and what changed |
+| [SUBMISSION.md](guides/SUBMISSION.md) | The hackathon audit: what was missing, what was fixed, what was decided |
+
+---
+
+## Qodo Code Review Evidence
+
+Every substantive change in this repository landed through a pull request that
+[Qodo](https://www.qodo.ai) reviewed first. Nothing of consequence was pushed
+straight to `main`.
+
+| PR | What it changed | Qodo's verdict |
+|---|---|---|
+| [#2](https://github.com/Arindam200/docxy/pull/2) ✅ merged | Retry, session rotation, and the operations dashboard | **15 findings** over 7 review passes |
+| [#3](https://github.com/Arindam200/docxy/pull/3) ✅ merged | Run queueing, Postgres persistence, publish-path fixes | 11 findings, then re-reviewed to **0 bugs, 0 rule violations** |
+| [#4](https://github.com/Arindam200/docxy/pull/4) ✅ merged | Neon persistence, Better Auth, a page per pipeline stage | **9 bugs**, 22 skill insights |
+| [#5](https://github.com/Arindam200/docxy/pull/5) | Authentication on the API's own endpoints | 6 bugs, in review |
+| [#6](https://github.com/Arindam200/docxy/pull/6) | Running the docs build in the harness sandbox | **8 bugs** — 7 taken, 1 answered |
+
+([#1](https://github.com/Arindam200/docxy/pull/1) added the anti-slop lint rules
+and was closed rather than merged — its rules landed with #2.)
+
+Three commits exist only to answer those reviews:
+[`f775f8c`](https://github.com/Arindam200/docxy/commit/f775f8c),
+[`6d27250`](https://github.com/Arindam200/docxy/commit/6d27250),
+[`44f2ce1`](https://github.com/Arindam200/docxy/commit/44f2ce1). Each names the
+findings it took and, where it declined one, says why.
+
+### Four findings worth reading
+
+**"Arbitrary run logs exposed"** *(#2)* — the sharpest of them. A run id was
+effectively an authorization token: `/api/logs?run=` skipped the
+synced-repository filter entirely — the filter was an `else` branch — and
+`/api/runs/:id`, its `/files`, `approve` and `deny` never had one at all. Run ids
+appear in every dashboard URL, so any signed-in user holding one could read
+another repository's role events, prompts and commit metadata, and sign off on
+its proposals. Naming a run now narrows *within* the caller's scope instead of
+replacing it, in both storage backends. A run outside that scope is reported
+absent rather than forbidden — "forbidden" would confirm the id names something
+real. Fixed in `6d27250`.
+
+**"Failed turns evade rotation"** *(#2)* — the turn count advanced only after a
+response parsed, and the comment justifying it said so out loud: *"the turn is
+only counted once it produced something usable."* Backwards. The harness
+transcript grows when a turn is **submitted**, so a session that kept failing
+never reached its rotation limit, never rotated, and kept growing — precisely the
+spiral rotation exists to stop, and worst for `max_tokens`, where the model
+generates its entire budget into the transcript before failing. Counted on
+submission now, including harness errors, parse failures and timeouts. Fixed in
+`f775f8c`.
+
+**"Instructions never reach agents"** *(#2)* — `PUT /api/instructions` had
+written `instructions.md` since the endpoint existed, and nothing ever read it
+back. Every instruction typed into the dashboard was persisted, rendered back to
+the person who wrote it, and ignored. Worse, it could not have been saved anyway:
+the dashboard's proxy stripped its own `/api/docxy` prefix along with the
+upstream `/api`, so every mutation through it arrived one path segment short and
+404'd behind an error toast. Both fixed in `f775f8c`; the two drafting roles now
+receive standing instructions, ranked above their default style but never
+licensing a fact the diff does not support.
+
+**"Approval default changed silently"** *(#2, High)* — and the one where the
+review and the answer disagree, which is worth showing rather than hiding. Qodo
+read `DOCXY_REQUIRE_APPROVAL=false` as a safety default flipped from on to off.
+That reading was wrong — nothing read the old flag by then either — but it landed
+on something real: the variable it replaced, `DOCXY_APPROVAL_MODE`, had
+`elevated` and `always` values that genuinely *did* gate, so retiring it meant a
+deployment that had asked for a gate would come back up without one. The retired
+name is honored now, as `true`, with a warning, because that is the one direction
+this must never fail in (`config.ts:175-198`, held in place by four tests).
+
+The default itself stayed off, deliberately. A pull request is a review surface —
+nothing merges without someone approving it on GitHub — and a pipeline that stops
+before opening anything reviews nothing at all; it just goes quiet. Teams that
+want docxy's own gate as well set `DOCXY_REQUIRE_APPROVAL=true` and get graduated
+scope, two distinct sign-offs for elevated changes, and no expiry in either
+direction. That is a product decision, not an oversight, and it was recorded as
+one on #2 rather than quietly reverted.
+
+**"Host fallback defeats isolation"** *(#6, Security)* — the one that changed a
+default rather than fixing a bug. Any sandbox-unavailable result staged the
+proposal and ran the command on the host, on the reasoning that a missing sandbox
+is a property of the deployment and should not fail correct work. True, and it
+does not follow that the answer is to run it here anyway: an isolation boundary
+that disappears whenever it is least observed is not one. Host execution is now
+opt-in (`DOCXY_SANDBOX_FALLBACK=local`) and the default reports the build
+unvalidated instead.
+
+### What we did not take
+
+Qodo's two remaining notes on #3 are architectural suggestions rather than
+defects — a durable database-backed job queue, and per-repository worker queues.
+Both are right for a multi-tenant deployment and both are past what this pipeline
+needs today.
+
+On #6 it observed that the sandbox carries only the proposed files, so a
+full-tree build (`mkdocs build`, `npm run docs:build`) cannot run there. Correct,
+and it is the design: shipping the checkout into a sandbox on every commit costs
+more than the check is worth. Making it default-on did make it everyone's
+problem, so it is now stated plainly rather than implied.
+
+All of it is recorded here rather than silently dropped.
+
+---
+
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
