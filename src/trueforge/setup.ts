@@ -103,8 +103,16 @@ export async function registerSandboxProvider(
   client: TrueForge,
   config: Config,
 ): Promise<SandboxSetupResult> {
-  if (!config.sandbox.enabled) {
-    return { action: 'skipped', reason: 'DOCXY_SANDBOX is off' };
+  // Two independent reasons a provider might be needed, and skipping on the
+  // first alone ignored a supplied key in a supported configuration: with
+  // DOCXY_SANDBOX off and git-backed skills on, every drafting role still asks
+  // for a sandbox, and session creation fails later for want of a provider
+  // nobody registered.
+  if (!config.sandbox.enabled && !config.useHarnessSkills) {
+    return {
+      action: 'skipped',
+      reason: 'DOCXY_SANDBOX is off and no git-backed skills are in use',
+    };
   }
   if (!config.sandbox.daytonaApiKey) {
     return {

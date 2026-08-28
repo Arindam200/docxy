@@ -89,6 +89,20 @@ export interface Config {
      * and silently skipping the check would hide the difference.
      */
     enabled: boolean;
+    /**
+     * What to do when the sandbox cannot run the build.
+     *
+     * `skip` (the default) fails the check and says why. `local` stages the
+     * proposal and runs the command on this machine instead.
+     *
+     * The default is not the convenient one on purpose. Falling back to the host
+     * silently hands model-authored content the filesystem this whole path
+     * exists to keep it away from — an isolation boundary that disappears
+     * exactly when it is least observed. A failed check still lands: the
+     * proposal opens as a draft carrying the reason, which is louder and safer
+     * than a green tick earned on the host.
+     */
+    fallback: 'skip' | 'local';
     /** Daytona key. `docxy setup` registers it with the harness. */
     daytonaApiKey: string;
     /** Idle minutes before Daytona stops the sandbox. 0 disables. */
@@ -280,6 +294,9 @@ export function loadConfig(overrides: Partial<{ repoPath: string }> = {}): Confi
     },
     sandbox: {
       enabled: envBool('DOCXY_SANDBOX', true),
+      fallback: env('DOCXY_SANDBOX_FALLBACK', 'skip').trim().toLowerCase() === 'local'
+        ? 'local'
+        : 'skip',
       daytonaApiKey: env('DAYTONA_API_KEY'),
       autoStopMinutes: Math.max(0, envInt('DOCXY_SANDBOX_AUTOSTOP_MINUTES', 15)),
       autoDeleteMinutes: Math.max(0, envInt('DOCXY_SANDBOX_AUTODELETE_MINUTES', 60)),

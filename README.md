@@ -154,15 +154,25 @@ default. Set `DAYTONA_API_KEY` and run `docxy setup` to use a remote Daytona
 sandbox instead; the run names which one it used, and `docxy doctor` tells you
 before a run does.
 
-Your own test suite is the exception, and stays local on purpose: it is your
-code, not the proposal's, already trusted enough to be checked out, and it needs
-the whole working tree rather than the handful of doc files a sandbox turn
-carries.
+**The sandbox receives the proposed files and nothing else.** Not the repository,
+not `package.json`, not `node_modules`. So `DOCXY_DOCS_BUILD_COMMAND` has to be a
+command that works on markdown alone — a linter, a fence or front-matter check, a
+link checker. A full site build (`mkdocs build`, `npm run docs:build`) needs a
+tree that is not there and will report that it could not run. That is a real
+limit of this design, not an oversight: shipping the whole checkout into a
+sandbox on every commit costs more than the check is worth, and the check that
+matters — does the *proposed prose* hold up — does not need it.
 
-If no sandbox is reachable at all, the build still runs — locally, and the report
-says so, tagging every executed check `sandbox` or `local`. A harness without a
-sandbox is a property of the deployment, not of the documentation, and failing a
-correct proposal over it would be the wrong answer.
+**If the sandbox cannot run it, the build is reported unvalidated.** It does not
+quietly run here instead. An isolation boundary that disappears when nobody is
+watching is not one, so the check fails, says why, and the proposal opens as a
+draft carrying the reason. `DOCXY_SANDBOX_FALLBACK=local` opts into host
+execution for operators who would rather have the coverage, and the report then
+tags the check `local` instead of `sandbox`.
+
+Your own test suite is the exception, and stays on the host on purpose: it is
+your code, not the proposal's, already trusted enough to be checked out, and it
+needs the whole working tree.
 
 ### 3. The pull request is the gate — and a graduated one is there if you want it
 

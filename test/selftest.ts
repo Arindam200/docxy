@@ -498,17 +498,32 @@ check('empty history has no rates',
   delete process.env.DOCXY_SANDBOX;
   delete process.env.DOCXY_USE_HARNESS_SKILLS;
   check('the sandbox is on by default', reload().sandbox.enabled === true);
-  check('the default config asks for a sandbox', sandboxEnabled(reload()) === true);
 
   process.env.DOCXY_SANDBOX = 'false';
   check('the sandbox can be turned off', reload().sandbox.enabled === false);
-  check('turning it off means no sandbox', sandboxEnabled(reload()) === false);
 
-  // Skills are served from inside a sandbox, so asking for them asks for one
-  // even when execution was explicitly declined.
+  // The drafting roles execute nothing, so DOCXY_SANDBOX — which governs where
+  // the docs build runs — must not provision them a sandbox each. Wiring it in
+  // here made ordinary drafting depend on sandbox availability.
+  delete process.env.DOCXY_SANDBOX;
+  check('a drafting role gets no sandbox just because the build wants one',
+    sandboxEnabled(reload()) === false);
+
+  // Skills are served from inside a sandbox, so asking for them asks for one.
   process.env.DOCXY_USE_HARNESS_SKILLS = 'true';
-  check('harness skills still require a sandbox', sandboxEnabled(reload()) === true);
-  check('but they do not turn execution back on', reload().sandbox.enabled === false);
+  check('harness skills do require a sandbox', sandboxEnabled(reload()) === true);
+
+  // The fallback is the security-relevant default: host execution has to be
+  // asked for, never inherited.
+  delete process.env.DOCXY_USE_HARNESS_SKILLS;
+  delete process.env.DOCXY_SANDBOX_FALLBACK;
+  check('an unreachable sandbox does not fall back to the host by default',
+    reload().sandbox.fallback === 'skip');
+  process.env.DOCXY_SANDBOX_FALLBACK = 'local';
+  check('host execution can be asked for explicitly', reload().sandbox.fallback === 'local');
+  process.env.DOCXY_SANDBOX_FALLBACK = 'nonsense';
+  check('an unrecognised fallback stays safe', reload().sandbox.fallback === 'skip');
+  delete process.env.DOCXY_SANDBOX_FALLBACK;
 
   delete process.env.DOCXY_SANDBOX;
   delete process.env.DOCXY_USE_HARNESS_SKILLS;
@@ -554,6 +569,45 @@ check('empty history has no rates',
 
   const build = report.checks.find((c) => c.name === 'docs-build');
   check('no docs build command is skipped, not failed', build?.status === 'skipped');
+
+  process.env = before;
+}
+
+// --- an unvalidated build never reads as validated ------------------------
+// `ValidationReport.ok` rejects only `fail`, so anything that reports itself
+// `skipped` sails through. A configured docs build that could not run is not a
+// skipped one — it is a proposal nobody checked, and it used to publish clean.
+{
+  const before = process.env;
+  process.env = { ...process.env };
+  process.env.DOCXY_DOCS_BUILD_COMMAND = 'echo hi';
+  delete process.env.DOCXY_TEST_COMMAND;
+  delete process.env.DOCXY_SANDBOX_FALLBACK;
+
+  const config = loadConfig();
+  const report = await validateProposal({
+    config,
+    applied: { files: [], problems: [] },
+    changelogFile: null,
+    classification: {
+      kind: 'fix', surface: 'docs-only', summary: 's',
+      changedSymbols: [], breakingRationale: '', confidence: 1,
+    },
+    changelog: undefined,
+    docsPath: config.repoPath,
+    stageable: false,
+    // A client that cannot answer: the sandbox is unreachable, so the fallback
+    // policy is what decides.
+    // SAFETY: `sandboxAvailability` reaches only for `fetch`.
+    client: { fetch: async () => new Response('{}', { status: 500 }) } as never,
+  });
+
+  const build = report.checks.find((c) => c.name === 'docs-build');
+  check('an unreachable sandbox fails the build rather than skipping it',
+    build?.status === 'fail');
+  check('and the run is not ok', report.ok === false);
+  check('and it says host execution was declined, not attempted',
+    (build?.detail ?? '').includes('DOCXY_SANDBOX_FALLBACK'));
 
   process.env = before;
 }

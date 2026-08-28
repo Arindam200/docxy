@@ -209,12 +209,28 @@ async function main(): Promise<void> {
       // What matters is whether a sandbox exists, not whose it is. A standalone
       // harness carries its own, so "Daytona was refused" and "nothing will be
       // isolated" are very different sentences and setup should not conflate them.
+      //
+      // And it must answer for the configuration that will actually run: probing
+      // the harness while DOCXY_SANDBOX is off reported a sandbox the docs build
+      // was never going to use, which is the opposite of the truth in the one
+      // direction a security status must never be wrong.
+      if (!config.sandbox.enabled) {
+        console.log(
+          `${c.yellow('!')} DOCXY_SANDBOX is off — the docs build runs on this machine, ` +
+            `over text a model wrote`,
+        );
+        return;
+      }
       const ready = await sandboxAvailability(client);
       console.log(
         ready.available
           ? `${c.green('✓')} Sandbox ready (${ready.backend}) — the docs build runs there`
           : `${c.yellow('!')} ${ready.reason}\n` +
-            `  ${c.dim('the docs build still runs, locally, and the report says so')}`,
+            `  ${c.dim(
+              config.sandbox.fallback === 'local'
+                ? 'the docs build will run on this machine instead, and the report says so'
+                : 'the docs build will be reported unvalidated rather than run here',
+            )}`,
       );
       return;
     }
@@ -260,7 +276,11 @@ async function main(): Promise<void> {
             ? `${c.green('✓')} sandbox ready (${sandbox.backend}) — the docs build runs there, ` +
               `not against your checkout`
             : `${c.yellow('!')} ${sandbox.reason}\n` +
-              `  ${c.dim('the docs build still runs, locally, and the report says so')}`,
+              `  ${c.dim(
+                config.sandbox.fallback === 'local'
+                  ? 'DOCXY_SANDBOX_FALLBACK=local — the docs build will run on this machine'
+                  : 'the docs build will be reported unvalidated rather than run here',
+              )}`,
         );
       }
 

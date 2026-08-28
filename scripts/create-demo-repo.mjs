@@ -162,8 +162,16 @@ git(
   'feat!: rename --output to --format and add csv\n\nThe --output flag is gone. Callers must pass --format instead.\nAlso adds a csv format alongside table and json.',
 );
 
+// guides/DEMO.md says the remote is "already wired", and it was not: a rebuilt
+// demo repository had no `origin`, so the run reached the end of the pipeline
+// and failed at the one step the demo exists to show. Wiring it here is what
+// makes that sentence true.
+const remote = process.env.DOCXY_DEMO_REMOTE ?? 'https://github.com/Arindam200/docxy-demo.git';
+if (remote) git('remote', 'add', 'origin', remote);
+
 const log = execFileSync('git', ['log', '--oneline'], { cwd: target, encoding: 'utf8' });
 console.log(`Demo repository created at ${target}\n`);
+if (remote) console.log(`origin → ${remote}\n`);
 console.log(log);
 console.log(`Run the pipeline against it:
 

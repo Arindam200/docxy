@@ -228,16 +228,35 @@ async function runDocsBuild(input: DocsBuildInput): Promise<ValidationCheck> {
     const outcome = await runCommandInSandbox(sandboxInput);
     if ('check' in outcome) return outcome.check;
 
+    // The sandbox could not do it. Whether that is allowed to become host
+    // execution is the operator's call, and the default is that it is not:
+    // quietly running model-authored content against the filesystem this path
+    // exists to protect would remove the boundary precisely when nobody is
+    // watching it.
+    if (config.sandbox.fallback === 'skip') {
+      return {
+        name: 'docs-build',
+        status: 'fail',
+        where: 'sandbox',
+        detail:
+          `${outcome.unavailable}.\n\n` +
+          'The build was not run on this machine instead: DOCXY_SANDBOX_FALLBACK ' +
+          'is "skip", so a proposal is reported unvalidated rather than validated ' +
+          'outside the sandbox. Set DOCXY_SANDBOX_FALLBACK=local to allow host ' +
+          'execution, or configure a sandbox provider.',
+      };
+    }
+
     if (!stageable) {
       return {
         name: 'docs-build',
-        status: 'skipped',
+        status: 'fail',
         detail: `${outcome.unavailable}, and the docs tree is your own checkout so the build was not run against it either`,
       };
     }
     await stageProposal(docsPath, files);
     const local = await runCommand('docs-build', command, docsPath);
-    return { ...local, detail: `ran locally — ${outcome.unavailable}\n\n${local.detail}` };
+    return { ...local, detail: `ran on the host — ${outcome.unavailable}\n\n${local.detail}` };
   }
 
   // No sandbox asked for, or nothing to reach it with. Staging the proposal into

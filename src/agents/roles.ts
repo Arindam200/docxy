@@ -39,15 +39,20 @@ function buildInstructions(role: {
 }
 
 /**
- * Whether a session gets a sandbox.
+ * Whether a *drafting* role's session gets a sandbox.
  *
- * Two independent reasons to want one, and for a while they shared a single
- * flag: executing validation commands away from the operator's filesystem, and
- * serving git-backed skill packs (which the harness will only do inside a
- * sandbox). Either is now sufficient on its own.
+ * Only git-backed skills need one here. The five drafting roles read a diff and
+ * emit JSON; they execute nothing, so a sandbox buys them latency and a
+ * provisioned resource and no safety.
+ *
+ * `DOCXY_SANDBOX` deliberately does not appear in this decision. It governs
+ * where the docs build runs, and wiring it in here made every ordinary drafting
+ * turn depend on sandbox availability — the opposite of the validation-only
+ * promise the flag is documented with. The validator asks for its own sandbox
+ * directly, because for that one session the sandbox *is* the point.
  */
 export function sandboxEnabled(config: Config): boolean {
-  return config.sandbox.enabled || config.useHarnessSkills;
+  return config.useHarnessSkills;
 }
 
 /** Shared runtime settings for the five drafting roles. */
