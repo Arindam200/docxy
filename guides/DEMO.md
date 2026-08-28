@@ -41,7 +41,7 @@ already carrying two real pull requests opened by the pipeline:
 If you recreate the repo with `npm run demo -- --force`, re-wire it:
 
 ```bash
-cd .demo-repo && git remote add origin https://github.com/Arindam200/docxy-demo.git
+cd .demo-repo && git remote set-url origin https://github.com/Arindam200/docxy-demo.git
 ```
 
 ---

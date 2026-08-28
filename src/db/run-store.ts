@@ -472,11 +472,13 @@ export class PgRunStore implements RunStorage {
       const traces: RoleTrace[] = (rolesByRun.get(run.id) ?? []).map((role) => {
         const body = bodiesByRole.get(role.id);
         return {
+          // SAFETY: this column is written only by `save`, from the same `RoleName` union.
           role: role.role as RoleName,
           sessionId: role.sessionId,
           turnId: role.turnId ?? undefined,
           startedAt: role.startedAt.toISOString(),
           finishedAt: role.finishedAt?.toISOString(),
+          // SAFETY: this column is written only by `save`, from the same status union.
           status: role.status as RoleTrace['status'],
           events: (eventsByRole.get(role.id) ?? []).map((event) => ({
             at: event.at.toISOString(),

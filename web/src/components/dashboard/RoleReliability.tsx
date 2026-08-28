@@ -1,5 +1,6 @@
 import type { RoleStats } from "@/lib/docxy";
 import { duration, roleTitle, tokens } from "@/lib/format";
+import { lookup } from "@/lib/lookup";
 
 /**
  * Which role fails, how often, and how it fails.
@@ -9,12 +10,12 @@ import { duration, roleTitle, tokens } from "@/lib/format";
  * slow is a different problem from one that is unreliable.
  */
 
-const FAILURE_LABELS: Record<string, string> = {
+const FAILURE_LABELS = {
   "harness-error": "harness",
   "parse-error": "parse",
   timeout: "timeout",
   aborted: "aborted",
-};
+} satisfies Record<string, string>;
 
 function usd(value: number | undefined): string {
   if (value === undefined) return "—";
@@ -65,7 +66,7 @@ export function RoleReliability({ roles }: { roles: RoleStats[] }) {
                             key={kind}
                             className="border border-danger/30 bg-danger/10 px-1.5 py-px text-[10px] text-danger"
                           >
-                            {count} {FAILURE_LABELS[kind] ?? kind}
+                            {count} {lookup(FAILURE_LABELS, kind) ?? kind}
                           </span>
                         ))}
                       </span>

@@ -12,6 +12,7 @@ import {
   LuLogOut,
   LuActivity,
   LuPlug,
+  LuScrollText,
   LuZap,
 } from "react-icons/lu";
 import { signOut } from "@/lib/auth-client";
@@ -29,6 +30,8 @@ const NAV: Array<{ href: string; label: string; icon: ReactNode }> = [
   { href: "/dashboard/instructions", label: "Instructions", icon: <LuBot /> },
   { href: "/dashboard/activity", label: "Activity", icon: <LuZap /> },
   { href: "/dashboard/observability", label: "Observability", icon: <LuActivity /> },
+  // Built, filterable, and until now reachable only by typing the URL.
+  { href: "/dashboard/logs", label: "Logs", icon: <LuScrollText /> },
   { href: "/dashboard/integrations", label: "Integrations", icon: <LuPlug /> },
 ];
 
@@ -103,6 +106,7 @@ function ProfileMenu({ user }: { user: DashboardUser }) {
     if (!open) return;
 
     const onPointerDown = (event: MouseEvent) => {
+      // SAFETY: an event dispatched into this handler always carries a Node target, and `contains` only compares identity.
       if (!container.current?.contains(event.target as Node)) setOpen(false);
     };
     const onKeyDown = (event: KeyboardEvent) => {

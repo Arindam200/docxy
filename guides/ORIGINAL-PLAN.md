@@ -1,3 +1,18 @@
+> **This is the plan as written on 24 August 2026, before any code existed.**
+> It is kept unedited, as a record of what was proposed against what shipped.
+> For how docxy actually works, read the [README](../README.md).
+>
+> Four things changed once the harness was real:
+>
+> | The plan said | What shipped | Why |
+> |---|---|---|
+> | Daytona runs the sandbox | The harness's **own** sandbox runs it — Seatbelt on macOS, bubblewrap on Linux. Daytona is optional | A standalone harness carries isolation already; requiring an external account bought nothing |
+> | A Coordinator delegates to four subagents | Five roles, each with **its own long-lived session per repository**, orchestrated in code | TrueForge spawns subagents dynamically and has no fixed named roster. One session per role is what makes state accumulate across commits — the better shape, not a workaround |
+> | Sandbox validates the doc build, link check *and* test suite | The sandbox runs the **docs build**; links and anchors are checked in-process; the test suite stays local | Links need no execution. The test suite is the operator's own code and needs the whole working tree, which a sandbox turn does not carry |
+> | Nothing opens a PR without explicit sign-off | A run opens the PR by default; `DOCXY_REQUIRE_APPROVAL=true` adds docxy's own gate, and CI adds a protected environment | A pull request *is* a review surface. A pipeline that stops before opening anything reviews nothing — it goes quiet. A rejected proposal still opens, as a draft carrying its reasons |
+
+---
+
 # Docxy
 
 A multi-agent documentation-and-changelog pipeline built on [TrueForge](https://github.com/truefoundry/trueforge), TrueFoundry's open-source agent harness. Built for WeMakeDevs' Agent Harness Hackathon (Aug 24–30, 2026), theme: "Give AI models a License to act."

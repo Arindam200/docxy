@@ -58,6 +58,7 @@ async function backfillRuns(stateDir: string, store: PgRunStore): Promise<number
   for (const name of names) {
     let record: RunRecord;
     try {
+      // SAFETY: these files are written only by the pipeline's RunStore, which serialises a RunRecord.
       record = JSON.parse(await readFile(join(stateDir, 'runs', name), 'utf8')) as RunRecord;
     } catch {
       console.warn(`runs        skipped ${name} (unreadable)`);
@@ -84,6 +85,7 @@ async function backfillSessions(
   const rows = ROLES.filter((role) => existing[role.name]).map((role) => ({
     projectId: project,
     role: role.name,
+    // SAFETY: the `filter` above kept only the roles whose session id is present.
     sessionId: existing[role.name] as string,
     specHash: specHash(config, role),
   }));

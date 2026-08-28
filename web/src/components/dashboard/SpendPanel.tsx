@@ -1,3 +1,4 @@
+import { lookup } from "@/lib/lookup";
 import { tokens } from "@/lib/format";
 
 /**
@@ -8,21 +9,21 @@ import { tokens } from "@/lib/format";
  * The harness reports the split; this only renders it.
  */
 
-const CATEGORY_LABELS: Record<string, string> = {
+const CATEGORY_LABELS = {
   instructions: "Instructions",
   skills: "Skill packs",
   messages: "Messages",
   harness: "Harness",
   tool_definitions: "Tool definitions",
-};
+} satisfies Record<string, string>;
 
-const CATEGORY_NOTES: Record<string, string> = {
+const CATEGORY_NOTES = {
   instructions: "each role's persona and task",
   skills: "the four skill packs",
   messages: "the diff and doc excerpts",
   harness: "the harness's own scaffolding",
   tool_definitions: "tool schemas sent with every turn",
-};
+} satisfies Record<string, string>;
 
 export function SpendPanel({ breakdown }: { breakdown: Record<string, number> }) {
   const rows = Object.entries(breakdown).sort((a, b) => b[1] - a[1]);
@@ -53,9 +54,9 @@ export function SpendPanel({ breakdown }: { breakdown: Record<string, number> })
               <div key={key} className="px-4 py-3">
                 <div className="flex items-baseline justify-between gap-4">
                   <dt className="text-xs font-medium">
-                    {CATEGORY_LABELS[key] ?? key}
-                    {CATEGORY_NOTES[key] && (
-                      <span className="ml-2 font-normal text-muted">{CATEGORY_NOTES[key]}</span>
+                    {lookup(CATEGORY_LABELS, key) ?? key}
+                    {lookup(CATEGORY_NOTES, key) && (
+                      <span className="ml-2 font-normal text-muted">{lookup(CATEGORY_NOTES, key)}</span>
                     )}
                   </dt>
                   <dd className="shrink-0 text-xs tabular-nums">

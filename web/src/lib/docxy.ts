@@ -7,13 +7,35 @@
 
 const BASE = process.env.DOCXY_API_URL || "http://localhost:4317";
 
+/**
+ * Headers for a direct call to the pipeline API, carrying the shared secret.
+ *
+ * These reads run on the server, so they reach the API directly rather than
+ * through the /api/docxy proxy. Without the credential every read here fails
+ * soft and the whole dashboard renders as "offline", which looks like the
+ * pipeline is down rather than like a missing environment variable.
+ *
+ * Trimmed to match how the API loads the same variable: a value with stray
+ * whitespace would otherwise be "configured" on one side and a different
+ * string on the other, and every request a 401 that nothing explains.
+ */
+export function apiHeaders(base: Record<string, string> = {}) {
+  const token = process.env.DOCXY_API_TOKEN?.trim();
+  // Two returns rather than a conditional spread: the header is either present
+  // or the object does not carry the key at all.
+  if (!token) return { ...base };
+  return { ...base, authorization: `Bearer ${token}` };
+}
+
 async function get<T>(path: string): Promise<T | null> {
   try {
     const res = await fetch(`${BASE}${path}`, {
       cache: "no-store",
+      headers: apiHeaders(),
       signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) return null;
+    // SAFETY: the caller names the shape it expects, and this read fails soft — a non-2xx or a parse error returns null instead.
     return (await res.json()) as T;
   } catch {
     return null;
@@ -115,6 +137,11 @@ export interface ValidationCheck {
   name: string;
   status: "pass" | "fail" | "skipped";
   detail: string;
+  /**
+   * Where the check ran. Absent on checks that execute nothing, and on runs
+   * recorded before validation could run anywhere but the pipeline's own host.
+   */
+  where?: "sandbox" | "local";
 }
 
 /** The whole run record, as `GET /api/runs/:id` returns it. */
@@ -139,7 +166,12 @@ export interface RunDetail extends RunSummary {
     skipped: Array<{ path: string; reason: string }>;
   };
   changelog?: { entry: string; section: string; semverBump: string; bumpRationale: string };
-  validation?: { ok: boolean; checks: ValidationCheck[] };
+  validation?: {
+    ok: boolean;
+    checks: ValidationCheck[];
+    /** What the sandbox did, when a check ran in one. */
+    events?: Array<{ at: string; kind: string; text: string }>;
+  };
   approval?: {
     id: string;
     scope: string;

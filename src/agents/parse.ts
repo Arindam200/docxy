@@ -70,6 +70,7 @@ export function extractJson<T>(role: string, raw: string): T {
 
   for (const candidate of candidates) {
     try {
+      // SAFETY: the caller names the shape it expects; malformed JSON throws above this line.
       return JSON.parse(candidate) as T;
     } catch {
       // try the next candidate

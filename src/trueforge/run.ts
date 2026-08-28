@@ -70,16 +70,19 @@ type AnyEvent = Record<string, any>;
 
 /** SAFETY: see `AnyEvent` — the value came off the SDK's own stream. */
 function asSdkEvent(event: AnyEvent): TrueForgeApi.ModelMessageEvent {
+  // SAFETY: see `AnyEvent` — the value came off the SDK's own stream.
   return event as TrueForgeApi.ModelMessageEvent;
 }
 
 /** SAFETY: see `AnyEvent` — the value came off the SDK's own stream. */
 function asSdkDelta(event: AnyEvent): TrueForgeApi.ModelMessageDeltaEvent {
+  // SAFETY: see `AnyEvent` — the value came off the SDK's own stream.
   return event as TrueForgeApi.ModelMessageDeltaEvent;
 }
 
 /** SAFETY: each literal at the call sites is written to match one `TurnInputItem` variant. */
 function asTurnInput(item: AnyEvent): TrueForgeApi.TurnInputItem {
+  // SAFETY: each literal at the call sites is written to match one `TurnInputItem` variant.
   return item as TrueForgeApi.TurnInputItem;
 }
 
@@ -111,6 +114,7 @@ function addUsage(totals: TurnUsage, raw: Record<string, unknown> | undefined): 
 
   const breakdown = raw['inputTokensBreakdown'] ?? raw['input_tokens_breakdown'];
   if (breakdown && typeof breakdown === 'object') {
+    // SAFETY: the `typeof breakdown === 'object'` check above establishes this.
     for (const [key, value] of Object.entries(breakdown as Record<string, unknown>)) {
       totals.inputBreakdown[key] = (totals.inputBreakdown[key] ?? 0) + (Number(value) || 0);
     }

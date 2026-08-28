@@ -19,6 +19,10 @@ import { planRetry } from '../src/pipeline/retry.js';
 import type { RoleName } from '../src/config.js';
 import type { DocEdit, RoleTrace, RunRecord } from '../src/types.js';
 import { buildReport } from '../src/server/observability.js';
+import { isCommitSha, isLoopbackHost, repoAllowed, tokenMatches } from '../src/server/index.js';
+import { sandboxEnabled } from '../src/agents/roles.js';
+import { validateProposal } from '../src/validate/index.js';
+import { sandboxAvailability } from '../src/validate/sandbox.js';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 
@@ -219,12 +223,17 @@ const cl3 = await applyChangelogEntry(repo, 'NEW.md',
 check('changelog creates Unreleased block', cl3.after.includes('## [Unreleased]') && cl3.after.includes('First entry'));
 
 // --- approval gate -------------------------------------------------------
+// SAFETY: the gate reads only the fields set here; the rest of a change spec does not affect the decision.
 const breaking = { kind: 'breaking', surface: 'public-api', summary: '', changedSymbols: [],
   breakingRationale: '', confidence: 0.9 } as any;
+// SAFETY: the gate reads only the fields set here; the rest of a change spec does not affect the decision.
 const chore = { kind: 'chore', surface: 'internal', summary: '', changedSymbols: [],
   breakingRationale: '', confidence: 0.9 } as any;
+// SAFETY: `decideScope` reads only `semverBump` off the impact report.
 check('breaking is elevated', decideScope(breaking, { semverBump: 'major' } as any, 'routine').scope === 'elevated');
+// SAFETY: `decideScope` reads only `semverBump` off the impact report.
 check('chore is routine', decideScope(chore, { semverBump: 'none' } as any, 'routine').scope === 'routine');
+// SAFETY: `decideScope` reads only `semverBump` off the impact report.
 check('coordinator can escalate', decideScope(chore, { semverBump: 'none' } as any, 'elevated').scope === 'elevated');
 
 const req = createApprovalRequest('run1', 'elevated', 'because', 'summary');
@@ -401,6 +410,7 @@ check('empty history has no rates',
 // narrow the listing rather than reach past the repository filter.
 {
   const dir = await mkdtemp(join(tmpdir(), 'docxy-runs-'));
+  // SAFETY: `RunStore` reads only `stateDir` off the config.
   const store = new RunStore({ stateDir: dir } as Config);
 
   const runIn = (id: string, repoPath: string): RunRecord => ({
@@ -479,6 +489,297 @@ check('empty history has no rates',
   check('the last page ends the walk',
     nextPage('<https://api.github.com/x?page=1>; rel="prev"') === null);
   check('no link header ends the walk', nextPage(null) === null);
+}
+
+// --- the API's own front door --------------------------------------------
+// Better Auth guards the dashboard proxy, but the Hono API listens separately
+// and answers approve, deny, run and instructions. Anything that could route to
+// the port used to skip the sign-in entirely.
+{
+  const secret = 'a'.repeat(64);
+  check('the right token is accepted', tokenMatches(secret, `Bearer ${secret}`));
+  check('the scheme is optional', tokenMatches(secret, secret));
+  check('the scheme is case-insensitive', tokenMatches(secret, `bearer ${secret}`));
+  check('a wrong token of equal length is refused',
+    tokenMatches(secret, `Bearer ${'b'.repeat(64)}`) === false);
+  check('a truncated token is refused', tokenMatches(secret, `Bearer ${'a'.repeat(63)}`) === false);
+  // A prefix of the secret must not pass: the length check is what makes the
+  // comparison safe to run at all, not a shortcut around it.
+  check('a prefix of the token is refused', tokenMatches(secret, 'Bearer a') === false);
+  check('no header at all is refused', tokenMatches(secret, undefined) === false);
+  check('an empty header is refused', tokenMatches(secret, '') === false);
+  check('surrounding whitespace is tolerated', tokenMatches(secret, `Bearer  ${secret} `));
+
+  // `timingSafeEqual` throws when the buffers differ in length, and a string's
+  // length is not its byte length: 32 non-ASCII characters weigh more than 32
+  // bytes. Comparing the strings first turned a wrong credential into a 500.
+  const wideButSameCharCount = 'é'.repeat(64);
+  let threw = false;
+  try {
+    check('a non-ASCII token of equal character count is refused',
+      tokenMatches(secret, `Bearer ${wideButSameCharCount}`) === false);
+  } catch {
+    threw = true;
+  }
+  check('comparing a non-ASCII token does not throw', threw === false);
+}
+
+// --- where the CLI is allowed to listen -----------------------------------
+// `docxy serve` may run without a token because it stays on this machine. The
+// host override has to fail closed the same way the deployed path does.
+{
+  check('loopback v4 is local', isLoopbackHost('127.0.0.1'));
+  check('any 127.x is local', isLoopbackHost('127.99.1.2'));
+  check('localhost is local', isLoopbackHost('localhost'));
+  check('loopback v6 is local', isLoopbackHost('::1'));
+  check('bracketed loopback v6 is local', isLoopbackHost('[::1]'));
+  check('case and padding do not matter', isLoopbackHost('  LocalHost '));
+  check('all interfaces is not local', isLoopbackHost('0.0.0.0') === false);
+  check('a LAN address is not local', isLoopbackHost('192.168.1.10') === false);
+  check('a hostname is not local', isLoopbackHost('docxy.internal') === false);
+  // 127 has to be an octet, not a prefix of one.
+  check('a lookalike address is not local', isLoopbackHost('1270.0.0.1') === false);
+}
+
+// --- which repositories a webhook may start a run for ---------------------
+// The webhook secret belongs to the App, not to a repository, so every
+// installation of it produces deliveries that pass the signature check.
+{
+  const allowed = ['arindam200/docxy', 'arindam200/other'];
+  check('a listed repository is accepted', repoAllowed(allowed, 'Arindam200/docxy'));
+  check('an unlisted repository is refused', repoAllowed(allowed, 'someone/else') === false);
+  check('an empty allowlist keeps multi-repo behaviour', repoAllowed([], 'anyone/anything'));
+
+  const sha = '0'.repeat(40);
+  check('a full object name is a commit', isCommitSha(sha));
+  check('a short sha is not', isCommitSha('0123abc') === false);
+  check('a branch name is not', isCommitSha('HEAD') === false);
+  check('an argument-looking value is not', isCommitSha('--upload-pack=touch /tmp/x') === false);
+}
+
+// --- the API token and repository allowlist read from the environment -----
+{
+  const before = { ...process.env };
+
+  delete process.env.DOCXY_API_TOKEN;
+  delete process.env.DOCXY_ALLOWED_REPOS;
+  check('no token configured leaves the API open to the proxy',
+    loadConfig().server.apiToken === undefined);
+  check('no allowlist configured means every repository', loadConfig().server.allowedRepos.length === 0);
+
+  process.env.DOCXY_API_TOKEN = 'shhh';
+  check('a configured token is read', loadConfig().server.apiToken === 'shhh');
+
+  // Both dashboard callers trim before sending. If this side kept the padding,
+  // the token would be "set" here and a different string there — every request
+  // a 401 with nothing to point at.
+  process.env.DOCXY_API_TOKEN = '  shhh  ';
+  check('a padded token is trimmed to match the dashboard',
+    loadConfig().server.apiToken === 'shhh');
+  process.env.DOCXY_API_TOKEN = '   ';
+  check('an all-whitespace token counts as unset',
+    loadConfig().server.apiToken === undefined);
+
+  process.env.DOCXY_ALLOWED_REPOS = ' Arindam200/Docxy , arindam200/other ,, ';
+  const repos = loadConfig().server.allowedRepos;
+  check('the allowlist is split, trimmed and lowercased',
+    repos.length === 2 && repos[0] === 'arindam200/docxy' && repos[1] === 'arindam200/other');
+
+  process.env = before;
+}
+
+// --- sandbox execution ----------------------------------------------------
+// The docs build is the one check that runs a command over text a model wrote.
+// It belongs in the sandbox, and the two reasons to have a sandbox — executing
+// validation, and serving git-backed skills — used to share one flag, so a
+// deployment could not have either without the other.
+{
+  const before = process.env;
+  process.env = { ...process.env };
+
+  const reload = () => loadConfig();
+
+  delete process.env.DOCXY_SANDBOX;
+  delete process.env.DOCXY_USE_HARNESS_SKILLS;
+  check('the sandbox is on by default', reload().sandbox.enabled === true);
+
+  process.env.DOCXY_SANDBOX = 'false';
+  check('the sandbox can be turned off', reload().sandbox.enabled === false);
+
+  // The drafting roles execute nothing, so DOCXY_SANDBOX — which governs where
+  // the docs build runs — must not provision them a sandbox each. Wiring it in
+  // here made ordinary drafting depend on sandbox availability.
+  delete process.env.DOCXY_SANDBOX;
+  check('a drafting role gets no sandbox just because the build wants one',
+    sandboxEnabled(reload()) === false);
+
+  // Skills are served from inside a sandbox, so asking for them asks for one.
+  process.env.DOCXY_USE_HARNESS_SKILLS = 'true';
+  check('harness skills do require a sandbox', sandboxEnabled(reload()) === true);
+
+  // The fallback is the security-relevant default: host execution has to be
+  // asked for, never inherited.
+  delete process.env.DOCXY_USE_HARNESS_SKILLS;
+  delete process.env.DOCXY_SANDBOX_FALLBACK;
+  check('an unreachable sandbox does not fall back to the host by default',
+    reload().sandbox.fallback === 'skip');
+  process.env.DOCXY_SANDBOX_FALLBACK = 'local';
+  check('host execution can be asked for explicitly', reload().sandbox.fallback === 'local');
+  process.env.DOCXY_SANDBOX_FALLBACK = 'nonsense';
+  check('an unrecognised fallback stays safe', reload().sandbox.fallback === 'skip');
+  delete process.env.DOCXY_SANDBOX_FALLBACK;
+
+  delete process.env.DOCXY_SANDBOX;
+  delete process.env.DOCXY_USE_HARNESS_SKILLS;
+  process.env.DAYTONA_API_KEY = 'dt-test-key';
+  check('the Daytona key is read', reload().sandbox.daytonaApiKey === 'dt-test-key');
+
+  process.env = before;
+}
+
+// --- validation reports where it ran --------------------------------------
+// A report that does not say where a command executed cannot be audited: the
+// same "docs-build passed" means two different things on a machine with a
+// sandbox and one without.
+{
+  const before = process.env;
+  process.env = { ...process.env };
+  delete process.env.DOCXY_DOCS_BUILD_COMMAND;
+  process.env.DOCXY_TEST_COMMAND = 'true';
+
+  const config = loadConfig();
+  const report = await validateProposal({
+    config,
+    applied: { files: [], problems: [] },
+    changelogFile: null,
+    classification: {
+      kind: 'fix',
+      surface: 'docs-only',
+      summary: 's',
+      changedSymbols: [],
+      breakingRationale: '',
+      confidence: 1,
+    },
+    changelog: undefined,
+    docsPath: config.repoPath,
+    stageable: false,
+    // No client: nothing can reach a sandbox, so every command runs locally.
+  });
+
+  const tests = report.checks.find((c) => c.name === 'tests');
+  check('a locally executed check says so', tests?.where === 'local');
+  check('a check that executes nothing claims no location',
+    report.checks.find((c) => c.name === 'link-check')?.where === undefined);
+
+  const build = report.checks.find((c) => c.name === 'docs-build');
+  check('no docs build command is skipped, not failed', build?.status === 'skipped');
+
+  process.env = before;
+}
+
+// --- an unvalidated build never reads as validated ------------------------
+// `ValidationReport.ok` rejects only `fail`, so anything that reports itself
+// `skipped` sails through. A configured docs build that could not run is not a
+// skipped one — it is a proposal nobody checked, and it used to publish clean.
+{
+  const before = process.env;
+  process.env = { ...process.env };
+  process.env.DOCXY_DOCS_BUILD_COMMAND = 'echo hi';
+  delete process.env.DOCXY_TEST_COMMAND;
+  delete process.env.DOCXY_SANDBOX_FALLBACK;
+
+  const config = loadConfig();
+  const report = await validateProposal({
+    config,
+    applied: { files: [], problems: [] },
+    changelogFile: null,
+    classification: {
+      kind: 'fix', surface: 'docs-only', summary: 's',
+      changedSymbols: [], breakingRationale: '', confidence: 1,
+    },
+    changelog: undefined,
+    docsPath: config.repoPath,
+    stageable: false,
+    // A client that cannot answer: the sandbox is unreachable, so the fallback
+    // policy is what decides.
+    // SAFETY: `sandboxAvailability` reaches only for `fetch`.
+    client: { fetch: async () => new Response('{}', { status: 500 }) } as never,
+  });
+
+  const build = report.checks.find((c) => c.name === 'docs-build');
+  check('an unreachable sandbox fails the build rather than skipping it',
+    build?.status === 'fail');
+  check('and the run is not ok', report.ok === false);
+  check('and it says host execution was declined, not attempted',
+    (build?.detail ?? '').includes('DOCXY_SANDBOX_FALLBACK'));
+
+  process.env = before;
+}
+
+// --- sandbox availability -------------------------------------------------
+// `/capabilities` is the authority and the SDK docstring for it is wrong: it
+// says "whether a sandbox provider is configured", but the harness answers true
+// when EITHER a remote provider is ready OR it is running standalone with local
+// sandbox support. Reading `/settings/sandbox-providers` instead — which 404s on
+// exactly that standalone harness — sent validation to local execFile on a
+// machine whose harness was ready to isolate it.
+{
+  // SAFETY: `sandboxAvailability` reaches for exactly one member of the client,
+  // `fetch`, so a stub carrying only that member satisfies every path under test.
+  const clientOf = (routes: Record<string, { status: number; body: unknown }>) =>
+    ({
+      fetch: async (path: string) => {
+        const hit = routes[path] ?? { status: 404, body: {} };
+        return new Response(JSON.stringify(hit.body), { status: hit.status });
+      },
+    }) as never;
+
+  const CAPS = '/api/v1/capabilities';
+  const PROV = '/api/v1/settings/sandbox-providers';
+
+  // The standalone case: no provider configured, sandbox still real.
+  const standalone = await sandboxAvailability(
+    clientOf({
+      [CAPS]: { status: 200, body: { data: { sandbox: { enabled: true } } } },
+      [PROV]: { status: 404, body: { error: { message: 'No sandbox provider configured' } } },
+    }),
+  );
+  check('a standalone harness with no provider still has a sandbox',
+    standalone.available === true);
+  check('and it is named as the local one', standalone.backend === 'local');
+
+  const daytona = await sandboxAvailability(
+    clientOf({
+      [CAPS]: { status: 200, body: { data: { sandbox: { enabled: true } } } },
+      [PROV]: { status: 200, body: { data: { status: 'ready' } } },
+    }),
+  );
+  check('a ready remote provider is available', daytona.available === true);
+  check('and it is named as daytona', daytona.backend === 'daytona');
+
+  // Configured but still building: capabilities is what decides, and a harness
+  // that says no sandbox gets none regardless of what settings holds.
+  const building = await sandboxAvailability(
+    clientOf({
+      [CAPS]: { status: 200, body: { data: { sandbox: { enabled: false } } } },
+      [PROV]: { status: 200, body: { data: { status: 'pending' } } },
+    }),
+  );
+  check('capabilities decides, not the provider record', building.available === false);
+  check('and it says how to get one', (building.reason ?? '').includes('docxy setup'));
+
+  // Naming the backend is cosmetic; losing it must not cost a working sandbox.
+  const unnameable = await sandboxAvailability(
+    clientOf({
+      [CAPS]: { status: 200, body: { data: { sandbox: { enabled: true } } } },
+      [PROV]: { status: 500, body: {} },
+    }),
+  );
+  check('an unreadable provider record does not withdraw the sandbox',
+    unnameable.available === true && unnameable.backend === 'local');
+
+  const broken = await sandboxAvailability(clientOf({ [CAPS]: { status: 500, body: {} } }));
+  check('an erroring harness is unavailable, not assumed ready', broken.available === false);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

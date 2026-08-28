@@ -27,7 +27,7 @@ import { LuPlug, LuWebhook } from "react-icons/lu";
  * Nebius and TrueForge have no Simple Icons entry, so their own favicons are
  * vendored under public/brand instead of hotlinked.
  */
-export const brandIcons: Record<string, ReactNode> = {
+export const brandIcons = {
   GitHub: <SiGithub size={20} color="#24292e" />,
   "GitHub Actions": <SiGithubactions size={20} color="#2088FF" />,
   Claude: <SiClaude size={20} color="#D97757" />,
@@ -42,7 +42,7 @@ export const brandIcons: Record<string, ReactNode> = {
   "Markdown & MDX": <SiMarkdown size={20} color="#18181b" />,
   "Keep a Changelog": <SiKeepachangelog size={20} color="#E05735" />,
   "Semantic Versioning": <SiSemver size={20} color="#3F4551" />,
-};
+} satisfies Record<string, ReactNode>;
 
 /**
  * The same marks again, sized and coloured for the dark dashboard: brand hexes
@@ -51,7 +51,7 @@ export const brandIcons: Record<string, ReactNode> = {
  * integration `id` the API reports, with `plug` as the fallback for anything
  * added server-side that has no mark here yet.
  */
-export const integrationIcons: Record<string, ReactNode> = {
+export const integrationIcons = {
   "github-app": <SiGithub size={20} />,
   "github-webhook": <LuWebhook size={20} />,
   neon: <SiNeon size={20} color="#00E599" />,
@@ -64,7 +64,7 @@ export const integrationIcons: Record<string, ReactNode> = {
     <img src="/brand/trueforge.png" alt="" width={20} height={20} aria-hidden />
   ),
   plug: <LuPlug size={20} />,
-};
+} satisfies Record<string, ReactNode>;
 
 /**
  * The catalogue's brand marks, keyed by entry id.
@@ -74,7 +74,7 @@ export const integrationIcons: Record<string, ReactNode> = {
  * the same palette. Anything monochrome inherits `currentColor` and follows the
  * card, which is what keeps a "coming soon" tile reading as muted.
  */
-export const catalogIcons: Record<string, ReactNode> = {
+export const catalogIcons = {
   github: <SiGithub size={22} />,
   slack: <FaSlack size={22} color="#36C5F0" />,
   discord: <SiDiscord size={22} color="#5865F2" />,
@@ -86,4 +86,4 @@ export const catalogIcons: Record<string, ReactNode> = {
   gitlab: <SiGitlab size={22} color="#FC6D26" />,
   bitbucket: <SiBitbucket size={22} color="#2684FF" />,
   intercom: <SiIntercom size={22} color="#3B9CF5" />,
-};
+} satisfies Record<string, ReactNode>;

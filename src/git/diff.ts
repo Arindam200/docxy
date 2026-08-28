@@ -150,15 +150,17 @@ export async function readCommitDiff(repoPath: string, ref: string): Promise<Com
     }
 
     const count = counts.get(path) ?? { additions: 0, deletions: 0 };
-    files.push({
+    const file = {
       path,
       status,
-      ...(previousPath ? { previousPath } : {}),
       additions: count.additions,
       deletions: count.deletions,
       patch,
       truncated,
-    });
+    };
+    // A rename carries the name it had before; everything else has no such
+    // field at all, rather than one holding `undefined`.
+    files.push(previousPath ? { ...file, previousPath } : file);
   }
 
   return {

@@ -75,6 +75,43 @@ export interface Config {
     testCommand: string;
     checkLinks: boolean;
   };
+  sandbox: {
+    /**
+     * Execute the docs build inside the harness sandbox instead of on this
+     * machine.
+     *
+     * On by default. The docs build is the one validation step that runs a
+     * command over text a model wrote, and pointing that at the operator's own
+     * filesystem is the wrong default however convenient it is.
+     *
+     * When no sandbox provider is configured the check still runs, locally, and
+     * says so. An unvalidated proposal is worse than a locally validated one,
+     * and silently skipping the check would hide the difference.
+     */
+    enabled: boolean;
+    /**
+     * What to do when the sandbox cannot run the build.
+     *
+     * `skip` (the default) fails the check and says why. `local` stages the
+     * proposal and runs the command on this machine instead.
+     *
+     * The default is not the convenient one on purpose. Falling back to the host
+     * silently hands model-authored content the filesystem this whole path
+     * exists to keep it away from — an isolation boundary that disappears
+     * exactly when it is least observed. A failed check still lands: the
+     * proposal opens as a draft carrying the reason, which is louder and safer
+     * than a green tick earned on the host.
+     */
+    fallback: 'skip' | 'local';
+    /** Daytona key. `docxy setup` registers it with the harness. */
+    daytonaApiKey: string;
+    /** Idle minutes before Daytona stops the sandbox. 0 disables. */
+    autoStopMinutes: number;
+    /** Minutes before Daytona deletes it outright. 0 disables. */
+    autoDeleteMinutes: number;
+    /** Ceiling on one command executed inside the sandbox. */
+    execTimeoutMs: number;
+  };
   approval: {
     /** Minutes before a pending request is reported stale. It is never auto-resolved. */
     staleAfterMinutes: number;
@@ -112,9 +149,46 @@ export interface Config {
      */
     sessionMaxTurns: number;
   };
-  server: { port: number };
+  server: {
+    port: number;
+    /**
+     * Shared secret the dashboard proxy presents to this API.
+     *
+     * The Hono app answers `/api/runs/:id/approve`, `/api/runs` and
+     * `PUT /api/instructions` — sign-off, execution and the standing
+     * instructions the agents read. Better Auth guards the Next.js proxy in
+     * front of it, but the proxy is not the only way in: the deployed entry
+     * point binds `0.0.0.0`, so anything that can route to the port speaks to
+     * these endpoints directly. Authentication at the proxy alone is a lock on
+     * one of two doors.
+     *
+     * Unset leaves the API open, which is only safe on loopback — so
+     * `standalone.ts` refuses to boot without it.
+     */
+    apiToken?: string;
+    /**
+     * Repositories a push webhook is allowed to start a run for.
+     *
+     * Empty means "any repository this GitHub App installation can mint a token
+     * for", which is the multi-repo behaviour the webhook was built for. The
+     * blast radius is already bounded — `installationToken` mints against a
+     * fixed `GITHUB_APP_INSTALLATION_ID`, so a repository outside that
+     * installation fails before it can be cloned — but an operator who knows
+     * exactly which repositories should be in play can say so here.
+     */
+    allowedRepos: string[];
+  };
   github: { token?: string; repo?: string; baseBranch: string };
-  /** Enable TrueForge sandbox + git-backed skills instead of inlined skill packs. */
+  /**
+   * Serve the skill packs as git-backed harness skills instead of inlining them
+   * into each role's instructions.
+   *
+   * This used to double as the sandbox switch, which meant a deployment could
+   * not have one without the other. Sandbox execution is now `sandbox.enabled`;
+   * this flag is only about where the skill packs come from. The harness still
+   * requires a sandbox to serve skills, so turning this on turns the sandbox on
+   * with it.
+   */
   useHarnessSkills: boolean;
 }
 
@@ -138,6 +212,14 @@ function envBool(key: string, fallback: boolean): boolean {
   const v = process.env[key];
   if (v === undefined || v === '') return fallback;
   return /^(1|true|yes|on)$/i.test(v);
+}
+
+/** A comma-separated env var as a trimmed list, with the blanks dropped. */
+function splitList(raw: string): string[] {
+  return raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 /**
@@ -246,6 +328,16 @@ export function loadConfig(overrides: Partial<{ repoPath: string }> = {}): Confi
       testCommand: env('DOCXY_TEST_COMMAND', ''),
       checkLinks: envBool('DOCXY_CHECK_LINKS', true),
     },
+    sandbox: {
+      enabled: envBool('DOCXY_SANDBOX', true),
+      fallback: env('DOCXY_SANDBOX_FALLBACK', 'skip').trim().toLowerCase() === 'local'
+        ? 'local'
+        : 'skip',
+      daytonaApiKey: env('DAYTONA_API_KEY'),
+      autoStopMinutes: Math.max(0, envInt('DOCXY_SANDBOX_AUTOSTOP_MINUTES', 15)),
+      autoDeleteMinutes: Math.max(0, envInt('DOCXY_SANDBOX_AUTODELETE_MINUTES', 60)),
+      execTimeoutMs: Math.max(1000, envInt('DOCXY_SANDBOX_EXEC_TIMEOUT_SECONDS', 600) * 1000),
+    },
     approval: {
       staleAfterMinutes: envInt('DOCXY_APPROVAL_STALE_MINUTES', 60),
       required: approvalRequired(),
@@ -256,7 +348,15 @@ export function loadConfig(overrides: Partial<{ repoPath: string }> = {}): Confi
       runTimeoutMs: Math.max(60, envInt('DOCXY_RUN_TIMEOUT_SECONDS', 2700)) * 1000,
       sessionMaxTurns: Math.max(0, envInt('DOCXY_SESSION_MAX_TURNS', 12)),
     },
-    server: { port: envInt('DOCXY_PORT', 4317) },
+    server: {
+      port: envInt('DOCXY_PORT', 4317),
+      // Trimmed here, once. Both dashboard callers trim before sending, so a
+      // value with stray whitespace would otherwise be "configured" on this
+      // side and a different string on theirs — every request a 401, for a
+      // reason nothing reports. All-whitespace is no token at all.
+      apiToken: env('DOCXY_API_TOKEN').trim() || undefined,
+      allowedRepos: splitList(env('DOCXY_ALLOWED_REPOS')).map((r) => r.toLowerCase()),
+    },
     github: {
       token: env('GITHUB_TOKEN') || env('GH_TOKEN') || undefined,
       repo: env('GITHUB_REPOSITORY') || undefined,

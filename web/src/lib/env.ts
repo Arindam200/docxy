@@ -45,6 +45,17 @@ export function authReady(): boolean {
   return requiredEnv().every((item) => item.present);
 }
 
+/**
+ * Whether new accounts may be created here.
+ *
+ * Closed by default: there is no email verification step, so an open form would
+ * let whoever types an address in DOCXY_ALLOWED_EMAILS first become an
+ * operator. Opened deliberately, for long enough to create the first account.
+ */
+export function signupOpen(): boolean {
+  return process.env.DOCXY_ALLOW_SIGNUP === "1";
+}
+
 export function missingEnv(): EnvRequirement[] {
   return requiredEnv().filter((item) => !item.present);
 }

@@ -2,6 +2,7 @@ import { LuCircleCheck, LuCircleDashed, LuClock } from "react-icons/lu";
 
 import { catalogIcons, integrationIcons } from "@/components/icons";
 import type { CatalogEntry } from "@/lib/integrations";
+import { lookup } from "@/lib/lookup";
 
 /**
  * One integration in the catalogue.
@@ -26,7 +27,7 @@ export function IntegrationCard({
   href?: string;
 }) {
   const soon = entry.status === "soon";
-  const icon = catalogIcons[entry.id] ?? integrationIcons.plug;
+  const icon = lookup(catalogIcons, entry.id) ?? integrationIcons.plug;
 
   const badge = soon
     ? { label: "Coming soon", tone: "border-rule bg-surface-2 text-muted", icon: <LuClock /> }
