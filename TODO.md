@@ -191,8 +191,11 @@ lands checkouts on the volume. Full runbook in
 - [ ] Give **this** service a public domain. Unlike the harness it is
       authenticated, and both the dashboard and GitHub's webhook reach it from
       outside the private network.
-- [ ] `railway run npm run setup` — the Nebius provider lives in the harness's
-      own database, so a fresh harness has never heard of it
+- [ ] Register Nebius in the fresh harness — `railway ssh` into the docxy
+      service, then **`node dist/cli.js setup`**. Not `railway run` (that runs
+      on your laptop, where `harness.railway.internal` does not resolve) and not
+      `npm run setup` (the runtime image has no `tsx` and no `src/`). Needs the
+      Railway CLI: `npm i -g @railway/cli`.
 
 ### Vercel — the step with a blast radius
 

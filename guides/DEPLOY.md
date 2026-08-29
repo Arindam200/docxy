@@ -140,11 +140,32 @@ it from outside the private network.
 
 ### Register Nebius once
 
-The provider lives in the harness's database, so a fresh harness needs it:
+The provider lives in the harness's own database, so a fresh harness has never
+heard of it. This has to run **inside** the docxy container, and the command is
+not the obvious one:
 
 ```bash
-railway run npm run setup
+railway ssh                       # into the docxy service
+node dist/cli.js setup
 ```
+
+Both halves matter, and both have an obvious-looking wrong version:
+
+- **`railway ssh`, not `railway run`.** `railway run` executes on *your laptop*
+  with Railway's environment variables injected — and `harness.railway.internal`
+  resolves only inside Railway's network, so it fails with the harness
+  unreachable while every variable looks correct.
+- **`node dist/cli.js setup`, not `npm run setup`.** The `setup` script is
+  `tsx src/cli.ts setup`, and the runtime image has neither `tsx` (a
+  devDependency, dropped by `npm ci --omit=dev`) nor `src/`. It fails with
+  `sh: 1: tsx: not found`. The compiled CLI is the same program.
+
+Expect `✓ Nebius provider created` followed by `✓ All registered models
+resolve.` A warning about no sandbox provider is separate and expected — see
+below.
+
+Needs the Railway CLI: `npm i -g @railway/cli`, then `railway login` and
+`railway link` to the project.
 
 ### 5. Point the dashboard at it
 
