@@ -152,10 +152,20 @@ lands checkouts on the volume. Full runbook in
 ### The harness service
 
 - [ ] New service from the Docker image `tfy.jfrog.io/tfy-images/trueforge:0.1.4-fba492f`
+      — pulls anonymously, verified. Stay on this tag: it is npm's `latest`, so
+      the deployed harness matches the one you develop against. The chart's
+      `values.yaml` now points at a `0.2.0-rc.0` prerelease; don't follow it.
+- [ ] **`STANDALONE=true`** — not optional. The image defaults to distributed
+      mode and exits with `ECONNREFUSED 127.0.0.1:5432` looking for Postgres.
+      Railway shows a crash loop with no obvious cause. The `npx` harness
+      defaults the other way, which is why this never bites locally.
 - [ ] `PORT=8790` and `HOST=::` — Railway's private network is IPv6-only and the
       image defaults to `0.0.0.0`. Miss this and the harness is unreachable with
-      exactly the symptom of a wrong URL, which is a slow thing to debug.
-- [ ] Health check path `/healthz`
+      exactly the symptom of a wrong URL, which is a slow thing to debug. Right,
+      it logs `Agent server listening on http://:::8790`.
+- [ ] Health check path `/healthz` — answers `OK!`
+- [ ] Volume at `/root/.local/share/trueforge`, where standalone mode keeps the
+      SQLite holding every role session. No volume, no session reuse.
 - [ ] **No public domain.** TrueForge ships no machine authentication — no API
       key, no bearer token, only a browser OIDC flow a server cannot complete.
       Keeping it private is not extra hardening, it is the access control.
@@ -199,12 +209,19 @@ has never run.
 
 ### Then prove it end to end
 
-- [ ] `docxy doctor` against the deployed service says **sandbox ready**. In a
-      container the local sandbox is bubblewrap, which needs kernel privileges
-      a managed platform may not grant. If it is unavailable the docs-build
-      check fails *by design* and every proposal opens as a draft — correct
-      behaviour, wrong outcome for a live demo. `DAYTONA_API_KEY` sidesteps the
-      kernel question entirely.
+- [ ] **Sandbox — this one needs a decision.** Measured: the containerized
+      harness reports `sandbox.enabled: false`, the laptop one reports `true`.
+      Not a kernel or platform limit — `bwrap` is simply not in the image. So a
+      deployed harness has no local sandbox and no variable creates one; the
+      docs build is reported unvalidated and every proposal opens as a draft.
+      The boundary holds, but the `[sandbox]` badge is gone.
+
+      Daytona is the only way to keep it hosted, and **the current key will not
+      do it** — it lists sandboxes (200) but registration needs snapshot-create
+      and is refused 422. Issue a write-scoped key at app.daytona.io, set it on
+      both services, re-run `docxy setup`, and the report reads `[daytona]`.
+- [ ] Confirm with `curl https://<domain>/api/v1/capabilities` before demo day,
+      not during it.
 - [ ] Point the GitHub App's webhook at `https://<domain>/webhook`
 - [ ] Push a commit and watch a run appear with nobody at a terminal. That is
       the thing a deployment buys that the CLI cannot: the CLI documents the

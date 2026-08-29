@@ -41,22 +41,44 @@ tfy.jfrog.io/tfy-images/trueforge:0.1.4-fba492f
 ```
 
 The image is anonymously pullable, so there is no registry credential to set up.
-Check for a newer tag in [charts/trueforge/values.yaml](https://github.com/truefoundry/trueforge/blob/main/charts/trueforge/values.yaml).
+Verified by pulling it: no login, no token.
 
-### 2. Set two variables on it
+**Stay on this tag.** `0.1.4` is npm's `latest`, and therefore what
+`npx @truefoundry/trueforge@latest` runs on a laptop — so the deployed harness
+behaves like the one you developed against.
+[charts/trueforge/values.yaml](https://github.com/truefoundry/trueforge/blob/main/charts/trueforge/values.yaml)
+has moved ahead to `0.2.0-rc.0-…`, which is a release candidate; following it
+gets you a prerelease *and* a version skew with local.
+
+### 2. Set three variables on it
 
 ```bash
 PORT=8790
 HOST=::
+STANDALONE=true
 ```
+
+**`STANDALONE=true` is not optional.** The container image defaults to
+`mode: distributed` and expects Postgres — without this it exits immediately
+with `Failed to start server: connect ECONNREFUSED 127.0.0.1:5432` and Railway
+shows a crash loop with no obvious cause. (The `npx` harness defaults the other
+way, which is why this never comes up locally.) With it set, the harness comes
+up on SQLite and logs `Standalone mode: sqlite at
+/root/.local/share/trueforge/db/db.sqlite`.
 
 `HOST=::` is the one that is easy to miss and hard to debug. Railway's private
 network is **IPv6-only**, and TrueForge's container image defaults to
 `HOST=0.0.0.0`, which does not accept IPv6. Without this, `harness.railway.internal`
 refuses the connection and docxy reports the harness as unreachable — exactly the
-same symptom as not setting the URL at all.
+same symptom as not setting the URL at all. Set correctly, the harness logs
+`Agent server listening on http://:::8790`.
 
-Health check path: `/healthz`.
+Health check path: `/healthz`, which answers `OK!`.
+
+**Attach a volume at `/root/.local/share/trueforge`.** That SQLite file is where
+the role sessions live. Without it, a redeploy discards every session and the
+next commit starts cold — the same loss the docxy service's own volume prevents,
+one layer down.
 
 ### 3. Do **not** give it a public domain
 
@@ -149,30 +171,87 @@ a mismatched value is a 401 on every read with nothing on the page to say so.
 
 ---
 
-## The sandbox needs checking once you deploy
+### 6. Wire the GitHub App, so a push is all it takes
 
-The docs build is the one validation step that executes a command over text a
-model just wrote, so it runs inside the harness sandbox. On your laptop that is
-Seatbelt, and it works with no account.
+Without this the deployment can be looked at but not exercised: nothing triggers
+a run except an API call. With it, anyone who can push to an installed
+repository can set the whole pipeline going and watch it on the dashboard.
 
-In a container it is bubblewrap, which needs kernel features (user namespaces)
-that a managed container platform does not always grant. If the harness comes up
-without sandbox support, `sandboxAvailability()` reports it unavailable, and
-with the default `DOCXY_SANDBOX_FALLBACK=skip` the docs-build check **fails** —
-correctly, by design, rather than quietly running on the host. Every proposal
-then opens as a draft carrying that reason.
+On the **docxy** service:
 
-That is the right behaviour and the wrong outcome for a deployment you want
-green. Two ways out, in order of preference:
+```bash
+GITHUB_APP_ID=
+GITHUB_APP_PRIVATE_KEY=          # the PEM itself; no file to place first
+GITHUB_APP_INSTALLATION_ID=
+GITHUB_WEBHOOK_SECRET=           # openssl rand -hex 32
+```
 
-1. **Set `DAYTONA_API_KEY`** on the docxy service and re-run `docxy setup`. The
-   remote sandbox does not depend on the harness container's kernel privileges
-   at all, and the validation report says `[daytona]` instead of `[sandbox]`.
-2. Leave `DOCXY_SANDBOX_FALLBACK=skip` and accept drafts, if you would rather
-   not add a third-party account.
+Then set the App's **webhook URL** to `https://<your-docxy-domain>/webhook` and
+its secret to the same value. [guides/GITHUB-APP.md](GITHUB-APP.md) finds the
+three ids.
 
-Check which one you got before assuming, with `docxy doctor` against the
-deployed service — it reports the sandbox backend it would actually use.
+Until `GITHUB_WEBHOOK_SECRET` is set, `POST /webhook` answers `503` to
+everything rather than accepting unverified deliveries, so a webhook that
+appears to do nothing is usually this.
+
+A push to an installed repository should now produce a run in the dashboard with
+nobody at a terminal. That is the whole difference between a hosted deployment
+and a CLI: the CLI documents the repository you are standing in; the deployment
+documents every repository the App is installed on.
+
+---
+
+## The sandbox does not survive containerization
+
+Measured, not guessed. The same `/api/v1/capabilities` call against both:
+
+| harness | `sandbox.enabled` |
+|---|---|
+| `npx @truefoundry/trueforge@latest` on a laptop | `true` |
+| `tfy-images/trueforge:0.1.4-fba492f` in a container | **`false`** |
+
+The cause is not the kernel and not the platform. `bwrap` is simply **not
+installed in the image**, while the container's kernel offers user namespaces
+perfectly happily (`/proc/sys/user/max_user_namespaces` reads five figures). The
+harness says as much itself: *"Skills run in a sandbox, which is not
+configured."*
+
+So a deployed harness has no local sandbox, and there is no environment variable
+that conjures one. What follows from that, by design rather than by accident:
+`DOCXY_SANDBOX_FALLBACK` defaults to `skip`, so the docs build is **reported
+unvalidated** rather than quietly executed on the host, and every proposal opens
+as a draft carrying that reason. The isolation boundary holds. The `[sandbox]`
+badge does not appear.
+
+### Getting it back
+
+**Register a Daytona provider.** It is a hosted sandbox, so it does not care
+what the harness container can or cannot do, and it is the only option that
+keeps the deployment fully hosted.
+
+The key needs write access. Setting `DAYTONA_API_KEY` alone changes nothing —
+the provider has to be registered in the harness, which `docxy setup` does, and
+that step **builds a snapshot on Daytona**. A read-scoped key authenticates
+against the API and is still refused here:
+
+```
+! No remote sandbox provider: the harness refused the Daytona provider
+  (HTTP 422): {"error":{"message":"Daytona rejected the API key — check the credentials"}}
+```
+
+A key that returns `200` from `GET https://app.daytona.io/api/sandbox` can still
+produce exactly that. Listing is not creating. Issue a key with snapshot-create
+permission at [app.daytona.io](https://app.daytona.io), set it on **both** the
+harness service and the docxy service, then re-run `docxy setup` against the
+deployed harness. The validation report then reads `[daytona]` where it used to
+read `[sandbox]`.
+
+Confirm before relying on it, rather than at demo time:
+
+```bash
+curl -s https://<harness-or-docxy-domain>/api/v1/capabilities   # sandbox.enabled
+docxy doctor                                                    # names the backend
+```
 
 ---
 
