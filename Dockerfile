@@ -36,15 +36,25 @@ COPY --from=build /app/dist ./dist
 COPY skills ./skills
 
 # checkoutPathFor() puts managed clones under $HOME/.docxy/checkouts, and both
-# the role sessions and the symbol map key on that path. Mount a volume here:
-# without one, every redeploy starts the next commit from cold sessions and an
-# empty map, which is exactly the accumulation this design exists to get.
+# the role sessions and the symbol map key on that path. Attach the platform's
+# persistent volume here: without one, every redeploy starts the next commit
+# from cold sessions and an empty map, which is exactly the accumulation this
+# design exists to build.
+#
+# Deliberately no `VOLUME` instruction. Railway rejects the image for carrying
+# one ("docker VOLUME at Line 47 is not supported, use Railway Volumes"), and an
+# anonymous volume would in any case shadow the mount a platform attaches here.
 ENV HOME=/data
 RUN useradd --uid 10001 --home-dir /data --no-create-home --shell /usr/sbin/nologin docxy \
  && mkdir -p /data \
  && chown -R docxy:docxy /data
+
+# Non-root, which is correct anywhere the volume's ownership can be set. Railway
+# mounts volumes root-owned and documents the consequence — images running as a
+# non-root uid "will have permissions issues when performing operations within
+# an attached volume" — so a Railway service needs RAILWAY_RUN_UID=0 alongside
+# this. guides/DEPLOY.md carries that in the checklist.
 USER docxy
-VOLUME ["/data"]
 
 # The platform assigns the real one through PORT; this is the local default.
 ENV PORT=4317

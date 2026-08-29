@@ -82,12 +82,25 @@ Two things about that image are load-bearing:
 - **It installs `git`.** The pipeline shells out to it for every diff, every
   throwaway worktree, and every managed checkout. A slimmer base without it
   builds fine and fails on the first run.
-- **It declares a volume at `/data`,** which is the container's `HOME`.
-  `checkoutPathFor()` puts managed clones under `$HOME/.docxy/checkouts`, and
-  role sessions and the symbol map both key on that path. **Attach a Railway
-  volume mounted at `/data`.** Without one, every redeploy hands the next commit
-  cold sessions and an empty symbol map — losing precisely the accumulation
-  this design exists to produce.
+- **It sets `HOME=/data`.** `checkoutPathFor()` puts managed clones under
+  `$HOME/.docxy/checkouts`, and role sessions and the symbol map both key on
+  that path. **Attach a Railway volume mounted at `/data`.** Without one, every
+  redeploy hands the next commit cold sessions and an empty symbol map — losing
+  precisely the accumulation this design exists to produce.
+
+  Two things about that volume:
+
+  - The image carries **no `VOLUME` instruction**, on purpose. Railway refuses
+    to build an image that has one (*"docker VOLUME at Line 47 is not supported,
+    use Railway Volumes"*), and an anonymous volume would shadow the mount
+    anyway. The mount is something you attach to the service, not something the
+    image declares.
+  - **Set `RAILWAY_RUN_UID=0`.** The image runs as a non-root user, which is
+    correct anywhere the volume's ownership can be set, but Railway mounts
+    volumes root-owned and documents the result: images running as a non-root
+    uid *"will have permissions issues when performing operations within an
+    attached volume."* Without this the container boots and then fails on the
+    first `git clone` into `/data`, which is a long way from the cause.
 
 Then point it at the harness:
 
