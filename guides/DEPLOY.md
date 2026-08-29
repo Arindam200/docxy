@@ -34,17 +34,27 @@ itself and the dashboard that reads it.
 
 ### 1. Add the harness as a service
 
-New service → **Deploy from Docker image**:
+**Do not use Railway's "deploy from Docker image" field.** It rejects the
+upstream tag with **`Invalid Docker image`**, even though the image is real and
+anonymously pullable — `docker pull tfy.jfrog.io/tfy-images/trueforge:0.1.4-fba492f`
+succeeds with no credential. Railway's registry probe fails against JFrog; the
+reference is fine.
 
+Deploy the harness **from this repository** instead, using
+[`harness.Dockerfile`](../harness.Dockerfile). It is four `apt-get` lines on top
+of the upstream image, so the base is pulled at build time — where it works.
+
+New service → **GitHub Repo** → this repository → then in its **Variables**:
+
+```bash
+RAILWAY_DOCKERFILE_PATH=harness.Dockerfile
 ```
-tfy.jfrog.io/tfy-images/trueforge:0.1.4-fba492f
-```
 
-The image is anonymously pullable, so there is no registry credential to set up.
-Verified by pulling it: no login, no token.
+That is what points this service at the harness image while the docxy service
+keeps building the root `Dockerfile`.
 
-**Stay on this tag.** `0.1.4` is npm's `latest`, and therefore what
-`npx @truefoundry/trueforge@latest` runs on a laptop — so the deployed harness
+**Stay on the pinned base tag.** `0.1.4` is npm's `latest`, and therefore what
+`npx @truefoundry/trueforge@latest` runs on a laptop, so the deployed harness
 behaves like the one you developed against.
 [charts/trueforge/values.yaml](https://github.com/truefoundry/trueforge/blob/main/charts/trueforge/values.yaml)
 has moved ahead to `0.2.0-rc.0-…`, which is a release candidate; following it
@@ -222,57 +232,68 @@ documents every repository the App is installed on.
 
 ---
 
-## The sandbox does not survive containerization
+## The sandbox in a container: what it actually takes
 
-Measured, not guessed. The same `/api/v1/capabilities` call against both:
+The upstream image cannot run its own sandbox, and the earlier explanation here
+was wrong twice before the harness's own startup log settled it. It names each
+missing piece in turn, so the chain is worth reading rather than guessing at:
 
-| harness | `sandbox.enabled` |
+| what the harness said | what fixed it |
 |---|---|
-| `npx @truefoundry/trueforge@latest` on a laptop | `true` |
-| `tfy-images/trueforge:0.1.4-fba492f` in a container | **`false`** |
+| `SRT host dependencies missing (linux: bwrap, socat, rg)` | install `bubblewrap socat ripgrep` |
+| `bwrap: Can't mount proc on /newroot/proc: Operation not permitted` | run the container **privileged** |
+| `No usable Python 3 interpreter in sandbox` | install `python3` |
+| `Local sandbox fallback is available` | — |
 
-The cause is not the kernel and not the platform. `bwrap` is simply **not
-installed in the image**, while the container's kernel offers user namespaces
-perfectly happily (`/proc/sys/user/max_user_namespaces` reads five figures). The
-harness says as much itself: *"Skills run in a sandbox, which is not
-configured."*
+At which point `/api/v1/capabilities` reports:
 
-So a deployed harness has no local sandbox, and there is no environment variable
-that conjures one. What follows from that, by design rather than by accident:
+```json
+{"sandbox":{"enabled":true},"skill":{"enabled":true},"settings":{"enabled":true}}
+```
+
+[`harness.Dockerfile`](../harness.Dockerfile) carries all four packages, so the
+only thing it cannot supply is the privilege.
+
+**`--cap-add SYS_ADMIN` is not enough.** Tested: it still fails at the `/proc`
+mount. It takes full `--privileged`.
+
+### What that means per platform
+
+**On Railway: no local sandbox.** Railway does not offer privileged containers,
+and no environment variable substitutes. The harness runs fine; its sandbox does
+not. What follows is by design rather than by accident —
 `DOCXY_SANDBOX_FALLBACK` defaults to `skip`, so the docs build is **reported
 unvalidated** rather than quietly executed on the host, and every proposal opens
 as a draft carrying that reason. The isolation boundary holds. The `[sandbox]`
 badge does not appear.
 
-### Getting it back
-
-**Register a Daytona provider.** It is a hosted sandbox, so it does not care
-what the harness container can or cannot do, and it is the only option that
-keeps the deployment fully hosted.
-
-The key needs write access. Setting `DAYTONA_API_KEY` alone changes nothing —
-the provider has to be registered in the harness, which `docxy setup` does, and
-that step **builds a snapshot on Daytona**. A read-scoped key authenticates
-against the API and is still refused here:
+To get it back on Railway, register a **Daytona** provider. The key must be able
+to *create*, not just read: registration builds a snapshot, and a read-scoped key
+authenticates against the API and is still refused —
 
 ```
-! No remote sandbox provider: the harness refused the Daytona provider
-  (HTTP 422): {"error":{"message":"Daytona rejected the API key — check the credentials"}}
+GET https://app.daytona.io/api/sandbox   -> 200
+docxy setup                              -> HTTP 422: Daytona rejected the API key
 ```
 
-A key that returns `200` from `GET https://app.daytona.io/api/sandbox` can still
-produce exactly that. Listing is not creating. Issue a key with snapshot-create
-permission at [app.daytona.io](https://app.daytona.io), set it on **both** the
-harness service and the docxy service, then re-run `docxy setup` against the
-deployed harness. The validation report then reads `[daytona]` where it used to
-read `[sandbox]`.
+Listing is not creating, and from outside the two failure modes look identical.
+Set the key on both services, re-run setup, and the validation report reads
+`[daytona]` where it used to read `[sandbox]`.
 
-Confirm before relying on it, rather than at demo time:
+**On a VM with Docker Compose: the sandbox works, with no third-party account.**
+Give the harness service `privileged: true` and build it from
+`harness.Dockerfile`. This is the only fully self-hosted route that keeps the
+sandbox — worth knowing if a Daytona key is not available.
+
+### Confirm rather than assume
 
 ```bash
-curl -s https://<harness-or-docxy-domain>/api/v1/capabilities   # sandbox.enabled
-docxy doctor                                                    # names the backend
+curl -s https://<harness-domain>/api/v1/capabilities   # sandbox.enabled
+docxy doctor                                           # names the backend
 ```
+
+The harness also states it plainly in its own startup log, one line, either
+`Local sandbox fallback is available` or `unavailable` with the reason.
 
 ---
 
