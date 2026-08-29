@@ -102,24 +102,66 @@ async function githubFetch(
   );
 }
 
-/** Null when the App is not configured, which is the signal to fall back. */
-export function readAppCredentials(): AppCredentials | null {
-  const appId = process.env.GITHUB_APP_ID?.trim();
-  const keyPath = process.env.GITHUB_APP_PRIVATE_KEY_PATH?.trim();
-  const installationId = process.env.GITHUB_APP_INSTALLATION_ID?.trim();
-  if (!appId || !keyPath || !installationId) return null;
+/**
+ * Repair a PEM that travelled through an environment variable.
+ *
+ * Two shapes arrive, and both are what a deployment dashboard's paste box
+ * actually produces. Base64 of the PEM is the shape people reach for precisely
+ * to avoid the newline problem, so it is decoded when the value carries no
+ * header and nothing outside the base64 alphabet. The other shape is a PEM
+ * whose line breaks survived as the two characters `\` and `n`, which is what
+ * a shell `export` and most web forms do to a multi-line value — repaired
+ * rather than rejected, because the resulting key fails to parse with an error
+ * that points nowhere near the cause.
+ */
+export function normalizePem(raw: string): string {
+  const value = raw.trim();
+  if (!value.includes('-----BEGIN') && /^[A-Za-z0-9+/=\s]+$/.test(value)) {
+    const decoded = Buffer.from(value, 'base64').toString('utf8');
+    if (decoded.includes('-----BEGIN')) return decoded.trim();
+  }
+  return value.includes('\\n') ? value.replace(/\\n/g, '\n') : value;
+}
 
-  const slug = process.env.GITHUB_APP_SLUG?.trim() || 'docxy';
-  let privateKey: string;
+/**
+ * The App's PEM, from the environment or from a file.
+ *
+ * A path is the right shape on a laptop, where the key is a download that never
+ * needs to move. It is the wrong shape on a managed platform: Railway, Render
+ * and Fly hand a service environment variables, not a filesystem to place
+ * secrets on beforehand. So `GITHUB_APP_PRIVATE_KEY` carries the key itself and
+ * wins when both are set, and neither being set is "not configured" rather than
+ * an error — the same signal an absent App id gives.
+ */
+function readPrivateKey(): string | null {
+  const inline = process.env.GITHUB_APP_PRIVATE_KEY?.trim();
+  if (inline) return normalizePem(inline);
+
+  const keyPath = process.env.GITHUB_APP_PRIVATE_KEY_PATH?.trim();
+  if (!keyPath) return null;
+
   try {
-    privateKey = readFileSync(keyPath, 'utf8');
+    return readFileSync(keyPath, 'utf8');
   } catch (cause) {
     throw new Error(
       `GITHUB_APP_PRIVATE_KEY_PATH points at ${keyPath}, which could not be read: ` +
-        `${cause instanceof Error ? cause.message : String(cause)}`,
+        `${cause instanceof Error ? cause.message : String(cause)}. ` +
+        `On a platform with nowhere to put the file, set GITHUB_APP_PRIVATE_KEY ` +
+        `to the PEM itself instead.`,
     );
   }
+}
 
+/** Null when the App is not configured, which is the signal to fall back. */
+export function readAppCredentials(): AppCredentials | null {
+  const appId = process.env.GITHUB_APP_ID?.trim();
+  const installationId = process.env.GITHUB_APP_INSTALLATION_ID?.trim();
+  if (!appId || !installationId) return null;
+
+  const privateKey = readPrivateKey();
+  if (!privateKey) return null;
+
+  const slug = process.env.GITHUB_APP_SLUG?.trim() || 'docxy';
   return {
     appId,
     privateKey,
@@ -212,12 +254,17 @@ export interface AppStatus {
 /** Read-only view of the App configuration, for the integrations dashboard. */
 export function appStatus(): AppStatus {
   const missing: string[] = [];
-  for (const key of [
-    'GITHUB_APP_ID',
-    'GITHUB_APP_PRIVATE_KEY_PATH',
-    'GITHUB_APP_INSTALLATION_ID',
-  ]) {
+  for (const key of ['GITHUB_APP_ID', 'GITHUB_APP_INSTALLATION_ID']) {
     if (!process.env[key]?.trim()) missing.push(key);
+  }
+
+  // Either source satisfies the key. Naming only one would send an operator on
+  // a managed platform looking for a filesystem to put it on.
+  if (
+    !process.env.GITHUB_APP_PRIVATE_KEY?.trim() &&
+    !process.env.GITHUB_APP_PRIVATE_KEY_PATH?.trim()
+  ) {
+    missing.push('GITHUB_APP_PRIVATE_KEY or GITHUB_APP_PRIVATE_KEY_PATH');
   }
 
   const webhookSecretSet = Boolean(process.env.GITHUB_WEBHOOK_SECRET?.trim());
