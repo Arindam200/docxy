@@ -151,10 +151,15 @@ lands checkouts on the volume. Full runbook in
 
 ### The harness service
 
-- [ ] New service from the Docker image `tfy.jfrog.io/tfy-images/trueforge:0.1.4-fba492f`
-      — pulls anonymously, verified. Stay on this tag: it is npm's `latest`, so
-      the deployed harness matches the one you develop against. The chart's
-      `values.yaml` now points at a `0.2.0-rc.0` prerelease; don't follow it.
+- [ ] **Not** Railway's "deploy from Docker image" field — it rejects the
+      upstream tag with `Invalid Docker image`, though `docker pull` of that
+      exact tag succeeds with no credential. Railway's registry probe fails
+      against JFrog. Deploy from **this repo** instead and set
+      `RAILWAY_DOCKERFILE_PATH=harness.Dockerfile`, which builds the harness
+      from the pinned base and adds what its sandbox needs.
+      Stay on that base tag: `0.1.4` is npm's `latest`, so the deployed harness
+      matches the one you develop against. The chart's `values.yaml` now points
+      at a `0.2.0-rc.0` prerelease; don't follow it.
 - [ ] **`STANDALONE=true`** — not optional. The image defaults to distributed
       mode and exits with `ECONNREFUSED 127.0.0.1:5432` looking for Postgres.
       Railway shows a crash loop with no obvious cause. The `npx` harness
@@ -191,8 +196,11 @@ lands checkouts on the volume. Full runbook in
 - [ ] Give **this** service a public domain. Unlike the harness it is
       authenticated, and both the dashboard and GitHub's webhook reach it from
       outside the private network.
-- [ ] `railway run npm run setup` — the Nebius provider lives in the harness's
-      own database, so a fresh harness has never heard of it
+- [ ] Register Nebius in the fresh harness — `railway ssh` into the docxy
+      service, then **`node dist/cli.js setup`**. Not `railway run` (that runs
+      on your laptop, where `harness.railway.internal` does not resolve) and not
+      `npm run setup` (the runtime image has no `tsx` and no `src/`). Needs the
+      Railway CLI: `npm i -g @railway/cli`.
 
 ### Vercel — the step with a blast radius
 
@@ -209,17 +217,21 @@ has never run.
 
 ### Then prove it end to end
 
-- [ ] **Sandbox — this one needs a decision.** Measured: the containerized
-      harness reports `sandbox.enabled: false`, the laptop one reports `true`.
-      Not a kernel or platform limit — `bwrap` is simply not in the image. So a
-      deployed harness has no local sandbox and no variable creates one; the
-      docs build is reported unvalidated and every proposal opens as a draft.
-      The boundary holds, but the `[sandbox]` badge is gone.
+- [ ] **Sandbox — this one needs a decision.** The chain is now fully mapped.
+      The upstream image is missing `bwrap`, `socat`, `rg` and `python3`;
+      `harness.Dockerfile` adds all four. After that the only remaining
+      requirement is that the container run **privileged**, because bubblewrap
+      mounts `/proc` in a new namespace (`--cap-add SYS_ADMIN` is not enough —
+      tested). With privileges the harness reports
+      `{"sandbox":{"enabled":true},"skill":{"enabled":true}}`.
 
-      Daytona is the only way to keep it hosted, and **the current key will not
-      do it** — it lists sandboxes (200) but registration needs snapshot-create
-      and is refused 422. Issue a write-scoped key at app.daytona.io, set it on
-      both services, re-run `docxy setup`, and the report reads `[daytona]`.
+      **Railway does not offer privileged containers**, so on Railway the
+      sandbox stays off however the image is built, the docs build is reported
+      unvalidated, and proposals open as drafts. Two ways out:
+      a write-scoped **Daytona** key (the current one lists — 200 — but cannot
+      create snapshots, so registration is refused 422), **or** run the whole
+      topology on a **VM with Docker Compose** and `privileged: true`, which is
+      the only fully self-hosted route that keeps the sandbox.
 - [ ] Confirm with `curl https://<domain>/api/v1/capabilities` before demo day,
       not during it.
 - [ ] Point the GitHub App's webhook at `https://<domain>/webhook`
