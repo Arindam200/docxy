@@ -168,6 +168,11 @@ lands checkouts on the volume. Full runbook in
       redeploy hands the next commit cold sessions and an empty symbol map —
       losing the accumulation that is the whole point of the design, and the
       strongest beat in the demo.
+- [ ] **`RAILWAY_RUN_UID=0`**, alongside that volume. The image runs as a
+      non-root user; Railway mounts volumes root-owned and says so — non-root
+      images "will have permissions issues when performing operations within an
+      attached volume". Skip it and the container boots fine, then fails on the
+      first clone into `/data`.
 - [ ] `TRUEFORGE_BASE_URL=http://harness.railway.internal:8790`
 - [ ] `NEBIUS_API_KEY`, `DOCXY_API_TOKEN`, `DOCXY_ALLOWED_EMAILS`, and the Neon
       `DATABASE_URL` — without the last one, runs are JSON files the container
