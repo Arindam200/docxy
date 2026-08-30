@@ -458,8 +458,13 @@ check('empty history has no rates',
   const before = { ...process.env };
   const reload = () => loadConfig().approval.required;
 
-  delete process.env.DOCXY_REQUIRE_APPROVAL;
-  delete process.env.DOCXY_APPROVAL_MODE;
+  // Empty, not deleted — the same reason as the token test below. `loadDotEnv`
+  // fills in any key that is `undefined`, so deleting these gives the
+  // repository's own .env the final say, and a checkout that sets
+  // DOCXY_REQUIRE_APPROVAL (recording the demo needs it) then fails a test
+  // about what happens when nobody set it at all.
+  process.env.DOCXY_REQUIRE_APPROVAL = '';
+  process.env.DOCXY_APPROVAL_MODE = '';
   check('no approval setting means no gate', reload() === false);
 
   process.env.DOCXY_APPROVAL_MODE = 'always';

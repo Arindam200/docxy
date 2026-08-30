@@ -16,6 +16,12 @@ npx tsx src/cli.ts setup               # once, registers Nebius
 npx tsx src/cli.ts doctor              # all five models should resolve
 ```
 
+**Set `DOCXY_REQUIRE_APPROVAL=true` in `.env` before you record.** The gate is
+**off** by default: `approvalRequired()` returns false, the pipeline calls
+`autoApprove()`, and the run goes straight to opening a pull request. Nothing
+warns you — the run simply succeeds without ever pausing, and step 4 below, the
+best beat in the demo, silently does not happen.
+
 `doctor` is worth running immediately before recording. If a model does not
 resolve, the run fails four minutes in, which is a bad thing to discover live.
 
@@ -60,7 +66,7 @@ the payoff in step 3 depends on starting from nothing.
 ### 2. First commit: the pipeline learns the repo
 
 ```bash
-npx tsx src/cli.ts run 7ee9a8e --repo .demo-repo
+npx tsx src/cli.ts run HEAD~1 --repo .demo-repo
 ```
 
 Five roles run. Watch for `(session reused)` being **absent** — every role is
@@ -75,17 +81,24 @@ npx tsx src/cli.ts run HEAD --repo .demo-repo
 This is the beat worth pausing on. The summary line reads:
 
 ```
-memory 6 symbol(s) carried in, 10 new mapping(s) learned
+memory 2 symbol(s) carried in, 7 new mapping(s) learned
 ```
 
-Six symbols carried in — the first run taught it where `--output` is documented,
-and the second run did not re-derive that.
+Symbols carried in — the first run taught it where `--output` is documented, and
+the second run did not re-derive that. **The counts vary between runs**: the
+models are not deterministic, so treat a non-zero "carried in" as the thing to
+point at, not the specific number. The run below produced 2; an earlier one
+produced 6.
 
-The approval gate is not optional and has no "off" setting — every run stops for
-sign-off. What the change itself decides is *how many* reviewers:
-`decideScope()` returns **elevated** (two sign-offs) when the change is
-classified breaking, touches documented public API, proposes a major bump, or
-the Coordinator asks for a second look, and **routine** (one) otherwise.
+With `DOCXY_REQUIRE_APPROVAL=true` set, every run stops for sign-off. What the
+change itself decides is *how many* reviewers: `decideScope()` returns
+**elevated** (two sign-offs) when the change is classified breaking, touches
+documented public API, proposes a major bump, or the Coordinator asks for a
+second look, and **routine** (one) otherwise.
+
+Both demo commits reach **elevated**, for different reasons — commit 1 on the
+public-API surface alone, commit 2 on all four. So the two-sign-off beat is
+available on either run, not just the second.
 
 So this commit reaches the two-sign-off gate on its merits. If your run prints
 `routine scope, 0/1` instead, the classifier read the change as smaller than the
@@ -128,6 +141,16 @@ npx tsx src/cli.ts approve <run-id> --by "second-reviewer" --repo .demo-repo
 npx tsx src/cli.ts serve --repo .demo-repo    # http://localhost:4317
 ```
 
+Confirm the boot line reads `repository .../.demo-repo (pinned by --repo)`. If
+it says **(from the App installation)** you are on a build from before `serve`
+honoured `--repo`, and the timeline will come up showing a different
+repository's runs — populated with the wrong project rather than empty, which is
+much harder to notice on camera. `DOCXY_REPO_PATH=$PWD/.demo-repo` pins it the
+same way.
+
+The list is scoped to every synced repository, so runs from other checkouts
+appear below the demo's. The two you just made are the newest, at the top.
+
 Better on camera than terminal scrollback: each role, what it produced, which
 session it reused, and the proposed diff.
 
@@ -141,14 +164,22 @@ Both runs below were executed for real against the live repo.
 
 ```
 classification  feature / public-api (95%)
-impacted docs   5
-changelog       [Added] Added the `report` command with an `--output` flag...
+impacted docs   4
+changelog       [Added] Added the `report` command with a `--output` flag
+                supporting `table` (default) and `json` formats
                 bump: minor
+validation      ✓ edits-apply        0 file(s) patched cleanly
+                ✓ link-check         no broken relative links or anchors
+                ✓ semver-consistency feature -> minor
+                ✓ docs-build         markdown files: 1 | unbalanced fences: []
 memory          0 symbol(s) carried in, 6 new mapping(s) learned
-
-No sign-off required — opening the pull request...
-✓ https://github.com/Arindam200/docxy-demo/pull/1
+gate            elevated scope, 0/2 sign-off(s), status pending
 ```
+
+Commit 1 gates too, and as **elevated** — it touches documented public API and
+the Coordinator asked for a second look. Earlier versions of this guide showed
+it opening a pull request unattended, which is what happens with the gate off;
+with the gate on, as the demo needs, it stops here like commit 2 does.
 
 Only `CHANGELOG.md` changed, and that is correct: commit 1 is what *added* the
 docs describing `--output`, so nothing was stale yet. Worth saying out loud on
@@ -164,21 +195,29 @@ camera — it shows the Docs Updater declining to invent work.
   ✓ Coordinator       (session reused)
 
 classification  breaking / public-api (100%)
-impacted docs   5
-changelog       [Changed] Renamed the `--output` flag to `--format` and added a
-                `csv` format; passing `--output` now throws an error
+impacted docs   4
+changelog       [Changed] Renamed the `--output` flag to `--format` and added
+                `csv` as a supported format; passing `--output` now throws an
+                error directing you to `--format`
   bump: major
 
 validation
   ✓ edits-apply        3 file(s) patched cleanly
   ✓ link-check         no broken relative links or anchors
   ✓ semver-consistency breaking -> major
+  ✓ docs-build         markdown files: 4 | unbalanced fences: []
 
-memory          4 symbol(s) carried in, 4 new mapping(s) learned
+memory          2 symbol(s) carried in, 7 new mapping(s) learned
 gate            elevated scope, 0/2 sign-off(s), status pending
 ```
 
-Every role reports `(session reused)`, and 4 symbols carried in from run 1.
+Every role reports `(session reused)` — confirmed on the run above, all five
+roles — and the symbol map carried in from run 1.
+
+`docs-build` appears here and not in older transcripts because the **local**
+harness carries its own sandbox. That is the one thing the Railway deployment
+cannot do (no privileged containers), so recording locally is what gets you a
+green `docs-build` line instead of an unvalidated report.
 
 Then the gate:
 

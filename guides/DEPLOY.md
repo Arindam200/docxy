@@ -25,6 +25,13 @@ TrueForge calls this **local mode**: one process, SQLite, no login. Their docs a
 explicit that it is for your own machine and should stay on localhost. That is
 fine — and correct — for development and for recording a demo.
 
+**Local is the better demo, not the lesser one.** The `npx` harness carries a
+working sandbox, so `docs-build` runs for real; the Railway harness cannot,
+because the sandbox needs a privileged container. If you are recording, record
+here and follow [DEMO.md](DEMO.md) — which also needs
+`DOCXY_REQUIRE_APPROVAL=true`, since the approval gate is off by default and the
+demo's sign-off beat depends on it.
+
 ---
 
 ## Deployed: Railway
@@ -275,6 +282,87 @@ A push to an installed repository should now produce a run in the dashboard with
 nobody at a terminal. That is the whole difference between a hosted deployment
 and a CLI: the CLI documents the repository you are standing in; the deployment
 documents every repository the App is installed on.
+
+---
+
+## Where this deployment currently stands
+
+Railway project `tender-laughter`, environment `production`, as of
+**2026-08-30**. Recorded because the next person here — including you in a
+week — should not have to rediscover it.
+
+| | |
+|---|---|
+| **harness** | Active. No public domain. Volume at `/root/.local/share/trueforge`. |
+| **docxy** | Active at `https://docxy-production.up.railway.app`. Volume at `/data`. |
+| **private networking** | Working. `/health` reports `"harness":"ok"`. |
+| **Nebius** | Registered. All four models resolve. |
+| **sandbox** | **Not available.** See below. |
+| **dashboard** | **Not deployed.** See below. |
+
+Neither service uses a `railway.json` any more — see step 1 for why, and for
+what replaced it.
+
+### 1. No sandbox: the Daytona key is read-scoped
+
+`/api/v1/capabilities` on the deployed harness reports:
+
+```json
+{"sandbox":{"enabled":false},
+ "skill":{"enabled":false,"reason":"Skills run in a sandbox, which is not configured."}}
+```
+
+`setup` explains why, and it is the failure this guide warns about above —
+*listing is not creating*:
+
+```
+! No remote sandbox provider: the harness refused the Daytona provider (HTTP 422):
+  {"error":{"message":"Daytona rejected the API key — check the credentials"}}
+```
+
+The consequence is bounded and by design: the docs build is **reported
+unvalidated** rather than run on the host, and proposals open as drafts carrying
+that reason. The isolation boundary holds. To fix it, replace `DAYTONA_API_KEY`
+on **both** services with a key that can create sandboxes, then re-run `setup`
+and look for `[daytona]` where the report currently reads `[sandbox]`.
+
+**For a demo, record locally instead.** The `npx` harness carries its own
+working sandbox, so `docs-build` actually runs and passes — see
+[DEMO.md](DEMO.md). Railway cannot match that at any price, because the sandbox
+needs a privileged container.
+
+### 2. `GITHUB_APP_PRIVATE_KEY_PATH` points at a laptop
+
+The docxy service currently sets:
+
+```
+GITHUB_APP_PRIVATE_KEY_PATH=/Users/arindammajumder/.docxy/app.pem
+```
+
+That path does not exist in the container, and `readPrivateKey()`
+(`src/github/app.ts`) **throws** rather than falling back:
+
+```
+GITHUB_APP_PRIVATE_KEY_PATH points at <path>, which could not be read: ...
+On a platform with nowhere to put the file, set GITHUB_APP_PRIVATE_KEY to the
+PEM itself instead.
+```
+
+Nothing surfaces this until a webhook actually fires, at which point the run
+fails at the pull-request step with everything before it having worked. Replace
+it with `GITHUB_APP_PRIVATE_KEY` holding the PEM itself — the variable table
+above already recommends this for exactly this reason — and delete the `_PATH`
+variable so there is no ambiguity about which one is read.
+
+### 3. The dashboard is not deployed
+
+Step 5 has not been done. Nothing on Vercel is reading this deployment yet, so
+there is currently no web UI for the hosted pipeline — only the API and the CLI.
+
+One related tidy-up: `DOCXY_API_URL=http://localhost:4317` is set on the **docxy
+service**, where it does nothing. It is the *dashboard's* variable and belongs on
+Vercel, pointing at the docxy domain. Harmless where it is, but it reads like the
+service is configured when it is not.
 
 ---
 

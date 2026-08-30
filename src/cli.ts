@@ -526,13 +526,24 @@ async function main(): Promise<void> {
       // config that changed per webhook would file a run under one project and
       // list it under another — the dashboard would show nothing while the
       // pipeline worked perfectly.
+      //
+      // `--repo` pins it just as DOCXY_REPO_PATH does. Reading only the
+      // environment variable meant `serve --repo X` silently served the App's
+      // first installed repository instead: every other subcommand honours the
+      // flag, so runs filed under X were listed from somewhere else, and the
+      // timeline came up populated with the wrong project rather than empty.
       let serveConfig = config;
-      let pinned = true;
-      if (!process.env.DOCXY_REPO_PATH?.trim()) {
+      const explicitRepo = flags.repo
+        ? '--repo'
+        : process.env.DOCXY_REPO_PATH?.trim()
+          ? 'DOCXY_REPO_PATH'
+          : null;
+      let fromApp = false;
+      if (!explicitRepo) {
         const credentials = readAppCredentials();
         const repos = credentials ? await installationRepositories(credentials) : [];
         if (repos[0]) {
-          pinned = false;
+          fromApp = true;
           serveConfig = {
             ...config,
             repoPath: await ensureCheckout(repos[0].fullName, repos[0].defaultBranch),
@@ -552,9 +563,13 @@ async function main(): Promise<void> {
       // about at boot.
       console.log(
         `${c.dim('repository')} ${serveConfig.repoPath}` +
-          (pinned ? ` ${c.dim('(pinned by DOCXY_REPO_PATH)')}` : ` ${c.dim('(from the App installation)')}`),
+          (fromApp
+            ? ` ${c.dim('(from the App installation)')}`
+            : explicitRepo
+              ? ` ${c.dim(`(pinned by ${explicitRepo})`)}`
+              : ''),
       );
-      if (pinned && !process.env.DOCXY_REPO_PATH?.trim()) {
+      if (!fromApp && !explicitRepo) {
         console.log(
           `${c.red('!')} the GitHub App is not configured, or is installed on no repositories — ` +
             `pushes will not be documented`,
