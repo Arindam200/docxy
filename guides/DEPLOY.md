@@ -186,9 +186,24 @@ heard of it. This has to run **inside** the docxy container, and the command is
 not the obvious one:
 
 ```bash
-railway ssh                       # into the docxy service
-node dist/cli.js setup
+railway ssh --service docxy node dist/cli.js setup
 ```
+
+**Attach the harness's volume before running this, not after.** The volume
+mounts at `/root/.local/share/trueforge`, which is where the SQLite database
+lives — so attaching it later shadows the directory the registration was
+written into, and the provider silently goes missing. Same registration, same
+success output, and the next run fails to resolve a model. Volume first, then
+setup.
+
+**`railway ssh` has three prerequisites that each fail differently.** None is
+hard, but the errors arrive one at a time:
+
+| what it says | what it wants |
+|---|---|
+| `No SSH keys found in your SSH agent or ~/.ssh/` | `ssh-keygen -t ed25519` |
+| `No registered SSH keys found` | `railway ssh keys add` — the local key is not automatically known to Railway |
+| `Host key verification failed.` | `ssh-keyscan ssh.railway.com >> ~/.ssh/known_hosts`, since a non-interactive command cannot accept the prompt |
 
 Both halves matter, and both have an obvious-looking wrong version:
 
