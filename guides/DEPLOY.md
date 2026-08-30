@@ -45,36 +45,41 @@ Deploy the harness **from this repository** instead, using
 of the upstream image, so the base is pulled at build time — where it works.
 
 New service → **GitHub Repo** → this repository → then, in its
-**Settings → Config-as-code**, set the config file path to:
+**Settings**, set two fields on the service itself:
+
+| Setting | Value |
+|---|---|
+| Custom Build Command → **Dockerfile Path** | `harness.Dockerfile` |
+| Deploy → **Healthcheck Path** | `/healthz` |
+
+Both are per-service settings, which is the whole point: they are what separate
+this service from the docxy one while both build from the same repository.
+
+**The health check path is the one that will bite you.** The harness does not
+serve `/health` — that is a docxy route:
 
 ```
-/harness.railway.json
+GET /healthz              -> 200  OK!
+GET /health               -> 404
+GET /api/v1/capabilities  -> 200
 ```
 
-That one field is what separates this service from the docxy one.
-[`harness.railway.json`](../harness.railway.json) carries both halves:
-`dockerfilePath: harness.Dockerfile`, so this service builds the harness image
-while docxy keeps building the root `Dockerfile`, and `healthcheckPath:
-/healthz`, which is the part that is easy to get wrong.
+Point it at `/health` and the check 404s for its whole timeout, the deployment
+never reaches Active, and `harness.railway.internal` never starts resolving.
+From the docxy side that is indistinguishable from a harness that was never
+deployed at all — `/health` reports `"harness":"unreachable"` either way.
 
-**Do not skip the config file path and set `RAILWAY_DOCKERFILE_PATH` instead.**
-That variable picks the right Dockerfile, but it leaves the service reading the
-root [`railway.json`](../railway.json) — whose health check is `/health`, a
-docxy route. The harness does not serve it:
-
-```
-GET /healthz                 -> 200  OK!
-GET /health                  -> 404
-GET /api/v1/capabilities     -> 200
-```
-
-Railway is explicit that *"configuration defined in code will always override
-values from the dashboard"*, so setting `/healthz` in the service's own health
-check field does **not** win — the repo's `railway.json` does. The health check
-then fails for the full timeout, the deployment never reaches Active, and
-`harness.railway.internal` never starts resolving. From the docxy side that is
-indistinguishable from a harness that was never deployed at all: `/health`
-reports `"harness":"unreachable"` either way.
+> **Why this is not a `railway.json`.** It used to be. A repo-root
+> `railway.json` applies to *every* service built from that repo, so the health
+> check it set for docxy (`/health`) was inherited by the harness and broke it
+> — and because Railway resolves config-as-code over dashboard values, setting
+> `/healthz` on the service did not win. The obvious fix, pointing the harness
+> at its own config file, is no longer available: Railway has deprecated config
+> as code, and the API now rejects setting a config file path outright with
+> *"Config as Code (railway.json / railway.toml) is deprecated. Use
+> Infrastructure as Code (.railway/railway.ts) instead."* Existing files keep
+> working until **2026-12-01**. So both services now carry their settings
+> per-service, and this repository has no `railway.json` at all.
 
 **Stay on the pinned base tag.** `0.1.4` is npm's `latest`, and therefore what
 `npx @truefoundry/trueforge@latest` runs on a laptop, so the deployed harness
@@ -131,8 +136,9 @@ Keeping it private is not extra hardening. It is the access control.
 ### 4. Deploy docxy itself
 
 A second service, from this repository. [`Dockerfile`](../Dockerfile) at the
-root builds it and [`railway.json`](../railway.json) points the platform's
-health check at `/health`, so nothing else needs configuring for the build.
+root is detected automatically, so the build needs no configuring. Set its
+**Healthcheck Path** to `/health` in the service's settings — the route
+`standalone.ts` serves, which reports the harness without depending on it.
 
 Two things about that image are load-bearing:
 
