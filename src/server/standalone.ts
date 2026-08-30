@@ -33,19 +33,53 @@ const config = loadConfig();
 const client = createClient(config);
 const { app } = createServer(client, config);
 
+/**
+ * A harness URL this container can never reach.
+ *
+ * `TRUEFORGE_BASE_URL` defaults to `http://localhost:8790`, which is correct on
+ * a laptop and impossible here: a container's loopback is the container, and
+ * nothing in this image serves 8790. Left as an ordinary connection failure it
+ * reports "unreachable" — the same word used when a real, deployed harness is
+ * merely down — and reads like the code is hardwired to localhost rather than
+ * like an unset variable. Distinguished so the answer names itself.
+ */
+function harnessIsLoopback(baseUrl: string): boolean {
+  try {
+    const host = new URL(baseUrl).hostname.replace(/^\[|\]$/g, '');
+    return host === 'localhost' || host === '::1' || host === '0.0.0.0' || host.startsWith('127.');
+  } catch {
+    return false;
+  }
+}
+
+const loopbackHarness = harnessIsLoopback(config.trueforge.baseUrl);
+
 /** Platform health check. Reports the harness without depending on it. */
 app.get('/health', async (c) => {
   let harness = 'unreachable';
-  try {
-    await assertReachable(client, config);
-    harness = 'ok';
-  } catch {
-    // Reported, not fatal: the service is up and can still serve the UI.
+  if (loopbackHarness) {
+    harness = 'misconfigured';
+  } else {
+    try {
+      await assertReachable(client, config);
+      harness = 'ok';
+    } catch {
+      // Reported, not fatal: the service is up and can still serve the UI.
+    }
   }
+  // Undefined, not absent: JSON.stringify drops the key entirely, so a healthy
+  // deployment's payload is unchanged and only a misconfigured one carries this.
+  const detail = loopbackHarness
+    ? 'TRUEFORGE_BASE_URL is unset or points at loopback, which in a container ' +
+      'is this container. Deploy the TrueForge harness as its own service and ' +
+      'set TRUEFORGE_BASE_URL to its address. See guides/DEPLOY.md.'
+    : undefined;
+
   return c.json({
     ok: true,
     harness,
     harnessUrl: config.trueforge.baseUrl,
+    detail,
     repo: config.repoPath,
   });
 });
@@ -81,9 +115,26 @@ serve({ fetch: app.fetch, port, hostname: '0.0.0.0' }, (info) => {
   console.log(`harness   ${config.trueforge.baseUrl}`);
 });
 
+if (loopbackHarness) {
+  // Still not fatal — this entry point is meant to come up and report a status
+  // rather than crash-loop — but this particular failure has one cause and one
+  // fix, so it says both instead of leaving them to be inferred from a refused
+  // connection.
+  console.error(
+    `error: TRUEFORGE_BASE_URL is ${config.trueforge.baseUrl}, which this container ` +
+      `cannot reach — in a container, localhost is this container, and nothing here ` +
+      `serves the harness.\n` +
+      `       Deploy the TrueForge harness as its own service and set ` +
+      `TRUEFORGE_BASE_URL to its address (on Railway, something like ` +
+      `http://harness.railway.internal:8790).\n` +
+      `       Until then no run can start. guides/DEPLOY.md step 1 covers it.`,
+  );
+}
+
 void assertReachable(client, config).catch((cause: unknown) => {
   // A warning, deliberately not a failure. Runs will report this clearly when
   // one is actually attempted; refusing to boot would only hide the service.
+  if (loopbackHarness) return; // already reported above, with the actual cause
   console.warn(
     `warning: the TrueForge harness is not reachable yet — ` +
       `${cause instanceof Error ? cause.message.split('\n')[0] : String(cause)}`,

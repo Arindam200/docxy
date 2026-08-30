@@ -32,6 +32,11 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# ...except the example, which is documentation and the only record of what the
+# dashboard needs. `.env*` above is Next's default and swallowed it, so the file
+# existed on disk, was edited, and was never in the repo — a clone got no
+# dashboard configuration at all.
+!.env.local.example
 
 # vercel
 .vercel
