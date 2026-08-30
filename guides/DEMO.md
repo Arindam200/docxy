@@ -137,6 +137,28 @@ npx tsx src/cli.ts approve <run-id> --by "second-reviewer" --repo .demo-repo
 
 ### 5. The timeline UI
 
+The Next.js dashboard in `web/` is a separate app from `docxy serve`, with its
+own `.env.local`. Three variables decide whether it shows anything:
+
+```bash
+DOCXY_API_URL=http://localhost:4317      # the pipeline API
+DOCXY_API_TOKEN=<same value as the API>  # or every read fails soft
+DOCXY_REQUIRE_AUTH=0                     # demo mode: no sign-in
+```
+
+`DOCXY_API_TOKEN` is the one that fails quietly. Without it the server-side
+reads in `web/src/lib/docxy.ts` all return `null` and the dashboard renders its
+**offline** state — which looks like a pipeline that has never run, not like a
+missing variable. `DOCXY_REQUIRE_AUTH=0` matters just as much when the OAuth
+providers are not configured: with auth on and no `GITHUB_CLIENT_ID`, the login
+page renders and no button on it works, so there is no way in at all.
+
+```bash
+cd web && npm run dev        # http://localhost:3000
+```
+
+### The CLI's own timeline
+
 ```bash
 npx tsx src/cli.ts serve --repo .demo-repo    # http://localhost:4317
 ```
@@ -240,6 +262,25 @@ edits like:
 -| `--output` | `table` | Output format: `table` or `json` |
 +| `--format` | `table` | Output format: `table`, `json`, or `csv` |
 ```
+
+### Do not merge the pipeline's pull requests
+
+Close them, never merge them. `resolveBaseRef()` branches a proposal from
+**`origin/main`**, preferring the remote tip over anything local, and the docs
+on `Arindam200/docxy-demo`'s `main` are deliberately still in their *before*
+state — `--output`, not `--format`. That is the only reason the diff has
+anything in it.
+
+Merge one and `main` moves to the after state. The next run then proposes files
+that are byte-for-byte what is already committed, and the run dies at the last
+step, after every agent has done its work:
+
+```
+Every proposed file is byte-for-byte identical to what is already committed,
+so there is nothing to open a pull request with.
+```
+
+Recovering means reverting `main` on the demo repo. Cheaper never to merge.
 
 ### Before a clean take
 
