@@ -44,14 +44,37 @@ Deploy the harness **from this repository** instead, using
 [`harness.Dockerfile`](../harness.Dockerfile). It is four `apt-get` lines on top
 of the upstream image, so the base is pulled at build time — where it works.
 
-New service → **GitHub Repo** → this repository → then in its **Variables**:
+New service → **GitHub Repo** → this repository → then, in its
+**Settings → Config-as-code**, set the config file path to:
 
-```bash
-RAILWAY_DOCKERFILE_PATH=harness.Dockerfile
+```
+/harness.railway.json
 ```
 
-That is what points this service at the harness image while the docxy service
-keeps building the root `Dockerfile`.
+That one field is what separates this service from the docxy one.
+[`harness.railway.json`](../harness.railway.json) carries both halves:
+`dockerfilePath: harness.Dockerfile`, so this service builds the harness image
+while docxy keeps building the root `Dockerfile`, and `healthcheckPath:
+/healthz`, which is the part that is easy to get wrong.
+
+**Do not skip the config file path and set `RAILWAY_DOCKERFILE_PATH` instead.**
+That variable picks the right Dockerfile, but it leaves the service reading the
+root [`railway.json`](../railway.json) — whose health check is `/health`, a
+docxy route. The harness does not serve it:
+
+```
+GET /healthz                 -> 200  OK!
+GET /health                  -> 404
+GET /api/v1/capabilities     -> 200
+```
+
+Railway is explicit that *"configuration defined in code will always override
+values from the dashboard"*, so setting `/healthz` in the service's own health
+check field does **not** win — the repo's `railway.json` does. The health check
+then fails for the full timeout, the deployment never reaches Active, and
+`harness.railway.internal` never starts resolving. From the docxy side that is
+indistinguishable from a harness that was never deployed at all: `/health`
+reports `"harness":"unreachable"` either way.
 
 **Stay on the pinned base tag.** `0.1.4` is npm's `latest`, and therefore what
 `npx @truefoundry/trueforge@latest` runs on a laptop, so the deployed harness
@@ -83,7 +106,9 @@ refuses the connection and docxy reports the harness as unreachable — exactly 
 same symptom as not setting the URL at all. Set correctly, the harness logs
 `Agent server listening on http://:::8790`.
 
-Health check path: `/healthz`, which answers `OK!`.
+The health check path is `/healthz`, which answers `OK!` —
+[`harness.railway.json`](../harness.railway.json) already sets it, which is the
+whole reason that file exists. See step 1.
 
 **Attach a volume at `/root/.local/share/trueforge`.** That SQLite file is where
 the role sessions live. Without it, a redeploy discards every session and the
