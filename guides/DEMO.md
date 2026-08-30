@@ -247,8 +247,10 @@ The two PRs above already exist. Close them if you want a fresh screen — branc
 names include the run id, so re-running never collides with them.
 
 ```bash
-gh pr close 1 --repo Arindam200/docxy-demo --delete-branch
-gh pr close 2 --repo Arindam200/docxy-demo --delete-branch
+# Close whatever the pipeline has opened so far — the numbers climb every
+# rehearsal, so close by author rather than by hardcoded id.
+gh pr list --repo Arindam200/docxy-demo --author app/docxy-bot --json number \
+  --jq '.[].number' | xargs -I{} gh pr close {} --repo Arindam200/docxy-demo --delete-branch
 npx tsx src/cli.ts reset --repo .demo-repo
 ```
 
