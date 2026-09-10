@@ -1,0 +1,43 @@
+# Vercel builds `web/` - the project's Root Directory - but the upload has to
+# start at the repository root, because the dashboard imports files from the
+# pipeline's `src/`: the API contract in `src/api/contract.ts`, and the billing
+# catalog and tables in `src/billing/` and `src/db/billing-schema.ts`. Deploying
+# from inside `web/` would leave those behind and fail the build on modules the
+# dashboard genuinely needs. Turbopack's root is set to the repository root for
+# the same reason - see web/next.config.ts.
+#
+# So: ship `web/` and `src/`, drop everything else, and never a secret.
+.env
+.env.*
+!.env.example
+*.pem
+*.log
+
+node_modules
+web/node_modules
+.next
+web/.next
+dist
+.git
+.github
+.claude
+.agents
+.gstack
+.sandbox-profiles
+.docxy
+.demo-repo
+
+# The pipeline's own deployment. Railway builds this from the same tree; none
+# of it is read by the dashboard's build.
+Dockerfile
+.dockerignore
+railway.json
+.railwayignore
+skills
+scripts
+test
+tools
+drizzle
+guides
+blog
+assets

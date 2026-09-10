@@ -58,7 +58,7 @@ export function extractJson<T>(role: string, raw: string): T {
 
   const candidates: string[] = [];
 
-  // Prefer an explicitly fenced block — that is what the prompts ask for.
+  // Prefer an explicitly fenced block - that is what the prompts ask for.
   const fence = /```(?:json)?\s*\n([\s\S]*?)```/gi;
   for (const match of raw.matchAll(fence)) {
     if (match[1]) candidates.push(match[1].trim());

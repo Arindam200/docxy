@@ -14,10 +14,12 @@ export function InstructionsEditor({
   updatedAt: string | null;
 }) {
   const [value, setValue] = useState(initial);
+  const [savedValue, setSavedValue] = useState(initial);
   const [state, setState] = useState<"idle" | "saving" | "saved" | "error">("idle");
-  const dirty = value !== initial;
+  const dirty = value !== savedValue;
 
   async function save() {
+    if (!dirty || state === "saving") return;
     setState("saving");
     try {
       const res = await fetch("/api/docxy/instructions", {
@@ -26,6 +28,7 @@ export function InstructionsEditor({
         body: JSON.stringify({ instructions: value }),
       });
       if (!res.ok) throw new Error(String(res.status));
+      setSavedValue(value);
       setState("saved");
     } catch {
       setState("error");
@@ -35,6 +38,8 @@ export function InstructionsEditor({
   return (
     <div className="border border-rule bg-surface">
       <textarea
+        aria-label="Custom instructions"
+        disabled={state === "saving"}
         value={value}
         onChange={(e) => {
           setValue(e.target.value);
@@ -48,14 +53,14 @@ export function InstructionsEditor({
       <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-3">
         <p className="text-xs text-muted" aria-live="polite">
           {state === "saving" && "Saving…"}
-          {state === "saved" && "Saved — applies from the next run."}
+          {state === "saved" && "Saved. Applies from the next run."}
           {state === "error" && <span className="text-danger">Could not save. Is the API up?</span>}
           {state === "idle" &&
-            (updatedAt
-              ? `Last updated ${new Date(updatedAt).toLocaleString()}`
-              : dirty
-                ? "Unsaved changes"
-                : "No instructions yet — the agents run on their defaults.")}
+            (dirty
+              ? "Unsaved changes"
+              : updatedAt
+                ? `Last updated ${new Date(updatedAt).toLocaleString()}`
+                : "No custom instructions yet. Default instructions will be used.")}
         </p>
         <button
           type="button"

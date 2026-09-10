@@ -2,13 +2,16 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import type { TrueForge } from '@truefoundry/trueforge-sdk';
 import type { Config } from '../config.js';
 import type { Classification, ChangelogProposal, ValidationCheck, ValidationReport } from '../types.js';
 import type { ApplyResult, ProposedFile } from '../pipeline/apply.js';
-import type { TraceEvent } from '../trueforge/run.js';
+import type { TraceEvent } from '../runtime/types.js';
 import { checkLinks } from './links.js';
-import { runCommandInSandbox, type SandboxRunInput } from './sandbox.js';
+import {
+  runCommandInWorkspace,
+  workspaceConfigured,
+  type WorkspaceRunInput,
+} from './workspace.js';
 
 const exec = promisify(execFile);
 
@@ -50,7 +53,7 @@ export interface ValidateInput {
    * check simply has nothing to compare against and reports itself skipped.
    */
   changelog: ChangelogProposal | undefined;
-  /** Tree the docs were read from — where links resolve and the docs build runs. */
+  /** Tree the docs were read from - where links resolve and the docs build runs. */
   docsPath: string;
   /**
    * Whether the docs tree is a throwaway worktree we may write into. Staging the
@@ -58,11 +61,6 @@ export interface ValidateInput {
    * checkout we refuse to write and report the check skipped instead.
    */
   stageable: boolean;
-  /**
-   * Harness client, when one is available. Absent from `docxy show` and from the
-   * tests, which validate an already-recorded proposal and execute nothing.
-   */
-  client?: TrueForge;
   /** Forwarded to the timeline so the sandbox is visible while it works. */
   onEvent?: (event: TraceEvent) => void;
   signal?: AbortSignal;
@@ -82,14 +80,14 @@ async function stageProposal(docsPath: string, files: ProposedFile[]): Promise<v
  *
  * The checks split by who wrote what they run over. Anchors, links and semver
  * consistency are pure inspection of the proposed text and execute nothing. The
- * docs build does execute — over prose a model wrote minutes ago — so it goes
- * to the harness sandbox, and only falls back to this machine when no sandbox
- * is configured, saying which one it used either way.
+ * docs build does execute - over prose a model wrote minutes ago - so it goes
+ * to an isolated sandbox, and only falls back to this machine when none is
+ * available and the operator has allowed it, saying which one it used either way.
  *
  * The test command stays local on purpose. It belongs to the repository, not to
  * the proposal: it is the operator's own code, already trusted enough to be
  * checked out, and it needs the whole working tree rather than the handful of
- * doc files a sandbox turn can carry.
+ * doc files a sandbox carries.
  */
 export async function validateProposal(input: ValidateInput): Promise<ValidationReport> {
   const { config, applied, changelogFile, classification, changelog, docsPath, stageable } = input;
@@ -187,7 +185,6 @@ export async function validateProposal(input: ValidateInput): Promise<Validation
       stageable,
       config,
     };
-    if (input.client) buildInput.client = input.client;
     buildInput.onEvent = collect;
     if (input.signal) buildInput.signal = input.signal;
     checks.push(await runDocsBuild(buildInput));
@@ -206,28 +203,44 @@ interface DocsBuildInput {
   docsPath: string;
   stageable: boolean;
   config: Config;
-  client?: TrueForge;
   onEvent?: (event: TraceEvent) => void;
   signal?: AbortSignal;
 }
 
 /**
- * Build the proposed docs, in the sandbox when there is one.
+ * Build the proposed docs, in an isolated sandbox when there is one.
  *
- * Falling back rather than failing is deliberate: no sandbox provider is a
- * property of the harness an operator is running, not of the documentation
- * being proposed, and failing the proposal for it would reject correct work.
- * The fallback is always named in the detail, so a report never leaves the
- * reader guessing where the command ran.
+ * The command runs in a Daytona workspace: the files are uploaded over the SDK
+ * and the exit code is the process's own, so nothing about the result rests on
+ * a model's account of it.
+ *
+ * Falling back to the host rather than failing is deliberate: having no
+ * workspace is a property of the deployment, not of the documentation being
+ * proposed, and failing the proposal for it would reject correct work. Whether
+ * that fallback is allowed is the operator's call and defaults to no. The
+ * location is always named in the detail, so a report never leaves the reader
+ * guessing where the command ran.
  */
 async function runDocsBuild(input: DocsBuildInput): Promise<ValidationCheck> {
-  const { command, files, docsPath, stageable, config, client, onEvent, signal } = input;
+  const { command, files, docsPath, stageable, config } = input;
 
-  if (config.sandbox.enabled && client) {
-    const sandboxInput: SandboxRunInput = { client, config, name: 'docs-build', command, files };
-    if (onEvent) sandboxInput.onEvent = onEvent;
-    if (signal) sandboxInput.signal = signal;
-    const outcome = await runCommandInSandbox(sandboxInput);
+  if (config.sandbox.enabled) {
+    const workspaceInput: WorkspaceRunInput = { config, name: 'docs-build', command, files };
+    if (input.onEvent) workspaceInput.onEvent = input.onEvent;
+    if (input.signal) workspaceInput.signal = input.signal;
+
+    // An absent workspace is an unavailable sandbox, not "no sandbox was
+    // asked for". The difference decides everything below: `ValidationReport.ok`
+    // waves through anything `skipped`, so a configured docs build that could
+    // not run in isolation must reach the fallback policy rather than quietly
+    // reporting itself skipped and publishing clean.
+    const outcome = workspaceConfigured(config)
+      ? await runCommandInWorkspace(workspaceInput)
+      : {
+          unavailable:
+            'DAYTONA_API_KEY is not set, so there is no isolated workspace to run the build in',
+        };
+
     if ('check' in outcome) return outcome.check;
 
     // The sandbox could not do it. Whether that is allowed to become host
@@ -258,11 +271,11 @@ async function runDocsBuild(input: DocsBuildInput): Promise<ValidationCheck> {
     }
     await stageProposal(docsPath, files);
     const local = await runCommand('docs-build', command, docsPath);
-    return { ...local, detail: `ran on the host — ${outcome.unavailable}\n\n${local.detail}` };
+    return { ...local, detail: `ran on the host - ${outcome.unavailable}\n\n${local.detail}` };
   }
 
-  // No sandbox asked for, or nothing to reach it with. Staging the proposal into
-  // a throwaway worktree is what makes the build meaningful; against the
+  // No sandbox asked for, or nothing to reach one with. Staging the proposal
+  // into a throwaway worktree is what makes the build meaningful; against the
   // operator's own checkout we refuse to write and say so.
   if (!stageable) {
     return {
@@ -271,7 +284,7 @@ async function runDocsBuild(input: DocsBuildInput): Promise<ValidationCheck> {
       detail:
         'the docs tree is your own checkout, so the proposal was not written into it; ' +
         'set DOCXY_DOCS_BRANCH so docs are staged in a throwaway worktree first, ' +
-        'or leave DOCXY_SANDBOX on so the build runs in the harness sandbox instead',
+        'or leave DOCXY_SANDBOX on so the build runs in a sandbox instead',
     };
   }
   await stageProposal(docsPath, files);

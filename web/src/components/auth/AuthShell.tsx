@@ -31,7 +31,7 @@ export function AuthShell({
   children: ReactNode;
 }) {
   return (
-    // Light theme by default — the root tokens are the light palette. The
+    // Light theme by default - the root tokens are the light palette. The
     // dashboard opts into the dark scope separately.
     <div className="min-h-screen flex bg-background text-foreground">
       {/* Form panel */}
@@ -76,7 +76,7 @@ export function AuthShell({
         </div>
       </div>
 
-      {/* Brand panel — hidden where the form needs the full width */}
+      {/* Brand panel - hidden where the form needs the full width */}
       <div
         className="relative hidden lg:flex w-[46%] shrink-0 flex-col justify-between overflow-hidden px-12 py-8"
         style={{
@@ -97,8 +97,8 @@ export function AuthShell({
             Docs that write themselves.
           </h2>
           <p className="text-[15px] leading-relaxed text-white/80">
-            Five specialist agents read every push, update the docs they touch, and open a PR —
-            you stay the editor-in-chief.
+            Get suggested docs and release notes when your code changes.
+            Review and merge them in GitHub.
           </p>
           <ul className="space-y-3 pt-2 text-left inline-block">
             {PITCH_ITEMS.map((item) => (

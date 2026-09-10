@@ -5,7 +5,7 @@ import type { CatalogEntry } from "@/lib/integrations";
 
 /**
  * The catalogue as one hairline-gapped field: the 1px gutters sit on the rule
- * colour, so the grid reads as ruled cells rather than floating boxes — the
+ * colour, so the grid reads as ruled cells rather than floating boxes - the
  * same idiom the landing page uses for its integration tiles.
  */
 export function IntegrationsGrid({

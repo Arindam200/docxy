@@ -8,7 +8,7 @@ import { roleTitle } from "@/lib/format";
  * provider behind the models, where runs are kept, and which model each role
  * is pointed at.
  *
- * Which *repositories* are synced is deliberately not here — that is a fact
+ * Which *repositories* are synced is deliberately not here - that is a fact
  * about the GitHub App installation, and `SyncedRepos` reads it from the
  * installation itself rather than from a local path this process happens to
  * hold. Everything below is one fact per line, so the section reads at a glance
@@ -64,20 +64,19 @@ export function SyncedPanel({
       {/* Hairline-gapped cells, the same idiom the integration tiles use. */}
       <div className="grid grid-cols-1 gap-px border border-rule bg-rule sm:grid-cols-2 lg:grid-cols-4">
         <Card
-          label="Harness"
-          value={config?.trueforgeBaseUrl ?? "—"}
-          hint="Runs the five agents and owns their sessions."
-          mono
+          label="Agents"
+          value="in this process"
+          hint="Five roles on Mastra. There is no separate harness to deploy."
         />
         <Card
           label="Provider"
-          value={config?.provider ?? "—"}
+          value={config?.provider ?? "N/A"}
           hint={models.length > 0 ? `${models.length} roles pointed at it` : "Serves every model."}
         />
         <Card
           label="Storage"
           value={
-            config?.storage === "postgres" ? "Postgres" : config?.storage === "files" ? "Files" : "—"
+            config?.storage === "postgres" ? "Postgres" : config?.storage === "files" ? "Files" : "N/A"
           }
           hint={
             config?.storage === "postgres"
@@ -89,7 +88,7 @@ export function SyncedPanel({
         />
         <Card
           label="Validation"
-          value={config ? (config.validationEnabled ? "Enabled" : "Disabled") : "—"}
+          value={config ? (config.validationEnabled ? "Enabled" : "Disabled") : "N/A"}
           hint={
             config?.validationEnabled
               ? "Edits are checked before a human sees them."

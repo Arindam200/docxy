@@ -37,11 +37,80 @@ import type {
   ValidationReport,
 } from '../types.js';
 
-/** The repository being documented. Sessions and knowledge hang off this. */
+/**
+ * The repository being documented. Sessions and knowledge hang off this.
+ *
+ * A project belongs to an organization, and an organization is the only thing
+ * that owns one - there is no personal-ownership path, because a solo account
+ * is an organization of one.
+ */
 export const projects = pgTable('projects', {
   id: uuid('id').primaryKey().defaultRandom(),
-  /** The repository path, as the pipeline is configured to see it. */
+  /**
+   * The repository path, as the pipeline is configured to see it.
+   *
+   * Legacy, and on its way out: an absolute filesystem path is an accident of
+   * which machine ran the pipeline, not a property of the repository. Runs
+   * recorded on a laptop are keyed to `/Users/...` and are invisible to a
+   * deployment that has the same repository checked out somewhere else. Kept
+   * `notNull` so existing rows and the current lookup keep working; new code
+   * should resolve by `repoFullName`.
+   */
   key: text('key').notNull().unique(),
+  /**
+   * The owning organization: `auth.organization.id`, as text.
+   *
+   * No foreign key, deliberately. The `auth` schema belongs to the dashboard's
+   * drizzle-kit config and this one is filtered to `public`, so a constraint
+   * across the boundary is a constraint neither ledger can generate or drop -
+   * see the `schemaFilter` note in both drizzle.config.ts files. The referent
+   * is enforced in application code instead.
+   *
+   * Nullable, because rows predating organizations exist and a migration that
+   * demanded an owner for them would have to invent one.
+   */
+  organizationId: text('organization_id'),
+  /** What people call this project. Defaults to the source repository's name. */
+  name: text('name'),
+  /**
+   * The repository being watched, as `owner/repo`.
+   *
+   * One project documents one repository - never "every repository the
+   * installation can see". An installation grants *access* to a set of
+   * repositories; which of them becomes a project is a deliberate choice, made
+   * once per project, because most of the repositories a person grants are ones
+   * they never wanted documented.
+   *
+   * Unique across all organizations: two orgs claiming one source repository
+   * would mean each could read the other's runs for it.
+   */
+  sourceRepo: text('source_repo').unique(),
+  /**
+   * Where the documentation lives, when it is not beside the code.
+   *
+   * Null means "the same repository as the source", which is the common case
+   * and the only one the pipeline used to allow. A separate docs repository is
+   * not an exotic setup - a docs site, a handbook, or one central docs
+   * repository fed by many services are all ordinary - and assuming a monorepo
+   * silently excluded all of them.
+   *
+   * Deliberately **not** unique: several projects legitimately publish into one
+   * documentation repository, which is exactly the central-docs arrangement.
+   * Both repositories must be reachable from the organization's installations;
+   * that is checked when the project is created, not here.
+   */
+  docsRepo: text('docs_repo'),
+  /**
+   * Where the documentation actually sits, as comma-separated paths.
+   *
+   * Null falls back to the built-in guesses (`docs,README.md,doc,website/docs`),
+   * which is a guess and behaves like one: a project keeping its documentation
+   * in `content/`, `site/`, or `apps/www/content` is invisible to them, and the
+   * failure is silent - the Impact Mapper simply finds nothing to update and
+   * the run produces an empty proposal. Asking once, when the repository is
+   * connected, is cheaper than debugging that.
+   */
+  docsRoots: text('docs_roots'),
   /**
    * When the knowledge map last changed. Kept here rather than derived from
    * `max(knowledge_symbols.updated_at)` so that processing a commit that
@@ -49,6 +118,29 @@ export const projects = pgTable('projects', {
    */
   knowledgeUpdatedAt: timestamp('knowledge_updated_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
+/**
+ * Which organization a GitHub App installation belongs to.
+ *
+ * The App is installed by a person, on their account or their GitHub
+ * organization, and the webhook that arrives afterwards names only the
+ * installation. This is the row that turns that number into "whose runs are
+ * these" - written by the dashboard the moment GitHub redirects the installer
+ * back, so the binding exists before the first push rather than being guessed
+ * from it.
+ *
+ * `organizationId` is `auth.organization.id`, as text and without a foreign
+ * key, for the same cross-schema reason as `projects.organizationId` above.
+ */
+export const githubInstallations = pgTable('github_installations', {
+  /** GitHub's installation id. Numeric upstream, text here - it is an identifier, not a quantity. */
+  installationId: text('installation_id').primaryKey(),
+  organizationId: text('organization_id').notNull(),
+  /** The GitHub account the App was installed on, for display. */
+  accountLogin: text('account_login'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 });
 
 /**
@@ -133,7 +225,7 @@ export const runOutputs = pgTable('run_outputs', {
    *
    * The approval gate can hold a proposal for days and the process that
    * finally publishes it is not the one that judged it, so a decision left
-   * unwritten is a decision lost — and the pull request opens clean over the
+   * unwritten is a decision lost - and the pull request opens clean over the
    * pipeline's own objections.
    */
   publication: jsonb('publication').$type<PublicationIntent>(),
@@ -250,7 +342,7 @@ export const approvals = pgTable('approvals', {
 /**
  * One row per sign-off. The unique index on (approval, by) is what enforces
  * "two *different* people" in the database rather than only in application
- * code — the rule elevated scope exists for.
+ * code - the rule elevated scope exists for.
  */
 export const approvalSignoffs = pgTable(
   'approval_signoffs',
@@ -283,7 +375,7 @@ export const knowledgeSymbols = pgTable(
 /**
  * Commits already folded into the map. A table rather than an array column so
  * that recording one is an insert instead of a read-modify-write of the whole
- * list — which is what makes two workers on the same repo safe.
+ * list - which is what makes two workers on the same repo safe.
  */
 export const knowledgeCommits = pgTable(
   'knowledge_commits',
@@ -302,6 +394,7 @@ export const knowledgeCommits = pgTable(
 
 export const schema = {
   projects,
+  githubInstallations,
   agentSessions,
   runs,
   runOutputs,

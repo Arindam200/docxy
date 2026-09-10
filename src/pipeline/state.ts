@@ -89,7 +89,7 @@ export class KnowledgeStore implements KnowledgeStorage {
 export function renderKnowledgeMap(map: KnowledgeMap, maxEntries = 200): string {
   const entries = Object.entries(map.symbols);
   if (entries.length === 0) {
-    return '(empty — this is the first commit processed for this repository)';
+    return '(empty - this is the first commit processed for this repository)';
   }
   const shown = entries.slice(0, maxEntries);
   const lines = shown.map(([symbol, sections]) => `${symbol} -> ${sections.join(', ')}`);

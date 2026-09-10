@@ -9,16 +9,16 @@ export function Faq() {
 
   return (
     <>
-      <Section className="py-12 lg:py-16">
+      <Section id="faq" className="py-12 lg:py-16">
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-12 lg:gap-16">
           <div>
             <h2 className="text-3xl lg:text-4xl font-bold text-zinc-900 tracking-tight leading-snug">
               Frequently asked questions
             </h2>
             <p className="mt-4 text-sm text-zinc-500 leading-relaxed">
-              Still wondering about something? Open an issue on{" "}
+              Have a question? Ask on{" "}
               <a
-                href={site.repo}
+                href={`${site.repo}/issues`}
                 className="text-zinc-700 underline underline-offset-2 hover:text-zinc-900 transition-colors"
               >
                 GitHub

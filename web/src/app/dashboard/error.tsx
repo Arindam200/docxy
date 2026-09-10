@@ -2,9 +2,11 @@
 
 import { useEffect } from "react";
 
+import { localDev } from "@/lib/runtime";
+
 /**
- * Anything the dashboard cannot recover from — Neon unreachable, a missing
- * migration — lands here instead of a blank screen. Server errors arrive with
+ * Anything the dashboard cannot recover from - Neon unreachable, a missing
+ * migration - lands here instead of a blank screen. Server errors arrive with
  * only a digest in production, which is what the operator needs to find the
  * matching log line.
  */
@@ -28,8 +30,15 @@ export default function DashboardError({
         <p className="mt-3 text-sm leading-relaxed text-muted">
           This is usually the database: check that{" "}
           <code className="font-mono text-xs text-foreground">DATABASE_URL</code> points at a
-          reachable Neon branch and that migrations have been applied with{" "}
-          <code className="font-mono text-xs text-foreground">npm run db:migrate</code>.
+          reachable Neon branch, and that its migrations have been applied
+          {localDev ? (
+            <>
+              {" "}
+              with <code className="font-mono text-xs text-foreground">npm run db:migrate</code>.
+            </>
+          ) : (
+            "."
+          )}
         </p>
 
         {error.digest && (

@@ -1,19 +1,10 @@
-import { fetchTracking } from "@/lib/docxy";
-import { Page, PageHead } from "@/components/dashboard/Page";
-import { TrackingPanel } from "@/components/dashboard/TrackingPanel";
+import { redirect } from "next/navigation";
 
-export const dynamic = "force-dynamic";
-
-export default async function TrackingPage() {
-  const tracking = await fetchTracking();
-
-  return (
-    <Page>
-      <PageHead
-        title="Tracking"
-        lede="What the pipeline watches: documentation roots, the changelog, and the symbol-to-doc knowledge map it has learned."
-      />
-      <TrackingPanel tracking={tracking} expanded />
-    </Page>
-  );
+/**
+ * Moved. Kept as a redirect rather than deleted because bookmarks, the browser
+ * history of anyone who used the old sidebar, and links written in earlier
+ * guides all still point here. A 404 would read as the feature being gone.
+ */
+export default function MovedPage() {
+  redirect("/dashboard/integrations#pipeline");
 }

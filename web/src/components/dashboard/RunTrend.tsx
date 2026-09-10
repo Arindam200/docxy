@@ -3,7 +3,7 @@ import type { RunPoint } from "@/lib/docxy";
 import { duration, timeAgo, tokens } from "@/lib/format";
 
 /**
- * One bar per run, oldest to newest — the shape of the history rather than a
+ * One bar per run, oldest to newest - the shape of the history rather than a
  * number for it. A role getting slower, or a week of failures, is visible here
  * and nowhere else.
  *

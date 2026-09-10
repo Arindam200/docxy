@@ -9,8 +9,12 @@ import type {
 } from '../types.js';
 
 /**
- * Graduated scope. A docs-only fix needs one sign-off; anything touching
- * documented public API or proposing a major bump needs two.
+ * How much scrutiny a change was judged to need.
+ *
+ * The gate that held proposals for that many human sign-offs is gone; this
+ * survives it because the judgement is still worth recording and still worth
+ * putting in the pull request body. A reviewer opening a docs change is served
+ * by knowing the pipeline thought it touched public API.
  *
  * The Coordinator also proposes a scope. We take the stricter of the two: a
  * model is allowed to escalate, never to relax.
@@ -19,11 +23,6 @@ import type {
 export interface ScopeDecision {
   scope: ApprovalScope;
   rationale: string;
-}
-
-/** Whether a sign-off completed the request, or it still wants another. */
-export interface SignOffResult {
-  approved: boolean;
 }
 
 /** How long a request has been waiting, and whether that is now too long. */
@@ -61,7 +60,7 @@ export function decideScope(
 /**
  * Satisfy a request without a human, for the default unattended mode.
  *
- * The gate is not bypassed — it is filled in, with `by` naming the pipeline
+ * The gate is not bypassed - it is filled in, with `by` naming the pipeline
  * rather than a person, so a run that landed automatically is distinguishable
  * from one somebody actually read. The review still happens: it happens on the
  * pull request, which is the artifact this whole pipeline exists to produce.
@@ -71,61 +70,50 @@ export function autoApprove(request: ApprovalRequest, by = 'docxy (unattended)')
   request.status = 'approved';
 }
 
+/**
+ * The approval request for a run, created or refreshed.
+ *
+ * `existing` is passed when a run is resumed and already has one. A run holds
+ * at most one approval - the database says so with a unique index on `run_id` -
+ * so minting a second id for the same run is not a new request, it is a
+ * constraint violation that silently loses the whole save. Its id is therefore
+ * kept, and so are any sign-offs already given: someone who approved a run
+ * before it was interrupted has not withdrawn that.
+ *
+ * Everything else is refreshed, because the verdict it describes was produced
+ * again and may differ.
+ */
 export function createApprovalRequest(
   runId: string,
   scope: ApprovalScope,
   scopeRationale: string,
   summary: string,
+  existing?: ApprovalRequest,
 ): ApprovalRequest {
+  const required = scope === 'elevated' ? 2 : 1;
+  const signoffs = existing?.signoffs ?? [];
   return {
-    id: randomUUID(),
+    id: existing?.id ?? randomUUID(),
     runId,
-    createdAt: new Date().toISOString(),
+    createdAt: existing?.createdAt ?? new Date().toISOString(),
     scope,
     scopeRationale,
-    requiredSignoffs: scope === 'elevated' ? 2 : 1,
-    signoffs: [],
-    status: 'pending',
+    requiredSignoffs: required,
+    signoffs,
+    // A run that was already denied stays denied; otherwise the count decides,
+    // so a sign-off given before the interruption is not silently discarded.
+    status: existing?.status === 'denied'
+      ? 'denied'
+      : signoffs.length >= required
+        ? 'approved'
+        : 'pending',
     summary,
   };
 }
 
-export class ApprovalError extends Error {}
-
-/**
- * Record one sign-off. Returns whether the request is now fully approved.
- *
- * A single reviewer cannot satisfy an elevated request twice — that would make
- * the second sign-off decorative.
- */
-export function signOff(request: ApprovalRequest, by: string): SignOffResult {
-  if (request.status === 'denied') throw new ApprovalError('This request was already denied.');
-  if (request.status === 'approved') return { approved: true };
-  if (request.signoffs.some((s) => s.by === by)) {
-    throw new ApprovalError(
-      `${by} has already signed off. An elevated request needs a second, different reviewer.`,
-    );
-  }
-
-  request.signoffs.push({ by, at: new Date().toISOString() });
-  if (request.signoffs.length >= request.requiredSignoffs) {
-    request.status = 'approved';
-    return { approved: true };
-  }
-  return { approved: false };
-}
-
-export function deny(request: ApprovalRequest, by: string, reason: string): void {
-  if (request.status === 'approved') {
-    throw new ApprovalError('This request was already approved.');
-  }
-  request.status = 'denied';
-  request.deniedReason = `${reason} (denied by ${by})`;
-}
-
 /**
  * There is no auto-approve and no auto-discard. A request that nobody answers
- * stays pending and is reported stale — visibly waiting, never silently
+ * stays pending and is reported stale - visibly waiting, never silently
  * resolved in either direction.
  */
 export function staleness(
@@ -146,6 +134,6 @@ export function describeGate(run: RunRecord, config: Config): string {
   if (!request) return 'no approval request on this run';
   const { stale, waitingMinutes } = staleness(request, config);
   const progress = `${request.signoffs.length}/${request.requiredSignoffs} sign-off(s)`;
-  const staleNote = stale ? ` — STALE, waiting ${waitingMinutes} min, still pending` : '';
+  const staleNote = stale ? ` - STALE, waiting ${waitingMinutes} min, still pending` : '';
   return `${request.scope} scope, ${progress}, status ${request.status}${staleNote}`;
 }

@@ -20,7 +20,7 @@ export class RunStore implements RunStorage {
    * Written to a sibling and renamed into place.
    *
    * `save` is called at every role boundary while the record is still growing,
-   * so a process killed mid-write would otherwise leave truncated JSON — and a
+   * so a process killed mid-write would otherwise leave truncated JSON - and a
    * corrupt file is silently dropped from `list`, which is the worst way to
    * lose a run: without a trace of it having existed.
    */
@@ -52,8 +52,16 @@ export class RunStore implements RunStorage {
    * `list` applies the same rule as it reads; this exists for the paths that
    * address a run by id and so never pass through the listing at all.
    */
+  /**
+   * An absent scope is every run; an empty one is none.
+   *
+   * The two used to be the same answer, which is wrong once a caller computes
+   * its scope: an organization that owns no repositories produces an empty
+   * array, and reading that as "no filter" showed it everybody's runs.
+   */
   private visible(run: RunRecord, repoPaths?: string[]): boolean {
-    return !repoPaths || repoPaths.length === 0 || repoPaths.includes(run.repoPath);
+    if (repoPaths === undefined) return true;
+    return repoPaths.includes(run.repoPath);
   }
 
   /** Newest first. */
@@ -74,15 +82,23 @@ export class RunStore implements RunStorage {
         // skip a corrupt record rather than failing the listing
       }
     }
-    const wanted = repoPaths && repoPaths.length > 0 ? new Set(repoPaths) : null;
+    const wanted = repoPaths === undefined ? null : new Set(repoPaths);
     return runs
       .filter((run) => !wanted || wanted.has(run.repoPath))
       .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
       .slice(0, limit);
   }
 
+  /**
+   * Runs whose proposal is ready but has no pull request.
+   *
+   * It used to mean "waiting for a person", which nothing produces any more.
+   * The set it returns is still the one worth surfacing: a run that finished,
+   * cost five model calls, and has nothing to show for it because publishing
+   * failed.
+   */
   async pending(): Promise<RunRecord[]> {
-    return (await this.list(200)).filter((r) => r.status === 'awaiting-approval');
+    return (await this.list(200)).filter((r) => r.status === 'approved' && !r.pullRequestUrl);
   }
 
   /**

@@ -3,7 +3,7 @@
  *
  * The maps this serves are declared with `satisfies` rather than an annotation,
  * so they keep their literal key types instead of widening to an open
- * dictionary — the keys really are known, and the type now says so. What that
+ * dictionary - the keys really are known, and the type now says so. What that
  * costs is indexing with a plain string, which TypeScript rightly refuses.
  *
  * Handling the miss here means it is handled once, and honestly: the result is

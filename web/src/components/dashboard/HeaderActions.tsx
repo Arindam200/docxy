@@ -15,8 +15,8 @@ import { site } from "@/lib/site";
 /**
  * The header's right-hand controls: the theme switch, and the upgrade pill.
  *
- * The theme is applied by toggling one class on <html> — the same class the
- * inline script in the root layout sets before first paint — so switching is
+ * The theme is applied by toggling one class on <html> - the same class the
+ * inline script in the root layout sets before first paint - so switching is
  * instant and survives a reload without a flash of the wrong shell.
  */
 
@@ -172,7 +172,7 @@ function ThemeMenu() {
  * Upgrade.
  *
  * There is no paid tier to send anyone to yet, and a pill that silently does
- * nothing is worse than one that says so — this opens a short note and points
+ * nothing is worse than one that says so - this opens a short note and points
  * at the deploy guide, which is how you run it today.
  */
 function UpgradeButton() {
@@ -212,8 +212,8 @@ function UpgradeButton() {
             </button>
           </div>
           <p className="mt-2 text-xs leading-relaxed text-muted">
-            Docxy is open source and free to run yourself — the pipeline, the dashboard, and every
-            skill pack. A managed tier is being built for teams who would rather not.
+            Docxy is open source. Self-host the pipeline and dashboard with your own
+            infrastructure, or explore the proposed hosted plans.
           </p>
           <a
             href={`${site.repo}/blob/main/guides/DEPLOY.md`}

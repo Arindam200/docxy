@@ -14,8 +14,14 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+const canonical = process.env.BETTER_AUTH_URL?.trim() || site.url;
+
 export const metadata: Metadata = {
-  title: "Docxy · Docs that write themselves",
+  // Without this, every relative URL in the metadata below resolves against
+  // localhost at build time and ships that way.
+  metadataBase: new URL(canonical),
+  alternates: { canonical: "/" },
+  title: "Docxy · Docs that keep up with your code",
   description: site.description,
   keywords: [
     "documentation github app",
@@ -23,19 +29,21 @@ export const metadata: Metadata = {
     "docs github action",
     "ai documentation agent",
     "multi-agent",
-    "TrueForge",
+    "Mastra",
+    "Daytona",
     "Nebius Token Factory",
     "docs drift",
   ],
   openGraph: {
-    title: "Docxy · Docs that write themselves",
+    title: "Docxy · Docs that keep up with your code",
     description: site.description,
     type: "website",
     siteName: "Docxy",
+    url: canonical,
   },
   twitter: {
     card: "summary_large_image",
-    title: "Docxy · Docs that write themselves",
+    title: "Docxy · Docs that keep up with your code",
     description: site.description,
   },
 };

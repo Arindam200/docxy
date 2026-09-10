@@ -1,23 +1,20 @@
 /**
  * Production entry point.
  *
- * `docxy serve` is built for a developer at a terminal: it refuses to start
- * unless the harness is already reachable, and it listens on DOCXY_PORT. A
- * deployed container needs the opposite of both — it must bind the port the
- * platform assigns, and it must come up even when its dependencies are not
- * wired yet, so the platform can route to it and report a real status instead
- * of a crash loop.
+ * `docxy serve` is built for a developer at a terminal and listens on
+ * DOCXY_PORT. A deployed container must bind the port the platform assigns, and
+ * must come up even when its dependencies are not wired yet, so the platform
+ * can route to it and report a real status instead of a crash loop.
  */
 import { serve } from '@hono/node-server';
 import { loadConfig } from '../config.js';
-import { assertReachable, createClient } from '../trueforge/client.js';
 import { createServer } from './index.js';
 
 /**
  * A rejection nobody handled must not take the process down.
  *
  * Node's default for an unhandled rejection is to exit, and a long-running
- * server has plenty of places one can escape from — a background refresh, a
+ * server has plenty of places one can escape from - a background refresh, a
  * detached publish, a driver's own internals. Exiting mid-run loses the run and
  * every connected event stream to fix a fault that was very likely survivable.
  * Logged loudly and left running; the deployment's health check is what should
@@ -30,59 +27,27 @@ process.on('unhandledRejection', (reason) => {
 });
 
 const config = loadConfig();
-const client = createClient(config);
-const { app } = createServer(client, config);
+const { app } = createServer(config);
 
 /**
- * A harness URL this container can never reach.
+ * Platform health check.
  *
- * `TRUEFORGE_BASE_URL` defaults to `http://localhost:8790`, which is correct on
- * a laptop and impossible here: a container's loopback is the container, and
- * nothing in this image serves 8790. Left as an ordinary connection failure it
- * reports "unreachable" — the same word used when a real, deployed harness is
- * merely down — and reads like the code is hardwired to localhost rather than
- * like an unset variable. Distinguished so the answer names itself.
+ * The agents run in this process, so there is no harness to be up or down and
+ * nothing here can fail for want of one. What is still worth reporting is
+ * whether a model key and a workspace exist, because a deployment missing
+ * either is running but cannot do its job - and that is exactly the state a
+ * green health check used to hide.
  */
-function harnessIsLoopback(baseUrl: string): boolean {
-  try {
-    const host = new URL(baseUrl).hostname.replace(/^\[|\]$/g, '');
-    return host === 'localhost' || host === '::1' || host === '0.0.0.0' || host.startsWith('127.');
-  } catch {
-    return false;
-  }
-}
-
-const loopbackHarness = harnessIsLoopback(config.trueforge.baseUrl);
-
-/** Platform health check. Reports the harness without depending on it. */
-app.get('/health', async (c) => {
-  let harness = 'unreachable';
-  if (loopbackHarness) {
-    harness = 'misconfigured';
-  } else {
-    try {
-      await assertReachable(client, config);
-      harness = 'ok';
-    } catch {
-      // Reported, not fatal: the service is up and can still serve the UI.
-    }
-  }
-  // Undefined, not absent: JSON.stringify drops the key entirely, so a healthy
-  // deployment's payload is unchanged and only a misconfigured one carries this.
-  const detail = loopbackHarness
-    ? 'TRUEFORGE_BASE_URL is unset or points at loopback, which in a container ' +
-      'is this container. Deploy the TrueForge harness as its own service and ' +
-      'set TRUEFORGE_BASE_URL to its address. See guides/DEPLOY.md.'
-    : undefined;
-
-  return c.json({
+app.get('/health', (c) =>
+  c.json({
     ok: true,
-    harness,
-    harnessUrl: config.trueforge.baseUrl,
-    detail,
+    model: config.nebius.apiKey ? 'configured' : 'missing NEBIUS_API_KEY',
+    sandbox: config.sandbox.daytonaApiKey
+      ? 'configured'
+      : 'missing DAYTONA_API_KEY - the docs build cannot run in isolation',
     repo: config.repoPath,
-  });
-});
+  }),
+);
 
 // Platforms assign the port through PORT; DOCXY_PORT stays the local default.
 const port = Number(process.env.PORT ?? config.server.port);
@@ -112,31 +77,56 @@ if (!config.server.apiToken) {
 // 0.0.0.0, not localhost: a container's loopback is not reachable from outside it.
 serve({ fetch: app.fetch, port, hostname: '0.0.0.0' }, (info) => {
   console.log(`docxy listening on 0.0.0.0:${info.port}`);
-  console.log(`harness   ${config.trueforge.baseUrl}`);
+  console.log(`repo      ${config.repoPath}`);
 });
 
-if (loopbackHarness) {
-  // Still not fatal — this entry point is meant to come up and report a status
-  // rather than crash-loop — but this particular failure has one cause and one
-  // fix, so it says both instead of leaving them to be inferred from a refused
-  // connection.
+if (!config.nebius.apiKey) {
+  // Not fatal - this entry point comes up and reports a status rather than
+  // crash-looping - but no run can start without it, so it says so once, loudly.
+  console.error('error: NEBIUS_API_KEY is not set. No run can start without it.');
+}
+/**
+ * Said at boot, because the alternative is saying it four roles into a run.
+ *
+ * Code mode fails closed - it will not run model-authored code with nowhere
+ * isolated to put it - but that failure lands after the Change Analyst and the
+ * Impact Mapper have already been paid for. A deployment missing its key should
+ * hear about it while nothing is in flight.
+ */
+if (config.agent.codeMode && config.agent.codeModeSandbox === 'daytona' && !config.sandbox.daytonaApiKey) {
   console.error(
-    `error: TRUEFORGE_BASE_URL is ${config.trueforge.baseUrl}, which this container ` +
-      `cannot reach — in a container, localhost is this container, and nothing here ` +
-      `serves the harness.\n` +
-      `       Deploy the TrueForge harness as its own service and set ` +
-      `TRUEFORGE_BASE_URL to its address (on Railway, something like ` +
-      `http://harness.railway.internal:8790).\n` +
-      `       Until then no run can start. guides/DEPLOY.md step 1 covers it.`,
+    'error: DOCXY_CODE_MODE is on and DAYTONA_API_KEY is not set, so the Docs Updater has ' +
+      'nowhere isolated to run its program. Every run will fail at drafting until one is set.',
   );
 }
-
-void assertReachable(client, config).catch((cause: unknown) => {
-  // A warning, deliberately not a failure. Runs will report this clearly when
-  // one is actually attempted; refusing to boot would only hide the service.
-  if (loopbackHarness) return; // already reported above, with the actual cause
+if (config.agent.codeMode && config.agent.codeModeSandbox === 'local') {
   console.warn(
-    `warning: the TrueForge harness is not reachable yet — ` +
-      `${cause instanceof Error ? cause.message.split('\n')[0] : String(cause)}`,
+    'warning: DOCXY_CODE_MODE_SANDBOX=local runs model-authored code on this container. ' +
+      'That is a development setting; production should use a Daytona workspace.',
   );
-});
+}
+if (config.sandbox.enabled && !config.sandbox.daytonaApiKey) {
+  console.warn(
+    'warning: DAYTONA_API_KEY is not set, so the docs build has nowhere isolated to run. ' +
+      'Proposals will be reported unvalidated unless DOCXY_SANDBOX_FALLBACK=local.',
+  );
+}
+/**
+ * The private key, checked at boot rather than at the moment it is needed.
+ *
+ * `GITHUB_APP_PRIVATE_KEY_PATH` is the right shape on a laptop and the wrong one
+ * here: a managed platform hands a service environment variables, not a
+ * filesystem to place a PEM on beforehand. Nothing reads the key until a run
+ * mints an installation token, so a deployment carrying a laptop's path looks
+ * configured, accepts the webhook, pays for all five roles, and then fails at
+ * the publish step - the last place anyone would look for an environment
+ * problem. Said here instead, while nothing is in flight.
+ */
+if (process.env.GITHUB_APP_PRIVATE_KEY_PATH?.trim() && !process.env.GITHUB_APP_PRIVATE_KEY?.trim()) {
+  console.warn(
+    'warning: GITHUB_APP_PRIVATE_KEY_PATH is set and GITHUB_APP_PRIVATE_KEY is not. That path ' +
+      'is read from this container, not from wherever it was written, so a laptop path will ' +
+      'fail - after a run has already paid for five roles. Set GITHUB_APP_PRIVATE_KEY to the ' +
+      'PEM itself instead; guides/DEPLOY.md has the accepted formats.',
+  );
+}

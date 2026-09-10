@@ -1,10 +1,9 @@
 import type { ReactNode } from "react";
+import Image from "next/image";
 import {
   SiGithub,
   SiGithubactions,
-  SiClaude,
   SiMarkdown,
-  SiKeepachangelog,
   SiSemver,
   SiNeon,
 } from "react-icons/si";
@@ -23,24 +22,20 @@ import { FaSlack } from "react-icons/fa6";
 import { LuPlug, LuWebhook } from "react-icons/lu";
 
 /**
- * Real brand marks for the integration tiles. Simple Icons covers most of them;
- * Nebius and TrueForge have no Simple Icons entry, so their own favicons are
- * vendored under public/brand instead of hotlinked.
+ * Official brand marks. Mastra, Daytona, and Nebius assets are vendored
+ * under public/brand so rendering does not depend on third-party hosts.
  */
 export const brandIcons = {
   GitHub: <SiGithub size={20} color="#24292e" />,
   "GitHub Actions": <SiGithubactions size={20} color="#2088FF" />,
-  Claude: <SiClaude size={20} color="#D97757" />,
+  Mastra: <Image src="/brand/mastra.svg" alt="" width={20} height={20} aria-hidden />,
+  Daytona: <Image src="/brand/daytona.png" alt="" width={20} height={20} aria-hidden />,
+  Neon: <SiNeon size={20} color="#15803d" />,
   Nebius: (
     // eslint-disable-next-line @next/next/no-img-element
     <img src="/brand/nebius.png" alt="" width={20} height={20} aria-hidden />
   ),
-  TrueForge: (
-    // eslint-disable-next-line @next/next/no-img-element
-    <img src="/brand/trueforge.png" alt="" width={20} height={20} aria-hidden />
-  ),
   "Markdown & MDX": <SiMarkdown size={20} color="#18181b" />,
-  "Keep a Changelog": <SiKeepachangelog size={20} color="#E05735" />,
   "Semantic Versioning": <SiSemver size={20} color="#3F4551" />,
 } satisfies Record<string, ReactNode>;
 
@@ -59,10 +54,8 @@ export const integrationIcons = {
     // eslint-disable-next-line @next/next/no-img-element
     <img src="/brand/nebius.png" alt="" width={20} height={20} aria-hidden />
   ),
-  trueforge: (
-    // eslint-disable-next-line @next/next/no-img-element
-    <img src="/brand/trueforge.png" alt="" width={20} height={20} aria-hidden />
-  ),
+  mastra: <Image src="/brand/mastra.svg" alt="" width={20} height={20} aria-hidden />,
+  daytona: <Image src="/brand/daytona.png" alt="" width={20} height={20} aria-hidden />,
   plug: <LuPlug size={20} />,
 } satisfies Record<string, ReactNode>;
 

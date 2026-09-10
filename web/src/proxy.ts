@@ -5,7 +5,7 @@ import type { NextRequest } from "next/server";
 /**
  * Optimistic gate on /dashboard.
  *
- * This only checks that a session cookie is present — it does not validate it,
+ * This only checks that a session cookie is present - it does not validate it,
  * and deliberately so: the proxy runs on every navigation and a database round
  * trip here would tax each one. The authoritative check is `getSessionUser` in
  * the dashboard layout, which is what actually decides whether anything

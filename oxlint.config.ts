@@ -44,7 +44,7 @@ export default {
       //
       // Three of these rules say the same thing: do not accept `unknown`, parse
       // it at the I/O boundary and pass a domain type inward. That is exactly
-      // what the files below are — the parsing layer, not code that skipped it.
+      // what the files below are - the parsing layer, not code that skipped it.
       // They read model output, JSON written by earlier versions of this
       // program, HTTP request bodies, raw SDK stream events, and the reason a
       // promise rejected, none of which arrive typed and all of which are
@@ -63,12 +63,9 @@ export default {
         "src/pipeline/index.ts",
         "src/pipeline/state.ts",
         "src/server/index.ts",
-        "src/trueforge/run.ts",
-        "src/trueforge/session.ts",
-        "src/trueforge/setup.ts",
         "scripts/backfill-postgres.ts",
         // `[id]` is Next's dynamic-segment directory, and square brackets are a
-        // character class to a glob — so they are escaped rather than replaced
+        // character class to a glob - so they are escaped rather than replaced
         // with a wildcard. A `*` here would match every one-level route under
         // `runs/`, quietly exempting pages nobody meant to exempt.
         "web/src/app/dashboard/runs/\\[id\\]/page.tsx",

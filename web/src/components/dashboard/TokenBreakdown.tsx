@@ -4,8 +4,8 @@ import type { RoleTrace, RunTotals } from "@/lib/docxy";
 /**
  * Where the input tokens went.
  *
- * The harness reports its own split — `instructions`, `skills`, `messages`,
- * `harness`, `tool_definitions` — and the `skills` row is the interesting one:
+ * The harness reports its own split - `instructions`, `skills`, `messages`,
+ * `harness`, `tool_definitions` - and the `skills` row is the interesting one:
  * it is a direct answer to whether the skill packs earn what they cost.
  */
 
@@ -52,8 +52,7 @@ export function TokenBreakdown({
 
       {rows.length === 0 ? (
         <p className="mt-4 border-t border-rule pt-3 text-xs leading-relaxed text-muted">
-          No input breakdown recorded. The harness sends one per model message —
-          runs from before that was captured simply do not have it.
+          No input breakdown was recorded for this run.
         </p>
       ) : (
         <div className="mt-4 border-t border-rule pt-3">

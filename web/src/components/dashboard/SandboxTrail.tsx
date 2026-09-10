@@ -11,7 +11,7 @@ interface Props {
  *
  * The validation list already says a check ran in a sandbox. This says what the
  * sandbox was asked to do and what it answered, because "docs-build passed" is
- * a claim and the trail underneath it is the evidence — the difference between
+ * a claim and the trail underneath it is the evidence - the difference between
  * a reviewer trusting the badge and a reviewer being able to check it.
  *
  * Renders nothing when every check ran locally: an empty panel headed "Sandbox"
@@ -68,7 +68,7 @@ export function SandboxTrail({ checks, events }: Props) {
         // Runs recorded before the trail was persisted still show the badge, so
         // say why there is nothing under it rather than showing a bare gap.
         <p className="text-xs text-muted">
-          No trail recorded for this run — validation events were not persisted
+          No trail recorded for this run. Validation events were not persisted
           when it ran.
         </p>
       )}

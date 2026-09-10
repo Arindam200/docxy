@@ -51,14 +51,20 @@ export default async function SignupPage({
         />
       ) : (
         /* Registration is closed, so showing a form that will be refused on
-           submit only wastes the reader's time. Say it here instead. */
+           submit only wastes the reader's time. Say it here instead.
+
+           It is closed for exactly one reason now: this deployment cannot send
+           a verification email, and an unverified signup would let an address
+           be claimed by whoever types it first. So the remedy named here is the
+           one that actually opens it. */
         <div className="rounded-lg border border-rule bg-surface/50 p-4 text-sm leading-relaxed text-muted">
           <p className="font-medium text-foreground">Registration is closed on this deployment.</p>
           <p className="mt-2">
-            Accounts are created by whoever runs this instance, because an operator can
-            approve pull requests. Ask them for access, or set{" "}
-            <code className="rounded bg-background px-1 py-0.5 text-xs">DOCXY_ALLOW_SIGNUP=1</code>{" "}
-            if that is you.
+            New accounts need a confirmed email address, and this deployment has no mail
+            provider configured. Ask whoever runs it for access, or set{" "}
+            <code className="rounded bg-background px-1 py-0.5 text-xs">RESEND_API_KEY</code> and{" "}
+            <code className="rounded bg-background px-1 py-0.5 text-xs">EMAIL_DOMAIN</code> if that
+            is you.
           </p>
         </div>
       )}

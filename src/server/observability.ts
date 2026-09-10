@@ -1,9 +1,9 @@
 import type { RoleName } from '../config.js';
 import type { RoleFailure, RunRecord, RunStatus } from '../types.js';
-import { round } from '../trueforge/pricing.js';
+import { round } from '../pricing.js';
 
 /**
- * Cross-run aggregates — the view a single run cannot give you.
+ * Cross-run aggregates - the view a single run cannot give you.
  *
  * `guides/OBSERVABILITY.md` §7 calls this "the report that makes the tool feel
  * like infrastructure rather than a script": which role fails most, which docs
@@ -52,6 +52,8 @@ export interface RunPoint {
 
 export interface ObservabilityReport {
   window: { runs: number; from?: string; to?: string };
+  /** Draft output counts, not merged changes. */
+  documentation: { edits: number; documents: number; releaseNotes: number };
   outcomes: Partial<Record<RunStatus, number>>;
   /** Runs that finished with a proposal, over runs that finished at all, 0..1. */
   successRate?: number;
@@ -96,6 +98,8 @@ export function buildReport(runs: RunRecord[]): ObservabilityReport {
   const runDurations: number[] = [];
   const docEdits = new Map<string, { edits: number; runs: number }>();
   const series: RunPoint[] = [];
+  const documentation = { edits: 0, documents: 0, releaseNotes: 0 };
+  const documents = new Set<string>();
 
   let costUsd = 0;
   let priced = false;
@@ -142,6 +146,8 @@ export function buildReport(runs: RunRecord[]): ObservabilityReport {
     // not make that page look like it goes stale four times as often.
     const touched = new Set<string>();
     for (const edit of run.docs?.edits ?? []) {
+      documentation.edits += 1;
+      documents.add(JSON.stringify([run.repoPath, edit.path]));
       const entry = docEdits.get(edit.path) ?? { edits: 0, runs: 0 };
       entry.edits += 1;
       if (!touched.has(edit.path)) {
@@ -150,6 +156,7 @@ export function buildReport(runs: RunRecord[]): ObservabilityReport {
       }
       docEdits.set(edit.path, entry);
     }
+    if (run.changelog?.entry.trim()) documentation.releaseNotes += 1;
 
     for (const trace of run.traces) {
       const bucket = roleBucket(trace.role);
@@ -211,6 +218,7 @@ export function buildReport(runs: RunRecord[]): ObservabilityReport {
       to: ordered[ordered.length - 1]?.startedAt,
     },
     outcomes,
+    documentation: { ...documentation, documents: documents.size },
     successRate:
       finished.length > 0
         ? finished.filter((run) => succeeded(run.status)).length / finished.length

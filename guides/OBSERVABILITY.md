@@ -1,312 +1,70 @@
-# Observability plan
+# Reading runs and observability
 
-Goal: a user can open any run and see exactly what each of the five agents was
-asked, what it answered, how long it took, what it cost, and — when something
-failed — enough to diagnose it without reading server logs.
+Current implementation reference, checked against the working tree on September 8, 2026. Core capture, cost reporting and dashboard views are implemented. This describes code behavior, not a fresh verification of deployed services.
 
-Most of the data already exists. The work is mostly surfacing it, plus three
-things that are not being captured at all.
+## Where to look
 
----
+Every view below is scoped to one project, because every one of them answers a
+question about a single repository. The organization level is the project list
+at `/dashboard`. The former organization-wide routes - `/dashboard/activity`,
+`/dashboard/logs`, `/dashboard/insights`, `/dashboard/observability` and
+`/dashboard/runs/<id>` - all redirect to their new homes rather than 404ing.
 
-## Status
+| View | What it shows |
+| --- | --- |
+| `/dashboard/projects/<id>` | Success rate, median run, last run, latest five runs and the documentation setup in brief |
+| `/dashboard/projects/<id>/activity` | Run history for this repository: role outcomes, duration, tokens and PR links |
+| `/dashboard/projects/<id>/runs/<run>` | Role waterfall, token breakdown, validation, sandbox evidence, approval metadata and each role's details |
+| `/dashboard/projects/<id>/logs` | Recorded role events across this repository's runs |
+| `/dashboard/projects/<id>/insights` | Aggregated reliability, durations, token/cost trends and affected documentation |
+| `/dashboard/projects/<id>/settings` | Source repository, documentation repository and paths, and what triggers a run |
 
-Steps 1-9 have landed. Of §7's "later" list, two are in:
+`GET /api/runs`, `/api/logs` and `/api/observability` each take an optional
+`projectId` alongside `organizationId`, which is how those views narrow. The
+narrowing happens in the query rather than in the dashboard: the listing is
+capped, so a busy repository would otherwise crowd a quiet one out of the window
+entirely. A `projectId` outside the calling organization narrows to nothing.
 
-| Item | Where |
-|---|---|
-| Per-role and per-run **cost** | `src/trueforge/pricing.ts` prices each role against the model it actually ran on; `rollUp()` in `src/pipeline/index.ts` writes `usage.costUsd` and `totals.costUsd`. Rates are read live from Nebius (`GET /v1/models?verbose=true`), cached for an hour, and absent rather than guessed when the endpoint is unreachable — an unpriced run shows tokens and no dollar figure. |
-| **Cross-run trends** | `GET /api/observability` (`src/server/observability.ts`) aggregates the window; `/dashboard/observability` renders it: success rate, median run, spend per run, the role that fails most and how, duration or token trend per run, the input split including what the skill packs cost, and the docs that go stale most often. Derived on read — no new capture, no second copy of the numbers to keep correct. |
+The Next.js dashboard does not yet subscribe to the backend event stream. Navigate or refresh to retrieve updated records. The bundled operator page has an event consumer; it is a separate interface. Remaining dashboard streaming work is in [LIVE-UPDATES-PLAN.md](LIVE-UPDATES-PLAN.md).
 
-Still open from §7: **retention** (bodies in a side table, dropped past N days) and
-**export** beyond the existing `docxy show <run-id> --json`.
+## What gets recorded
 
-Old records simply lack the newer fields, as designed — a run written before
-durations were captured reports `—` rather than `0`, and the trend chart falls
-back to the axis that has data.
+[RunRecord and RoleTrace](../src/types.ts) define the stored data. Each run includes its source commit, status, timestamps, role traces, parsed proposals, validation results and any published PR URL. Proposed files preserve the before/after content used for publication.
 
----
+Role traces record the model, prompt, raw output, structured outcome, usage, timing, events and failure information when available. [RunContext](../src/pipeline/context.ts) captures bodies and rolls up duration, tokens and estimated cost. Captured bodies are bounded; they are not guaranteed to contain unlimited model output or the entire provider conversation.
 
-## 1. What is already recorded
+Mastra supplies the runtime in [runtime/mastra.ts](../src/runtime/mastra.ts); there is no separate TrueForge service. Workflow snapshots support resuming completed steps without re-running every agent. Session identifiers and reuse indicators are audit metadata, not proof that every role retains conversational memory; the Docs Updater deliberately does not retain old document text.
 
-Every run is a JSON document in `.docxy/runs/<id>.json`. Per run:
+With Postgres configured, [schema.ts](../src/db/schema.ts) separates role bodies from summary records. Without it, the pipeline uses local state storage. Older records may lack newer fields. Treat a missing duration or price as unknown rather than zero.
 
-| Field | Contents |
-|---|---|
-| `commit` | sha, short sha, subject |
-| `status` | running / ready / awaiting-approval / approved / denied / failed / done |
-| `startedAt`, `finishedAt` | run duration is derivable |
-| `traces[]` | one per role — see below |
-| `classification`, `impact`, `docs`, `changelog` | each role's parsed output |
-| `validation` | every check with pass/fail/skip and detail |
-| `approval` | scope, rationale, required vs actual sign-offs, who and when |
-| `proposedFiles[]` | before/after for every file the PR would touch |
-| `priorSymbolCount`, `newSymbolCount` | the memory story, per run |
-| `pullRequestUrl` | if one opened |
+## Costs and reliability
 
-Per role (`RoleTrace`):
+[pricing.ts](../src/pricing.ts) obtains and caches model rates, and run accounting applies rates to the model actually used. Costs are estimates from token usage, not provider invoices. Sandbox, hosting and other provider charges are not included in the model-cost total.
 
-| Field | Contents |
-|---|---|
-| `role`, `status` | which agent, and running / done / failed |
-| `sessionId`, `turnId` | the harness's own identifiers — independently queryable |
-| `reusedSession` | whether this run reused an existing session |
-| `startedAt`, `finishedAt` | duration is derivable |
-| `events[]` | `{ at, kind, text }` — kinds: `session`, `tool`, `subagent`, `sandbox`, `approval`, `mcp`, `resume`, `error`, `result` |
-| `error` | the failure message, when it failed |
+[server/observability.ts](../src/server/observability.ts) derives cross-run aggregates from stored records. Inspect the selected window and available sample before drawing conclusions from success rates or trends. If a record lacks pricing, the UI should show that limitation instead of treating the run as free.
 
-There is already a UI at `src/server/public/index.html` with a run list, a role
-timeline, diff rendering, approval controls, and a live SSE feed. This plan
-extends it rather than replacing it.
+For quality measurements use the existing CLI:
 
----
-
-## 2. What is missing
-
-### 2a. Token usage is silently zero — a real bug
-
-Every run so far recorded `0 in / 0 out tokens`. The cause is in
-`src/trueforge/run.ts`:
-
-```ts
-usage.inputTokens  += Number(event.usage.inputTokens  ?? 0);
-usage.outputTokens += Number(event.usage.outputTokens ?? 0);
+```bash
+npm run docxy -- eval
+npm run docxy -- memory
+npm run docxy -- show <full-run-id> --json
 ```
 
-That reads the SDK's **typed** camelCase shape. But the stream is consumed as
-`data as AnyEvent`, bypassing the SDK's deserializer, so the fields arrive in
-their wire form — `input_tokens` / `output_tokens`. Neither key matches, both
-default to `0`.
+Use a full run ID for an export requiring all stored bodies; summary listings are not a substitute for loading the complete record. Eval scores are deterministic checks of recorded proposals, not an independent human assessment of prose accuracy. See [TODO.md](../TODO.md) for the outstanding comparative evaluations.
 
-Fix — accept either:
+## Diagnosing a run
 
-```ts
-const u = event.usage as Record<string, unknown>;
-const n = (...keys: string[]) =>
-  Number(keys.map((k) => u[k]).find((v) => v != null) ?? 0);
+1. Open the run and inspect the failed role or validation check.
+2. Compare the role's prompt, raw output and parsed result. A timeout or token-limit error alone may not explain the underlying generation failure. Bodies may be missing on older records or failures that returned no usable output.
+3. Read validation details literally. A build over proposed files only does not certify that the complete documentation site builds. A skipped check supplies no positive evidence.
+4. Preserve the distinction between execution failure and a review concern. Successful roles remain visible when another role fails. A rejected or invalid proposal may still be published as a draft carrying its concerns.
+5. Use the PR as the human review surface. Stored approval metadata describes pipeline scrutiny; it is not a separate customer approval gate or permission to merge automatically.
 
-usage.inputTokens  += n('inputTokens', 'input_tokens');
-usage.outputTokens += n('outputTokens', 'output_tokens');
-usage.cacheReadTokens  += n('cacheReadTokens', 'cache_read_tokens');
-usage.cacheWriteTokens += n('cacheWriteTokens', 'cache_write_tokens');
-```
+The relevant UI components are [RoleInspector](../web/src/components/dashboard/RoleInspector.tsx), [Waterfall](../web/src/components/dashboard/Waterfall.tsx), [TokenBreakdown](../web/src/components/dashboard/TokenBreakdown.tsx) and [SandboxTrail](../web/src/components/dashboard/SandboxTrail.tsx).
 
-**There is a bonus here worth taking.** The harness also sends
-`input_tokens_breakdown`, split into `harness`, `instructions`, `messages`,
-`skills`, and `tool_definitions`. That means you can show a user *exactly what
-the skill packs cost them* on every run — a number almost no agent product can
-show, and a direct answer to "are the skill packs worth it?"
+## Remaining work
 
-### 2b. The prompt is never stored
+Retention/expiry of captured bodies and exports beyond the existing single-run JSON command are still pending in [TODO.md](../TODO.md). Customer authorization across logs, bodies, aggregates and events is unfinished in [LIVE-UPDATES-PLAN.md](LIVE-UPDATES-PLAN.md). Do not expose deployment-wide observability to arbitrary customer accounts before that work passes isolation checks.
 
-You cannot see what a role was asked. For debugging a bad classification this is
-the single most useful field, and it is thrown away after the call.
-
-### 2c. The raw model output is never stored
-
-`extractJson()` parses the response and only the parsed object is kept. When
-parsing fails, or the model returns something malformed, the raw text is gone —
-which is precisely when you need it.
-
-This is not hypothetical. The Changelog Author failed three runs in a row with:
-
-```
-the harness ended the turn in an error state: max_tokens breached
-```
-
-That message is actively misleading — it reads like a budget too small. The
-actual cause was only visible in the raw output:
-
-```
-"entry": "Changed `--output? The `--format` flag? ... Let's. Let's. Let's. Let's."
-```
-
-The model was in a repetition loop. Storing the raw text would have made that
-diagnosis immediate instead of a three-run investigation.
-
-### 2d. No durations, no cost, no cross-run view
-
-Durations are derivable from timestamps but never computed. Cost is not tracked
-at all. There is no way to compare runs or spot a role getting slower.
-
----
-
-## 3. Data model changes
-
-Small, additive, backward-compatible — old records simply lack the fields.
-
-```ts
-export interface RoleTrace {
-  // ... everything today, plus:
-
-  /** Exactly what this role was asked. Truncate above ~100KB. */
-  prompt?: string;
-  /** Exactly what came back, before parsing. The field that matters on failure. */
-  rawOutput?: string;
-  /** Which model actually ran — roles can be pointed at different ones. */
-  model?: string;
-  durationMs?: number;
-  usage?: {
-    inputTokens: number;
-    outputTokens: number;
-    cacheReadTokens?: number;
-    cacheWriteTokens?: number;
-    /** harness / instructions / messages / skills / tool_definitions */
-    inputBreakdown?: Record<string, number>;
-  };
-  /** How it failed, so the UI can choose what to show. */
-  failure?: 'harness-error' | 'parse-error' | 'timeout' | 'aborted';
-}
-
-export interface RunRecord {
-  // ... everything today, plus:
-  durationMs?: number;
-  totals?: { inputTokens: number; outputTokens: number; costUsd?: number };
-}
-```
-
-**Store `rawOutput` even on success.** It is what makes a run auditable — a user
-can see the model's actual words, not just your rendering of them.
-
-**Size.** A run currently holds every proposed file's before *and* after. Adding
-prompts and raw outputs roughly doubles it. Fine on disk; when you move to
-Postgres, put `prompt`, `rawOutput`, and `proposedFiles` in a separate table so
-listing runs stays cheap.
-
----
-
-## 4. Three views
-
-### View 1 — Run list
-
-Scannable. The five dots are the whole story at a glance.
-
-```
-STATUS   COMMIT    SUBJECT                          ROLES      DUR    TOKENS   PR
-● done   c29fc9e   feat!: rename --output to...     ●●●●●     4m12s   38.2k    #2
-● gated  a91b0e2   feat: add --quiet flag           ●●●●●     3m48s   31.0k    —
-● failed 7f3d201   refactor: split report module    ●●●○○     1m02s    9.4k    —
-                                                       ↑
-                                            Docs Updater failed
-● done   7ee9a8e   feat: initial report command     ●●●●●     3m55s   28.7k    #1
-```
-
-Filters that earn their place: status, role-that-failed, date. Not much else.
-
-### View 2 — Run detail: a waterfall
-
-The five roles are not a flat list — two of them run **in parallel**. Show that;
-it is true, and it explains the wall-clock time.
-
-```
-Change Analyst     ████████                              0:52   ✓  reused
-Impact Mapper              ██████████                    1:04   ✓  reused
-Docs Updater                         ████████████████    1:38   ✓  reused
-Changelog Author                     ███████             0:41   ✓  reused
-Coordinator                                       █████  0:37   ✓  reused
-                   └─────────┴─────────┴─────────┴────
-                   0:00      1:00      2:00      3:00
-```
-
-Under it, the run-level facts: classification, impacted docs, changelog entry,
-validation checks, approval state, memory carried in/out — most of which the
-current UI already renders.
-
-Add a **token breakdown** panel, because you now have the data:
-
-```
-Tokens        input 31,204   output 6,998   cached 12,880
-
-input split   instructions  8,412   ← the role's persona and task
-              skills        5,110   ← the skill pack
-              messages     17,204   ← the diff and doc excerpts
-              harness         478
-```
-
-That `skills` number is the answer to "do the skill packs earn their keep."
-
-### View 3 — Role detail
-
-Click a role, get four tabs:
-
-```
-┌ Docs Updater ─────────────────────────────── ✓ done · 1m38s ─┐
-│ model  nebius/deepseek-v4-pro    session 01m0vv5t… (reused)  │
-│ turn   01m0vv780g…                        [open in TrueForge]│
-├──────────────────────────────────────────────────────────────┤
-│ [ Prompt ]  [ Raw output ]  [ Parsed ]  [ Events ]           │
-└──────────────────────────────────────────────────────────────┘
-```
-
-- **Prompt** — verbatim, with the instructions and the user message separated
-- **Raw output** — verbatim, before parsing
-- **Parsed** — the JSON the pipeline acted on
-- **Events** — the `events[]` timeline, icon per `kind`
-
-Deep-link the session and turn ids to the TrueForge UI. Do not rebuild what the
-harness already renders well.
-
----
-
-## 5. Failure presentation
-
-This is the part worth designing deliberately. There are four distinct failure
-classes and they need different things shown.
-
-| Failure | Where it surfaces | Show the user |
-|---|---|---|
-| **Harness error** (`max_tokens`, timeout, provider 5xx) | `trace.error` | The **raw output**, prominently. The error string is often misleading — `max_tokens breached` means a repetition loop as often as a small budget. |
-| **Parse failure** (`extractJson` threw) | `trace.error` | The raw output with the failing region highlighted. Almost always the model wrapping JSON in prose, or truncation. |
-| **Validation failure** | `run.validation.checks[]` | The specific check and its `detail`. `anchor-not-found` already reports the anchor that missed — surface that verbatim, it is the most actionable message in the system. |
-| **Coordinator rejection** | `run.status === 'failed'`, `run.error` | The Coordinator's `concerns[]`. Not a bug — the system working. Style it as a *decision*, not an error. |
-
-Two rules for the UI:
-
-**Never show only the error string.** Always pair it with the raw output. The
-three-run `max_tokens` investigation is the case study: the message pointed the
-wrong way, the raw output pointed the right way immediately.
-
-**A failed role must not hide the roles that succeeded.** Today a Changelog
-Author failure rejects the `Promise.all` and discards the Docs Updater's
-completed work. Even if the run cannot continue, persist and display what the
-other roles produced — three of four roles had already done correct work in
-every one of those failed runs, and none of it was visible.
-
----
-
-## 6. Implementation order
-
-Each step is useful on its own.
-
-| # | Step | Why first |
-|---|---|---|
-| 1 | Fix the token-usage field names | One-line fix; every number in the UI is currently zero |
-| 2 | Store `prompt`, `rawOutput`, `model`, `durationMs` on each trace | The rest is presentation of these |
-| 3 | Roll up `totals` and `durationMs` onto the run | Makes the run list useful |
-| 4 | Run list: status dots, duration, tokens | Highest value per line of code |
-| 5 | Role detail: the four tabs | Where users actually debug |
-| 6 | Failure rules from §5 | Turns a bad run into a diagnosable one |
-| 7 | Waterfall view | The parallelism is genuinely interesting; pure presentation |
-| 8 | Token breakdown panel | Needs §2a's breakdown capture |
-| 9 | Persist partial results when a role fails | Behaviour change; do it deliberately |
-
-Steps 1–3 are backend and roughly an afternoon. 4–6 are the product.
-
----
-
-## 7. Later
-
-**Cost.** Nebius bills per token per model. A small price table plus the usage
-you are now capturing gives per-run and per-role cost. Users care about this more
-than latency.
-
-**Retention.** Run records grow with prompts and raw outputs. Postgres, with
-large columns in a side table; drop bodies past N days but keep the summary row
-so the history stays intact.
-
-**Cross-run trends.** Once several runs exist: classification confidence over
-time, which docs go stale most often, which role fails most. This is the report
-that makes the tool feel like infrastructure rather than a script.
-
-**Export.** A `docxy show <run-id> --json` already exists and is the whole record.
-Keep it — it is the escape hatch that makes the UI optional.
+The completed observability implementation checklist has been removed from this guide; its history remains in git.

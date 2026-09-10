@@ -20,7 +20,7 @@ import {
 /**
  * Runs in Postgres.
  *
- * `save` is an upsert of the whole aggregate inside one transaction — the
+ * `save` is an upsert of the whole aggregate inside one transaction - the
  * pipeline calls it at each role boundary with a `RunRecord` that has grown,
  * and a partially written run is worse than a slow one. Children are replaced
  * rather than diffed: they are append-only in practice and small enough that
@@ -107,8 +107,8 @@ export class PgRunStore implements RunStorage {
   /**
    * Write the roles, their bodies, and any events not yet stored.
    *
-   * This used to delete every role and re-insert it — which cascaded to the
-   * events and re-wrote them too — on each of the nineteen saves a run makes.
+   * This used to delete every role and re-insert it - which cascaded to the
+   * events and re-wrote them too - on each of the nineteen saves a run makes.
    * The last save of a five-role run therefore rewrote every row the run had
    * ever produced, so the cost of recording a run grew with the square of its
    * own length, and a long run spent more time rewriting its history than
@@ -257,8 +257,8 @@ export class PgRunStore implements RunStorage {
   async load(id: string): Promise<RunRecord | null> {
     // A run id is a UUID column, and Postgres rejects anything that is not one
     // with a cast error rather than an empty result. That turned every lookup
-    // by a *prefix* — which `docxy approve 061fe721` and every short id in the
-    // CLI's own output are — into a raw SQL failure instead of the miss the
+    // by a *prefix* - which `docxy publish 061fe721` and every short id in the
+    // CLI's own output are - into a raw SQL failure instead of the miss the
     // caller is written to handle by widening the search.
     if (!UUID.test(id)) return null;
 
@@ -281,7 +281,15 @@ export class PgRunStore implements RunStorage {
     // correct: a repository the App is installed on is one docxy is synced to
     // whether or not it has run yet, and an empty listing is the honest answer
     // rather than a missing one.
-    const paths = repoPaths && repoPaths.length > 0 ? repoPaths : [this.config.repoPath];
+    //
+    // An *empty* array and an *absent* one mean opposite things and are kept
+    // apart deliberately. Absent is a caller that named no scope - the CLI, the
+    // reaper - and defaults to this deployment's own repository. Empty is a
+    // caller that computed its scope and found nothing in it, which is what an
+    // organization owning no projects looks like. Collapsing the two handed
+    // that organization the host's own runs.
+    if (repoPaths?.length === 0) return [];
+    const paths = repoPaths?.length ? repoPaths : [this.config.repoPath];
     const ids = await Promise.all(paths.map((path) => projectId(db, path)));
 
     return this.hydrate(
@@ -295,14 +303,22 @@ export class PgRunStore implements RunStorage {
     );
   }
 
+  /**
+   * Runs whose proposal is ready but has no pull request.
+   *
+   * It used to mean "waiting for a person", which nothing produces any more.
+   * The set it returns is still the one worth surfacing: a run that finished,
+   * cost five model calls, and has nothing to show for it because publishing
+   * failed.
+   */
   async pending(): Promise<RunRecord[]> {
-    return (await this.list(200)).filter((run) => run.status === 'awaiting-approval');
+    return (await this.list(200)).filter((run) => run.status === 'approved' && !run.pullRequestUrl);
   }
 
   /**
    * Events joined to their run, filtered and ordered in the database.
    *
-   * The alternative — and what this replaces — was rebuilding fifty whole
+   * The alternative - and what this replaces - was rebuilding fifty whole
    * `RunRecord`s and flattening them in memory, which read every role, file,
    * and approval those runs owned so that a few hundred log lines could be
    * rendered. Three indexed queries instead of six full hydrations.
@@ -315,14 +331,15 @@ export class PgRunStore implements RunStorage {
     if (query.runId && !UUID.test(query.runId)) return { entries: [], total: 0, kinds: [] };
 
     // As in `list`: naming a repository is what makes it visible, whether or
-    // not it has run yet.
+    // not it has run yet - and an empty scope is a real answer, not a missing
+    // one. See the note there.
+    if (query.repoPaths?.length === 0) return { entries: [], total: 0, kinds: [] };
     const visibleProjects = [
       ...new Set(
         await Promise.all(
-          (query.repoPaths && query.repoPaths.length > 0
-            ? query.repoPaths
-            : [this.config.repoPath]
-          ).map((path) => projectId(db, path)),
+          (query.repoPaths?.length ? query.repoPaths : [this.config.repoPath]).map((path) =>
+            projectId(db, path),
+          ),
         ),
       ),
     ];
@@ -405,8 +422,8 @@ export class PgRunStore implements RunStorage {
    * So are the proposed files, for the same reason and a worse one: a row in
    * `run_files` holds a documentation page twice over, before and after. Fifty
    * runs of those crossed the wire so that a dashboard could count how many
-   * runs a repository had. Only the detail view — and the publish path behind
-   * it, which reads `run.proposedFiles` to know what was approved — needs them.
+   * runs a repository had. Only the detail view - and the publish path behind
+   * it, which reads `run.proposedFiles` to know what was approved - needs them.
    */
   private async hydrate(
     rows: Array<{ run: typeof runs.$inferSelect; repoPath: string }>,
@@ -504,7 +521,7 @@ export class PgRunStore implements RunStorage {
         appliedEdits: file.appliedEdits,
       }));
 
-      // SAFETY: as above — `scope` and `status` are only ever written from an
+      // SAFETY: as above - `scope` and `status` are only ever written from an
       // `ApprovalRequest` by `replaceApproval`.
       const request: ApprovalRequest | undefined = approval
         ? {
@@ -570,7 +587,7 @@ export class PgRunStore implements RunStorage {
  *
  * A role is identified by its run and its position in that run, and both are
  * known before the row exists. Deriving the id is what lets a save upsert the
- * role it wrote last time instead of deleting and re-creating it — and keeps
+ * role it wrote last time instead of deleting and re-creating it - and keeps
  * the events hanging off it, which a delete would cascade away.
  *
  * Shaped as a UUID because the column is one; the bytes are a hash, so this is

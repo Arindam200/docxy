@@ -8,7 +8,7 @@
  *
  * Re-running is safe. Runs upsert on their id, sessions and symbols upsert on
  * their unique keys, and commits are inserted with `on conflict do nothing`.
- * Nothing in `.docxy/` is modified or removed — verify the copy first, then
+ * Nothing in `.docxy/` is modified or removed - verify the copy first, then
  * delete it by hand if you want to.
  */
 
@@ -16,18 +16,16 @@ import { readdir, readFile } from 'node:fs/promises';
 import { eq, sql } from 'drizzle-orm';
 import { join } from 'node:path';
 import { loadConfig, type Config } from '../src/config.js';
-import { ROLES } from '../src/agents/roles.js';
 import { closeDb, databaseConfigured, getDb } from '../src/db/index.js';
 import { projectId } from '../src/db/executor.js';
-import { agentSessions, knowledgeCommits, knowledgeSymbols, projects } from '../src/db/schema.js';
+import { knowledgeCommits, knowledgeSymbols, projects } from '../src/db/schema.js';
 import { PgRunStore } from '../src/db/run-store.js';
 import { KnowledgeStore } from '../src/pipeline/state.js';
-import { SessionStore, specHash } from '../src/trueforge/session.js';
 import type { RunRecord } from '../src/types.js';
 
 async function main(): Promise<void> {
   if (!databaseConfigured()) {
-    throw new Error('DATABASE_URL is not set — there is nothing to back fill into.');
+    throw new Error('DATABASE_URL is not set - there is nothing to back fill into.');
   }
 
   const config = loadConfig();
@@ -38,7 +36,6 @@ async function main(): Promise<void> {
   console.log(`state dir   ${config.stateDir}\n`);
 
   const runs = await backfillRuns(config.stateDir, new PgRunStore(config));
-  const sessions = await backfillSessions(config, project);
   const knowledge = await backfillKnowledge(config, project);
 
   console.log(`\n✓ ${runs} run(s), ${sessions} session(s), ${knowledge} symbol(s) copied.`);
@@ -72,41 +69,18 @@ async function backfillRuns(stateDir: string, store: PgRunStore): Promise<number
 }
 
 /**
- * Existing sessions are stamped with the *current* spec hash, which adopts them
- * rather than orphaning every one on the first run after the move. A session
- * genuinely built from a stale spec would have been reused by the JSON store
- * too, so this changes nothing about what the pipeline does next.
+ * Sessions are deliberately not migrated.
+ *
+ * A stored session is a thread id plus the hash of the agent configuration it
+ * was created from, and a hash that does not match is a miss - the caller
+ * starts a new thread rather than talking to an agent built from stale config.
+ * Every one of those hashes changed when the harness did, so copying the old
+ * ids across would import rows that can only ever miss.
+ *
+ * Nothing is lost. A role opens a fresh thread on its next commit, which costs
+ * one uncached turn; the symbol map below is where the knowledge that actually
+ * accumulates lives, and that is migrated.
  */
-async function backfillSessions(
-  config: Config,
-  project: string,
-): Promise<number> {
-  const existing = await new SessionStore(config).all();
-  const rows = ROLES.filter((role) => existing[role.name]).map((role) => ({
-    projectId: project,
-    role: role.name,
-    // SAFETY: the `filter` above kept only the roles whose session id is present.
-    sessionId: existing[role.name] as string,
-    specHash: specHash(config, role),
-  }));
-
-  if (rows.length === 0) {
-    console.log('sessions    none on disk');
-    return 0;
-  }
-
-  for (const row of rows) {
-    await getDb()
-      .insert(agentSessions)
-      .values(row)
-      .onConflictDoUpdate({
-        target: [agentSessions.projectId, agentSessions.role],
-        set: { sessionId: row.sessionId, specHash: row.specHash },
-      });
-  }
-  console.log(`sessions    ${rows.length} copied`);
-  return rows.length;
-}
 
 async function backfillKnowledge(
   config: Config,

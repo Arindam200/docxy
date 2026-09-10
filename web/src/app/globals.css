@@ -3,7 +3,7 @@
 /*
  * The landing page commits to a single light look on purpose: hairline dashed
  * rules on white, a zinc scale, and exactly one accent. The dashboard opts into
- * the same tokens on a dark ground via `.theme-dark` below — same fonts, same
+ * the same tokens on a dark ground via `.theme-dark` below - same fonts, same
  * blue, different canvas.
  */
 :root {

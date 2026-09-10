@@ -1,27 +1,38 @@
 # Persistence: Neon + Drizzle
 
 **Status: built.** `DATABASE_URL` selects the backend. Unset, the pipeline keeps
-everything as JSON in `.docxy/` — zero setup, and what the demo uses. Set it and
+everything as JSON in `.docxy/` - zero setup, and what the demo uses. Set it and
 runs, sessions, and the symbol map move to Postgres. Both are supported; the
 JSON stores are not deprecated.
 
 The dashboard in `web/` is the other half: Better Auth stores users, sessions,
 and OAuth accounts in the same Neon database, in a separate `auth` schema.
+Billing has a third schema, `billing`, owned by the pipeline's migrations and
+read and written by both sides.
 
 ---
 
 ## Layout
 
-One Neon database, two schemas, two migration histories:
+One Neon database, three schemas, two migration histories:
 
 | Schema | Owner | Tables | Migrations |
 |---|---|---|---|
 | `public` | the pipeline | runs, sessions, knowledge | `drizzle/` |
-| `auth` | the dashboard | Better Auth's four tables | `web/drizzle/` |
+| `billing` | the pipeline | accounts, subscriptions, payments, usage | `drizzle/` |
+| `auth` | the dashboard | Better Auth's four tables plus organizations | `web/drizzle/` |
 
-Each `drizzle.config.ts` sets `schemaFilter` to its own schema. Without that,
+Each `drizzle.config.ts` sets `schemaFilter` to its own schemas. Without that,
 running drizzle-kit on one side sees the other side's tables, finds them absent
 from its schema file, and offers to drop them.
+
+Billing is the one schema two applications share. The checkout and webhook
+routes live in the dashboard, but the tables are defined in `src/db/billing-schema.ts`
+and migrated from the repository root, because money records that two ledgers
+could each offer to drop are money records that will eventually be dropped. The
+dashboard imports those definitions across the directory boundary through the
+`@billing/schema` alias in `web/tsconfig.json`, and opens its own pooled
+connection for them - see below.
 
 ```
 # pipeline
@@ -33,7 +44,7 @@ npm run db:backfill      # one-off: copy .docxy/ into Postgres
 cd web && npm run db:migrate
 ```
 
-Use Neon's **pooled** connection string — the one containing `-pooler`.
+Use Neon's **pooled** connection string - the one containing `-pooler`.
 
 ---
 
@@ -43,13 +54,18 @@ Drizzle offers three ways in, and the two sides want different ones:
 
 | Driver | Transactions | Used by |
 |---|---|---|
-| `drizzle-orm/neon-http` | **No** | **the dashboard** — Better Auth's Drizzle adapter never opens a transaction on Postgres |
-| `drizzle-orm/neon-serverless` | **Yes** (Pool over WebSocket) | **the pipeline** — writing a run is one transaction |
+| `drizzle-orm/neon-http` | **No** | **the dashboard** - Better Auth's Drizzle adapter never opens a transaction on Postgres |
+| `drizzle-orm/neon-serverless` | **Yes** | **the dashboard's billing connection** - claiming the last run in an allowance is one transaction |
+| `drizzle-orm/neon-serverless` | **Yes** (Pool over WebSocket) | **the pipeline** - writing a run is one transaction |
 | `drizzle-orm/node-postgres` | Yes | any Postgres, if you leave Neon |
 
 Writing a run means inserting the run, its roles, their events, and their file
 bodies together. That wants a transaction, which `neon-http` cannot do. The
-dashboard has no such need, so it skips the WebSocket machinery entirely.
+dashboard's ordinary reads have no such need, so they skip the WebSocket
+machinery entirely - but billing does: reading a period, checking what is
+already reserved, and writing a reservation have to be one indivisible step, or
+two requests each claim the same last run. That is why `web/src/lib/billing/db.ts`
+is a second, pooled client rather than the one in `web/src/db`.
 
 `neon-serverless` is a drop-in for `pg`, so moving off Neon later costs one
 import.
@@ -71,16 +87,16 @@ import.
 |---|---|
 | `projects` | one row per repository; sessions and knowledge hang off it |
 | `agent_sessions` | one harness session per role per project, plus `spec_hash` |
-| `runs` | the indexed run list — commit, status, counts, timing |
+| `runs` | the indexed run list - commit, status, counts, timing |
 | `run_outputs` | the five roles' structured output, as jsonb |
 | `run_roles` | one row per trace, ordered by `ordinal` |
 | `run_events` | timeline lines, ordered by `ordinal` within a role |
-| `run_files` | proposed file bodies — large, detail-only |
+| `run_files` | proposed file bodies - large, detail-only |
 | `approvals` / `approval_signoffs` | the gate, one row per sign-off |
 | `knowledge_symbols` | the symbol → doc-section map |
 | `knowledge_commits` | commits already folded in |
 
-Three things differ from the original sketch, all for the same reason — the
+Three things differ from the original sketch, all for the same reason - the
 sketch invented fields that `RunRecord` does not have:
 
 - **No token or cost columns.** The harness does not report usage yet. Adding
@@ -93,7 +109,7 @@ sketch invented fields that `RunRecord` does not have:
   it happened.
 
 `knowledge_commits` is a table rather than an array column so that recording a
-commit is an insert instead of a read-modify-write of the whole list — which is
+commit is an insert instead of a read-modify-write of the whole list - which is
 what makes it safe for two workers to process different commits on one repo.
 
 ### The `spec_hash` column
@@ -112,7 +128,7 @@ adopts those sessions rather than orphaning them.
 ## How the swap works
 
 The three stores already had clean interfaces. `src/pipeline/stores.ts` names
-them — `RunStorage`, `SessionStorage`, `KnowledgeStorage` — and holds the one
+them - `RunStorage`, `SessionStorage`, `KnowledgeStorage` - and holds the one
 function that picks a backend:
 
 ```ts
@@ -141,7 +157,7 @@ they are append-only in practice and small enough that working out what changed
 would cost more than rewriting them.
 
 `list()` hydrates a page of runs with one query per child table over the full id
-set — listing 50 runs is six queries, not three hundred.
+set - listing 50 runs is six queries, not three hundred.
 
 ---
 

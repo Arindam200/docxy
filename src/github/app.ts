@@ -37,12 +37,12 @@ function appJwt(appId: string, pem: string): string {
  * A GitHub request that survives a bad moment.
  *
  * Every call here is a network hop to api.github.com, and the failures worth
- * distinguishing are: a transient one (`fetch failed` — DNS, a dropped socket,
+ * distinguishing are: a transient one (`fetch failed` - DNS, a dropped socket,
  * a blip), which is worth repeating; a 5xx or a rate limit, likewise; and a
  * 4xx, which will say exactly the same thing however many times it is asked.
  *
  * Not decoration. A run reached the point of publishing with five agents' work
- * finished behind it, and lost the pull request to one `fetch failed` — the
+ * finished behind it, and lost the pull request to one `fetch failed` - the
  * proposal survived, but somebody then had to notice and republish it by hand.
  */
 /** Back off, but not past a caller that has already given up. */
@@ -74,7 +74,7 @@ async function githubFetch(
     // Without a timeout a hung connection blocks until the platform's own,
     // which is minutes and long past useful. Composed with the caller's rather
     // than replacing it: the signature takes a whole `RequestInit`, so a caller
-    // that passes a signal means it — and overwriting it left a run's deadline
+    // that passes a signal means it - and overwriting it left a run's deadline
     // unable to cancel the request it was waiting on.
     const timeout = AbortSignal.timeout(20_000);
     try {
@@ -110,7 +110,7 @@ async function githubFetch(
  * to avoid the newline problem, so it is decoded when the value carries no
  * header and nothing outside the base64 alphabet. The other shape is a PEM
  * whose line breaks survived as the two characters `\` and `n`, which is what
- * a shell `export` and most web forms do to a multi-line value — repaired
+ * a shell `export` and most web forms do to a multi-line value - repaired
  * rather than rejected, because the resulting key fails to parse with an error
  * that points nowhere near the cause.
  */
@@ -131,7 +131,7 @@ export function normalizePem(raw: string): string {
  * and Fly hand a service environment variables, not a filesystem to place
  * secrets on beforehand. So `GITHUB_APP_PRIVATE_KEY` carries the key itself and
  * wins when both are set, and neither being set is "not configured" rather than
- * an error — the same signal an absent App id gives.
+ * an error - the same signal an absent App id gives.
  */
 function readPrivateKey(): string | null {
   const inline = process.env.GITHUB_APP_PRIVATE_KEY?.trim();
@@ -228,7 +228,7 @@ export function verifyWebhook(
 
   const expected = Buffer.from(`sha256=${createHmac('sha256', secret).update(body).digest('hex')}`);
   const received = Buffer.from(header);
-  // `timingSafeEqual` throws on a length mismatch, so that is checked first —
+  // `timingSafeEqual` throws on a length mismatch, so that is checked first -
   // length is not secret, the contents are.
   return expected.length === received.length && timingSafeEqual(expected, received);
 }

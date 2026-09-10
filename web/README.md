@@ -45,7 +45,7 @@ a form that cannot work.
 `src/proxy.ts` checks only that a session cookie is *present* on `/dashboard`.
 It runs on every navigation, so a database round trip there would tax each one.
 The authoritative check is `getSessionUser` in the dashboard layout, and the
-`/api/docxy/*` pass-through checks separately — the endpoints behind it approve
+`/api/docxy/*` pass-through checks separately - the endpoints behind it approve
 runs and open pull requests, so it cannot inherit trust from the page that
 called it.
 

@@ -18,12 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pre-review validation: verbatim edit anchors, relative links and in-page
   anchors, semver consistency, plus your own docs-build and test commands
 - The docs build runs **inside the harness sandbox** rather than against your
-  checkout — it is the one check that executes a command over text a model
+  checkout - it is the one check that executes a command over text a model
   wrote. No third-party account needed: a standalone harness carries its own
   sandbox, and `DAYTONA_API_KEY` switches to a remote one. Every executed check
   records whether it ran in the sandbox or locally
-- Graduated approval — one sign-off for routine changes, two different reviewers
-  for breaking or public-API changes — with no expiry in either direction
+- Graduated approval - one sign-off for routine changes, two different reviewers
+  for breaking or public-API changes - with no expiry in either direction
 - Timeline UI showing what each role did, with the approval gate inline
 - Pull requests opened from a throwaway git worktree, leaving your checkout alone
 - GitHub Action gating publication on a protected environment

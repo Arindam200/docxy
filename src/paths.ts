@@ -17,7 +17,7 @@ function findPackageRoot(): string {
 export const PACKAGE_ROOT = findPackageRoot();
 export const SKILLS_DIR = join(PACKAGE_ROOT, 'skills');
 
-/** Read a skill pack, stripping YAML frontmatter — the body is the instruction text. */
+/** Read a skill pack, stripping YAML frontmatter - the body is the instruction text. */
 export function readSkillPack(name: string): string {
   const file = join(SKILLS_DIR, name, 'SKILL.md');
   if (!existsSync(file)) {

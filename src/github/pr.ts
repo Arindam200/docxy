@@ -26,7 +26,7 @@ async function git(cwd: string, args: string[]): Promise<string> {
 export class BranchConflictError extends Error {}
 
 /**
- * Push over a branch this run published earlier — and only such a branch.
+ * Push over a branch this run published earlier - and only such a branch.
  *
  * `--force-with-lease` needs an expected value, and there is no remote-tracking
  * ref to supply one: the push goes to a tokenized URL minted for this call, not
@@ -64,7 +64,7 @@ async function republish(
     throw new BranchConflictError(
       `The remote branch "${branch}" carries commits this run did not publish, so ` +
         'pushing over it would destroy them. Nothing was pushed, and the proposal is ' +
-        'committed on that branch locally — inspect the remote branch, then delete or ' +
+        'committed on that branch locally - inspect the remote branch, then delete or ' +
         'rename it if the work on it is finished.',
     );
   }
@@ -92,7 +92,7 @@ export function buildPrBody(run: RunRecord, concerns: string[] = []): string {
 
   if (run.degraded && run.degraded.length > 0) {
     lines.push('> [!NOTE]', '> **Some agents did not finish, so this proposal is incomplete.**', '>');
-    for (const item of run.degraded) lines.push(`> - \`${item.role}\` — ${item.reason}`);
+    for (const item of run.degraded) lines.push(`> - \`${item.role}\` - ${item.reason}`);
     lines.push('');
   }
 
@@ -114,9 +114,9 @@ export function buildPrBody(run: RunRecord, concerns: string[] = []): string {
 
   if (cl) {
     lines.push('## Changelog', '');
-    lines.push(`\`${cl.section}\` — ${cl.entry}`);
+    lines.push(`\`${cl.section}\` - ${cl.entry}`);
     lines.push('');
-    lines.push(`Proposed version bump: **${cl.semverBump}** — ${cl.bumpRationale}`);
+    lines.push(`Proposed version bump: **${cl.semverBump}** - ${cl.bumpRationale}`);
     lines.push('');
   }
 
@@ -124,7 +124,7 @@ export function buildPrBody(run: RunRecord, concerns: string[] = []): string {
     lines.push('## Validation', '');
     for (const check of run.validation.checks) {
       const icon = check.status === 'pass' ? '✅' : check.status === 'fail' ? '❌' : '⏭️';
-      lines.push(`- ${icon} **${check.name}** — ${check.detail.split('\n')[0] ?? ''}`);
+      lines.push(`- ${icon} **${check.name}** - ${check.detail.split('\n')[0] ?? ''}`);
     }
     lines.push('');
   }
@@ -133,14 +133,14 @@ export function buildPrBody(run: RunRecord, concerns: string[] = []): string {
     lines.push('## Where this lands', '');
     lines.push(
       `Documentation lives on \`${run.docsBranch}\`. These edits were drafted against ` +
-        `that branch and this pull request targets it — the code branch is untouched.`,
+        `that branch and this pull request targets it - the code branch is untouched.`,
     );
     lines.push('');
   }
 
   if (run.approval) {
     lines.push('## Approval', '');
-    lines.push(`- **Scope:** ${run.approval.scope} — ${run.approval.scopeRationale}`);
+    lines.push(`- **Scope:** ${run.approval.scope} - ${run.approval.scopeRationale}`);
     lines.push(
       `- **Signed off by:** ${run.approval.signoffs.map((s) => s.by).join(', ') || '(none)'}`,
     );
@@ -149,7 +149,7 @@ export function buildPrBody(run: RunRecord, concerns: string[] = []): string {
 
   lines.push('---', '');
   lines.push(
-    `Opened by [Docxy](https://github.com/) for commit \`${run.commit.shortSha}\` — ` +
+    `Opened by [Docxy](https://github.com/) for commit \`${run.commit.shortSha}\` - ` +
       `${run.commit.subject}. Every edit above was drafted by a specialist agent, ` +
       `validated before review, and released only after explicit human sign-off.`,
   );
@@ -206,11 +206,24 @@ export async function openPullRequest(
    * A run records the repository it documented. Publishing used the *config's*
    * path instead, so approving a webhook-driven run from a terminal sitting in
    * some other repository resolved the branch, the base ref, and the target
-   * repository from whatever happened to be in that directory — an installation
+   * repository from whatever happened to be in that directory - an installation
    * token request for the wrong repository at best, and a pull request opened
    * against the wrong repository at worst.
    */
-  const repoPath = run.repoPath || config.repoPath;
+  const codePath = run.repoPath || config.repoPath;
+
+  /**
+   * And the checkout the *documentation* came from, which is where this goes.
+   *
+   * A project may keep its docs in a different repository from its code - a
+   * docs site, a handbook, one central repository fed by several services. The
+   * commit that triggered the run belongs to the code repository; the pull
+   * request belongs to the docs one. Branching from the code checkout in that
+   * arrangement would open a documentation pull request against the codebase,
+   * which is the wrong repository and usually the wrong base branch too.
+   */
+  const repoPath = run.docsRepoPath || codePath;
+  const separateDocsRepo = repoPath !== codePath;
 
   // Check the remote before doing any work, so a repo with no origin fails with
   // an explanation instead of raw git stderr after a commit already exists.
@@ -227,14 +240,14 @@ export async function openPullRequest(
 
   // The App is the only way docxy publishes. Pushing through the local
   // credential helper or a personal token would put a human's name on a machine
-  // proposal, which is exactly the thing the bot identity exists to prevent —
+  // proposal, which is exactly the thing the bot identity exists to prevent -
   // so this fails here rather than silently authoring the PR as whoever ran it.
   const app = readAppCredentials();
   if (!app) {
     throw new Error(
       'The docxy GitHub App is not configured, so there is no identity to open a ' +
         'pull request as. Set GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY_PATH, and ' +
-        'GITHUB_APP_INSTALLATION_ID — guides/GITHUB-APP.md walks through registering ' +
+        'GITHUB_APP_INSTALLATION_ID - guides/GITHUB-APP.md walks through registering ' +
         'the App and finding all three.',
     );
   }
@@ -245,9 +258,17 @@ export async function openPullRequest(
   const branch = `docxy/${run.commit.shortSha}-${run.id.slice(0, 8)}`;
   const worktree = await mkdtemp(join(tmpdir(), 'docxy-wt-'));
 
-  // Inferred from the run's own checkout for the same reason. `GITHUB_REPOSITORY`
-  // still wins where an operator has been explicit.
-  const repo = config.github.repo ?? (await inferRepo(repoPath));
+  /**
+   * Inferred from the checkout being published for the same reason.
+   *
+   * `GITHUB_REPOSITORY` still wins where an operator has been explicit - except
+   * when the docs are in their own repository, where it cannot: that variable
+   * names the *code* repository, and honouring it here would mint a token for
+   * one repository and push to another.
+   */
+  const repo = separateDocsRepo
+    ? await inferRepo(repoPath)
+    : (config.github.repo ?? (await inferRepo(repoPath)));
   // Minted here, at the moment it is used. An installation token lives an hour
   // and the approval gate can wait days, so one stored on the run record would
   // be long dead by the time a reviewer signs off.
@@ -272,7 +293,7 @@ export async function openPullRequest(
 
     await git(worktree, ['add', '--', ...changed.map((f) => f.path)]);
 
-    // The base ref may already contain exactly this text — a re-run of a commit
+    // The base ref may already contain exactly this text - a re-run of a commit
     // whose docs were fixed in the meantime. An empty commit would push a
     // branch with no diff and GitHub would refuse the pull request.
     const staged = await git(worktree, ['diff', '--cached', '--name-only']);
@@ -283,7 +304,7 @@ export async function openPullRequest(
       );
     }
 
-    const subject = `docs: update for ${run.commit.shortSha} — ${run.commit.subject}`.slice(0, 100);
+    const subject = `docs: update for ${run.commit.shortSha} - ${run.commit.subject}`.slice(0, 100);
     await git(worktree, [
       '-c',
       `user.name=${app.slug}[bot]`,
@@ -308,7 +329,7 @@ export async function openPullRequest(
         // The branch already exists with different content, which usually means
         // this run was published before and is being republished. The name
         // encodes this run's id, so an earlier attempt at the same proposal is
-        // by far the likeliest thing standing on it — but likeliest is not
+        // by far the likeliest thing standing on it - but likeliest is not
         // certain, and an unconditional `--force` answers a collaborator's
         // commits by deleting them.
         const stale =
@@ -326,7 +347,7 @@ export async function openPullRequest(
       throw new Error(
         scrubToken(
           `Could not push the branch "${branch}". The proposal is committed on ` +
-            `that branch locally, so nothing is lost — push it yourself once the ` +
+            `that branch locally, so nothing is lost - push it yourself once the ` +
             `remote is reachable.\nGit said: ${detail}`,
         ),
       );
@@ -424,7 +445,7 @@ async function createPullRequest(
 
   throw new Error(
     `GitHub refused to open the pull request for "${input.branch}" against ` +
-      `"${input.base}". The branch is pushed, so the proposal is not lost — open it ` +
+      `"${input.base}". The branch is pushed, so the proposal is not lost - open it ` +
       `by hand at https://github.com/${repo}/compare/${input.base}...${input.branch}\n` +
       `GitHub said: ${lastDetail}`,
   );

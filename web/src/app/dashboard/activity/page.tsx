@@ -1,19 +1,16 @@
-import { fetchRuns } from "@/lib/docxy";
-import { Page, PageHead } from "@/components/dashboard/Page";
-import { RunTimeline } from "@/components/dashboard/RunTimeline";
+import { redirect } from "next/navigation";
+import { movedSectionHref } from "@/lib/moved-section";
 
 export const dynamic = "force-dynamic";
 
-export default async function ActivityPage() {
-  const runs = await fetchRuns();
-  const list = (runs ?? []).sort((a, b) => b.startedAt.localeCompare(a.startedAt));
-
-  return (
-    <Page>
-      <PageHead title="Activity" lede="Every pipeline run, newest first.">
-        <span className="text-xs text-muted tabular-nums">{list.length} runs</span>
-      </PageHead>
-      <RunTimeline runs={list} />
-    </Page>
-  );
+/**
+ * Moved inside projects. Activity is now a section of the one repository it
+ * describes, rather than one list mixing every repository together.
+ *
+ * Kept as a redirect rather than deleted because bookmarks, the browser history
+ * of anyone who used the old sidebar, and links written in earlier guides all
+ * still point here. A 404 would read as the feature being gone.
+ */
+export default async function MovedPage() {
+  redirect(await movedSectionHref("activity"));
 }

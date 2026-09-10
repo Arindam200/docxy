@@ -22,7 +22,7 @@ export function IntegrationCard({
   entry: CatalogEntry;
   /** Live entries only: what the pipeline reports right now. */
   connected?: boolean;
-  /** A short live fact — the bot's name, the endpoint — under the summary. */
+  /** A short live fact - the bot's name, the endpoint - under the summary. */
   detail?: string;
   href?: string;
 }) {

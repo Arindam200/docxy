@@ -7,7 +7,7 @@
  *
  * A single leading slash is not enough on its own. Both `//evil.com` and
  * `/\evil.com` are read as protocol-relative URLs by browsers, so the second
- * character has to be rejected too — that backslash case is the one a
+ * character has to be rejected too - that backslash case is the one a
  * `startsWith("//")` check quietly lets through. Resolving against a throwaway
  * origin then confirms nothing else in the value escapes it.
  */

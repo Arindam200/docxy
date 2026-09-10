@@ -27,10 +27,10 @@ export function RoleDots({ roles }: { roles: RoleDot[] | undefined }) {
             key={name}
             title={
               role
-                ? `${roleTitle(name)} — ${role.status}${
+                ? `${roleTitle(name)}: ${role.status}${
                     role.failure ? ` (${role.failure})` : ""
                   } · ${duration(role.durationMs)}`
-                : `${roleTitle(name)} — not reached`
+                : `${roleTitle(name)}: not reached`
             }
             className={`h-1.5 w-1.5 rounded-full ${
               role ? STATUS_CLASS[role.status] : "border border-rule bg-transparent"

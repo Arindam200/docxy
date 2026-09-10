@@ -2,7 +2,7 @@
 import { lookup } from "./lookup";
 
 export function duration(ms: number | undefined): string {
-  if (ms === undefined || ms < 0) return "—";
+  if (ms === undefined || ms < 0) return "N/A";
   if (ms < 1000) return `${ms}ms`;
 
   const seconds = Math.round(ms / 1000);
@@ -14,13 +14,13 @@ export function duration(ms: number | undefined): string {
 
 /** Thousands as `k`, so a run list column stays one width. */
 export function tokens(count: number | undefined): string {
-  if (!count) return "—";
+  if (!count) return "N/A";
   if (count < 1000) return String(count);
   return `${(count / 1000).toFixed(1)}k`;
 }
 
 export function timeAgo(iso: string | undefined): string {
-  if (!iso) return "—";
+  if (!iso) return "N/A";
 
   const seconds = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
   if (seconds < 60) return `${seconds}s ago`;

@@ -188,7 +188,7 @@ function renderRoleTimeline(run) {
             ${reused ? '<span class="reused" title="This role reused its session from an earlier commit">· session reused</span>' : ''}
           </div>
           <div class="role-job">${esc(job)}</div>
-          ${trace ? `<div class="events">${events.map((e) => `<div>${esc(e.kind)} — ${esc(e.text)}</div>`).join('')}</div>` : ''}
+          ${trace ? `<div class="events">${events.map((e) => `<div>${esc(e.kind)} · ${esc(e.text)}</div>`).join('')}</div>` : ''}
           ${trace && trace.error ? `<div class="events err">${esc(trace.error)}</div>` : ''}
         </div>
       </div>`;
@@ -241,7 +241,7 @@ async function renderDetail() {
       <dt>kind</dt><dd>${esc(c.kind)}</dd>
       <dt>surface</dt><dd>${esc(c.surface)}</dd>
       <dt>confidence</dt><dd>${Math.round((c.confidence||0)*100)}%</dd>
-      <dt>symbols</dt><dd style="font-family:var(--mono);font-size:12.5px">${(c.changedSymbols||[]).map(esc).join(', ') || '—'}</dd>
+      <dt>symbols</dt><dd style="font-family:var(--mono);font-size:12.5px">${(c.changedSymbols||[]).map(esc).join(', ') || 'N/A'}</dd>
     </dl>
     <p style="margin:10px 0 0">${esc(c.summary)}</p>
     <p style="margin:6px 0 0;color:var(--muted)">${esc(c.breakingRationale)}</p></div>`);
@@ -255,8 +255,8 @@ async function renderDetail() {
     ${im.notes ? `<p style="margin:10px 0 0;color:var(--muted);font-size:13px">${esc(im.notes)}</p>` : ''}</div>`);
 
   if (cl) parts.push(`<div class="card"><h3>Changelog</h3>
-    <div><code>${esc(cl.section)}</code> — ${esc(cl.entry)}</div>
-    <div style="margin-top:6px;color:var(--muted)">Bump <strong>${esc(cl.semverBump)}</strong> — ${esc(cl.bumpRationale)}</div></div>`);
+    <div><code>${esc(cl.section)}</code> · ${esc(cl.entry)}</div>
+    <div style="margin-top:6px;color:var(--muted)">Bump <strong>${esc(cl.semverBump)}</strong> · ${esc(cl.bumpRationale)}</div></div>`);
 
   if (v) parts.push(`<div class="card"><h3>Validation</h3>
     ${v.checks.map((k) => `<div class="check">
@@ -279,8 +279,8 @@ async function renderDetail() {
     parts.push(`<div class="card gate"><h3>Approval gate</h3>
       <dl class="kv">
         <dt>scope</dt><dd>${esc(a.scope)}</dd>
-        <dt>sign-offs</dt><dd>${a.signoffs.length} / ${a.requiredSignoffs}${a.signoffs.length ? ' — ' + a.signoffs.map((s)=>esc(s.by)).join(', ') : ''}</dd>
-        <dt>status</dt><dd><span class="pill ${esc(a.status)}">${esc(a.status)}</span>${stale.stale ? ` <span class="err">stale — waiting ${stale.waitingMinutes} min, still pending</span>` : ''}</dd>
+        <dt>sign-offs</dt><dd>${a.signoffs.length} / ${a.requiredSignoffs}${a.signoffs.length ? ' · ' + a.signoffs.map((s)=>esc(s.by)).join(', ') : ''}</dd>
+        <dt>status</dt><dd><span class="pill ${esc(a.status)}">${esc(a.status)}</span>${stale.stale ? ` <span class="err">stale · waiting ${stale.waitingMinutes} min, still pending</span>` : ''}</dd>
       </dl>
       <p style="margin:10px 0 0;color:var(--muted)">${esc(a.scopeRationale)}</p>
       <div style="margin-top:10px;white-space:pre-wrap">${esc(a.summary)}</div>

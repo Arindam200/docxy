@@ -3,7 +3,7 @@ import { promisify } from 'node:util';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { Config } from '../config.js';
+import { docsRoot, type Config } from '../config.js';
 
 const exec = promisify(execFile);
 
@@ -41,11 +41,20 @@ async function hasOrigin(repoPath: string): Promise<boolean> {
 export interface DocsTree {
   /** Absolute path to read docs from and stage proposed edits into. */
   path: string;
-  /** Branch the tree is checked out at, or null when it is the code checkout. */
+  /**
+   * The git repository `path` belongs to.
+   *
+   * The same as `path` unless a worktree was made, and *not* the code checkout
+   * when documentation lives in a separate repository. Publishing branches from
+   * this root, so it is what decides which repository a pull request opens
+   * against.
+   */
+  root: string;
+  /** Branch the tree is checked out at, or null when it is a whole checkout. */
   branch: string | null;
-  /** Commit the tree is at, or null when it is the code checkout. */
+  /** Commit the tree is at, or null when it is a whole checkout. */
   head: string | null;
-  /** True when this is a throwaway worktree rather than the user's checkout. */
+  /** True when this is a throwaway worktree rather than a checkout. */
   disposable: boolean;
   dispose: () => Promise<void>;
 }
@@ -61,17 +70,28 @@ export interface DocsTree {
 export async function openDocsTree(config: Config): Promise<DocsTree> {
   const branch = config.docs.branch.trim();
 
+  /*
+   * Which repository the documentation is in.
+   *
+   * `docsRoot` is the code checkout unless this run was given a separate
+   * documentation checkout, in which case everything below - the branch, the
+   * worktree, and the repository a pull request eventually targets - happens
+   * over there instead. The rest of the pipeline still sees one "place docs
+   * are" and does not need to know which case it is in, which is the reason
+   * this function exists at all.
+   */
+  const repo = docsRoot(config);
+
   if (!branch) {
     return {
-      path: config.repoPath,
+      path: repo,
+      root: repo,
       branch: null,
       head: null,
       disposable: false,
       dispose: async () => {},
     };
   }
-
-  const repo = config.repoPath;
 
   // Prefer the remote tip so a stale local branch never silently wins. Falls back
   // to the local branch when there is no origin (local-only repos, tests).
@@ -81,13 +101,13 @@ export async function openDocsTree(config: Config): Promise<DocsTree> {
       await git(repo, ['fetch', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
       ref = `refs/remotes/origin/${branch}`;
     } catch {
-      // Remote does not have it (or the network is down) — try the local branch.
+      // Remote does not have it (or the network is down) - try the local branch.
     }
   }
 
   if (!(await refExists(repo, ref))) {
     throw new Error(
-      `The documentation branch "${branch}" does not exist.\n` +
+      `The documentation branch "${branch}" does not exist in ${repo}.\n` +
         `docxy reads docs from that branch and opens its pull requests against it, ` +
         `so it has to exist before a run.\n` +
         `Create it with:  git switch --orphan ${branch} && git commit --allow-empty -m "start docs" && git push -u origin ${branch}\n` +
@@ -113,6 +133,7 @@ export async function openDocsTree(config: Config): Promise<DocsTree> {
 
   return {
     path,
+    root: repo,
     branch,
     head,
     disposable: true,

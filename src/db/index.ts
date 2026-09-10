@@ -7,12 +7,12 @@ import { schema } from './schema.js';
  * Neon connection for the pipeline.
  *
  * Uses the WebSocket driver rather than `neon-http` because writing a run means
- * inserting the run, its roles, their events, and their file bodies together —
+ * inserting the run, its roles, their events, and their file bodies together -
  * that wants a transaction, and the HTTP driver cannot do them. It is also a
  * drop-in for `pg`, so moving to a plain Postgres later costs one import.
  */
 
-// `ws`, always — not only when the global is missing.
+// `ws`, always - not only when the global is missing.
 //
 // Node 22+ ships a global WebSocket built on undici, and the Neon driver does
 // not get along with it over a long-lived pool: the socket dies without a
@@ -55,7 +55,7 @@ export function getDb(): Database {
     // listeners below. Neon drops idle WebSocket connections after a few
     // minutes; if it wins that race the driver surfaces the close as an `error`
     // on a client, and a client that never finished connecting has no listener
-    // for it — which is a process-level throw. Closing first means the race
+    // for it - which is a process-level throw. Closing first means the race
     // does not happen, so the failure has no opportunity to occur.
     idleTimeoutMillis: 30_000,
     // A single pipeline plus a dashboard does not need more, and a smaller pool

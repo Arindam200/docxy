@@ -4,18 +4,19 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
-  LuBot,
-  LuDatabase,
+  LuArrowLeft,
   LuGithub,
   LuHouse,
-  LuLayers,
-  LuLogOut,
-  LuActivity,
   LuPlug,
+  LuLogOut,
+  LuChartLine,
   LuScrollText,
+  LuSettings,
+  LuUsers,
   LuZap,
 } from "react-icons/lu";
 import { signOut } from "@/lib/auth-client";
+import { projectHref } from "@/lib/projects";
 import type { DashboardUser } from "@/lib/user";
 
 /**
@@ -23,17 +24,98 @@ import type { DashboardUser } from "@/lib/user";
  * pinned to the bottom. Active state follows the current path.
  */
 
-const NAV: Array<{ href: string; label: string; icon: ReactNode }> = [
-  { href: "/dashboard", label: "Overview", icon: <LuHouse /> },
-  { href: "/dashboard/synced", label: "Synced", icon: <LuDatabase /> },
-  { href: "/dashboard/tracking", label: "Tracking", icon: <LuLayers /> },
-  { href: "/dashboard/instructions", label: "Instructions", icon: <LuBot /> },
-  { href: "/dashboard/activity", label: "Activity", icon: <LuZap /> },
-  { href: "/dashboard/observability", label: "Observability", icon: <LuActivity /> },
-  // Built, filterable, and until now reachable only by typing the URL.
-  { href: "/dashboard/logs", label: "Logs", icon: <LuScrollText /> },
-  { href: "/dashboard/integrations", label: "Integrations", icon: <LuPlug /> },
+/** One rail entry. */
+interface NavItem {
+  href: string;
+  label: string;
+  icon: ReactNode;
+  /** Sub-paths that should keep this entry lit. Defaults to the href itself. */
+  match?: (pathname: string) => boolean;
+}
+
+/**
+ * The rail has two contents, and which one it shows is a question about where
+ * you are rather than about what you clicked.
+ *
+ * Outside a project the answer is short on purpose. Overview carries the
+ * organization's totals and every project's share of them, so the two questions
+ * this level can answer - how is it all going, and which project do I want -
+ * are one page rather than two entries. What is left is who can reach the
+ * organization and how it is configured. Role logs and per-run detail are
+ * never asked about across every repository at once, so they are not here.
+ */
+const ORGANIZATION_NAV: NavItem[] = [
+  {
+    href: "/dashboard",
+    label: "Overview",
+    icon: <LuHouse />,
+    // Connecting one is still the organization asking for a project, so the
+    // form keeps this entry lit rather than dropping the rail into a project
+    // that does not exist yet.
+    match: (pathname) => pathname === "/dashboard" || pathname === "/dashboard/projects/new",
+  },
+  {
+    href: "/dashboard/integrations",
+    label: "Integrations",
+    icon: <LuPlug />,
+    match: (pathname) => pathname.startsWith("/dashboard/integrations") || pathname.startsWith("/dashboard/repositories"),
+  },
+  { href: "/dashboard/members", label: "Members", icon: <LuUsers /> },
+  {
+    href: "/dashboard/settings",
+    label: "Settings",
+    icon: <LuSettings />,
+    // Older instruction links still belong to Settings.
+    match: (pathname) =>
+      pathname.startsWith("/dashboard/settings") ||
+      pathname.startsWith("/dashboard/instructions"),
+  },
 ];
+
+/**
+ * Inside a project, the same rail lists that project's sections.
+ *
+ * Every one of these used to be an organization-wide page mixing every
+ * repository together, which meant arriving with "how is acme/api doing" and
+ * having to filter a shared list by eye. They read the same endpoints, narrowed
+ * to the one repository this project watches.
+ */
+function projectNav(id: string): NavItem[] {
+  const base = projectHref(id);
+  return [
+    { href: base, label: "Overview", icon: <LuHouse />, match: (pathname) => pathname === base },
+    {
+      href: projectHref(id, "activity"),
+      label: "Activity",
+      icon: <LuZap />,
+      // Run detail is one run out of this list, and it lives under the
+      // project's own path now, so it lights Activity rather than stranding
+      // the rail on nothing.
+      match: (pathname) =>
+        pathname.startsWith(`${base}/activity`) || pathname.startsWith(`${base}/runs`),
+    },
+    { href: projectHref(id, "logs"), label: "Logs", icon: <LuScrollText /> },
+    { href: projectHref(id, "insights"), label: "Insights", icon: <LuChartLine /> },
+    { href: projectHref(id, "settings"), label: "Settings", icon: <LuSettings /> },
+  ];
+}
+
+/**
+ * The project this path is inside, or null.
+ *
+ * Read from the URL rather than passed down, because the rail is rendered by
+ * the dashboard layout and the project layout sits below it - there is no prop
+ * that could travel upward. The path already carries the answer.
+ *
+ * `new` is the connect form rather than a project id, and treating it as one
+ * would put somebody inside a project that does not exist while they are still
+ * choosing a repository.
+ */
+export function projectIdFromPath(pathname: string): string | null {
+  const match = /^\/dashboard\/projects\/([^/]+)/.exec(pathname);
+  if (!match || match[1] === "new") return null;
+  return decodeURIComponent(match[1]);
+}
 
 function RailButton({
   href,
@@ -53,7 +135,7 @@ function RailButton({
       aria-current={active ? "page" : undefined}
       className={`group relative flex h-9 w-9 mx-auto items-center justify-center rounded-md transition-colors ${
         active
-          ? "bg-surface-2 text-accent"
+          ? "bg-accent/10 text-accent"
           : "text-muted hover:bg-surface-2 hover:text-foreground"
       }`}
     >
@@ -168,6 +250,14 @@ function ProfileMenu({ user }: { user: DashboardUser }) {
             </div>
           </div>
 
+          <Link
+            href="/dashboard/settings"
+            role="menuitem"
+            onClick={() => setOpen(false)}
+            className="focus-ring flex items-center gap-2 px-3 py-2.5 text-xs text-muted transition-colors hover:bg-surface-2 hover:text-foreground"
+          >
+            <LuSettings size={14} aria-hidden /> Account settings
+          </Link>
           <button
             type="button"
             role="menuitem"
@@ -203,8 +293,22 @@ function SignInLink() {
   );
 }
 
-export function Sidebar({ user }: { user: DashboardUser | null }) {
+export function Sidebar({
+  user,
+  projects = [],
+}: {
+  user: DashboardUser | null;
+  /** Enough of each project to name the one the rail is currently inside. */
+  projects?: Array<{ id: string; label: string }>;
+}) {
   const pathname = usePathname();
+  const projectId = projectIdFromPath(pathname);
+  const items = projectId ? projectNav(projectId) : ORGANIZATION_NAV;
+
+  // A project the session cannot see has no name to show, and the page below is
+  // about to render a 404 anyway - so the tooltip falls back to the generic
+  // word rather than to a raw id.
+  const projectLabel = projects.find((project) => project.id === projectId)?.label ?? "Project";
 
   return (
     <aside className="h-screen w-14 shrink-0 flex flex-col border-r border-rule bg-background">
@@ -215,24 +319,27 @@ export function Sidebar({ user }: { user: DashboardUser | null }) {
         </Link>
       </div>
 
-      <nav className="flex-1 py-2">
+      <nav className="flex-1 py-2" aria-label={projectId ? projectLabel : "Organization"}>
+        {projectId && (
+          <>
+            {/*
+              The way out, above the divider that separates it from the
+              project's own sections. Without it the rail has swapped every
+              entry for a project's and left no route back to the list - which
+              is how a switching nav becomes a trap.
+            */}
+            <RailButton href="/dashboard" label={`All projects · ${projectLabel}`} icon={<LuArrowLeft />} />
+            <div className="mx-3 my-2 rule-h" />
+          </>
+        )}
         <ul className="space-y-1">
-          {NAV.map((item) => (
+          {items.map((item) => (
             <li key={item.href}>
               <RailButton
                 href={item.href}
                 label={item.label}
                 icon={item.icon}
-                active={
-                  item.href === "/dashboard"
-                    ? pathname === "/dashboard"
-                    : // Run detail lives under /dashboard/runs but is reached
-                      // from Activity, so that entry stays lit there.
-                      item.href === "/dashboard/activity"
-                      ? pathname.startsWith("/dashboard/activity") ||
-                        pathname.startsWith("/dashboard/runs")
-                      : pathname.startsWith(item.href)
-                }
+                active={item.match ? item.match(pathname) : pathname.startsWith(item.href)}
               />
             </li>
           ))}

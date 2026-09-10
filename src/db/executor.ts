@@ -2,7 +2,7 @@ import { eq } from 'drizzle-orm';
 import type { Database } from './index.js';
 import { projects } from './schema.js';
 
-/** A connection or an open transaction — the stores work against either. */
+/** A connection or an open transaction - the stores work against either. */
 type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0];
 export type Executor = Database | Transaction;
 

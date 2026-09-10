@@ -17,7 +17,7 @@ FROM node:22-slim
 # git is not a convenience here. The pipeline shells out to it for every diff,
 # every throwaway worktree, and every managed checkout, so an image without it
 # fails at the first run rather than at build time. ca-certificates is what
-# lets that git — and the Nebius and GitHub clients — negotiate TLS at all.
+# lets that git - and the Nebius and GitHub clients - negotiate TLS at all.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates \
  && rm -rf /var/lib/apt/lists/*
@@ -50,9 +50,9 @@ RUN useradd --uid 10001 --home-dir /data --no-create-home --shell /usr/sbin/nolo
  && chown -R docxy:docxy /data
 
 # Non-root, which is correct anywhere the volume's ownership can be set. Railway
-# mounts volumes root-owned and documents the consequence — images running as a
+# mounts volumes root-owned and documents the consequence - images running as a
 # non-root uid "will have permissions issues when performing operations within
-# an attached volume" — so a Railway service needs RAILWAY_RUN_UID=0 alongside
+# an attached volume" - so a Railway service needs RAILWAY_RUN_UID=0 alongside
 # this. guides/DEPLOY.md carries that in the checklist.
 USER docxy
 

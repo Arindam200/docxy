@@ -4,7 +4,7 @@ import type { Integration } from "@/lib/docxy";
 import { site } from "@/lib/site";
 
 /**
- * The pipeline's own dependencies — the harness, the model provider, the
+ * The pipeline's own dependencies - the harness, the model provider, the
  * database, the App it publishes as.
  *
  * These are not integrations a team chooses; they are what has to be true for a

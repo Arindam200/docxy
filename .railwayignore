@@ -1,0 +1,29 @@
+# `railway up` uploads this directory. The Dockerfile only needs package
+# manifests, tsconfig.json, src/ and skills/ - everything else is weight, and
+# two entries here are secrets that must never leave the machine.
+.env
+.env.*
+!.env.example
+*.pem
+
+node_modules
+dist
+.git
+.github
+.claude
+.agents
+.gstack
+.sandbox-profiles
+.docxy
+.demo-repo
+
+# The dashboard deploys to Vercel from web/, not to this service.
+web
+guides
+blog
+assets
+test
+tools
+drizzle
+*.log
+tsconfig.tsbuildinfo

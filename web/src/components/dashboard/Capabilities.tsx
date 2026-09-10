@@ -1,138 +1,42 @@
 import Link from "next/link";
+import { LuArrowUpRight, LuGitBranch, LuPlug, LuSlidersHorizontal } from "react-icons/lu";
 
-/**
- * What this dashboard can actually do, and where each thing lives.
- *
- * The sidebar is a collapsed icon rail — good for returning to a page you
- * already know, useless for discovering one you do not. Seven routes were
- * reachable only by hovering an icon and guessing, so the pages that carry the
- * interesting parts of the pipeline went unvisited. Each line says what the
- * page answers, not what it is called.
- */
-
-const CAPABILITIES: Array<{
-  href: string;
-  name: string;
-  answers: string;
-}> = [
-  {
-    href: "/dashboard/synced",
-    name: "Synced repositories",
-    answers: "Which repositories docxy watches, and how to add one.",
-  },
-  {
-    href: "/dashboard/tracking",
-    name: "Tracking",
-    answers:
-      "The symbol-to-documentation map the Impact Mapper reuses — what makes the second commit cheaper than the first.",
-  },
-  {
-    href: "/dashboard/instructions",
-    name: "Standing instructions",
-    answers:
-      "House rules the two drafting roles follow on every run, ranked above their default style.",
-  },
-  {
-    href: "/dashboard/activity",
-    name: "Activity",
-    answers: "Every run, its status, and the pull request it opened.",
-  },
-  {
-    href: "/dashboard/logs",
-    name: "Logs",
-    answers:
-      "Every event the agents emitted, filterable by role and kind — including where a command ran.",
-  },
-  {
-    href: "/dashboard/observability",
-    name: "Observability",
-    answers:
-      "Success rate, spend per run, which role fails most and how, and the docs that go stale most often.",
-  },
-  {
-    href: "/dashboard/integrations",
-    name: "Integrations",
-    answers: "The GitHub App, the model provider, and the database — what is connected.",
-  },
+const actions = [
+  { href: "/dashboard/projects/new", label: "Connect a repository", description: "Choose one repository to keep documented.", icon: LuGitBranch },
+  { href: "/dashboard/settings#instructions", label: "Set writing preferences", description: "Keep updates consistent with your style.", icon: LuSlidersHorizontal },
+  { href: "/dashboard/integrations", label: "Integrations", description: "Connect services and manage repository access.", icon: LuPlug },
 ];
 
-export function Capabilities() {
+export function QuickActions() {
   return (
-    <section aria-labelledby="overview-capabilities" className="space-y-3">
-      <h2
-        id="overview-capabilities"
-        className="text-lg font-semibold tracking-tight"
-      >
-        Where things are
-      </h2>
-      {/*
-        `gap-px` over a `bg-rule` parent draws the hairlines, which means an odd
-        item count leaves the parent showing through the empty cell as a solid
-        block. The last tile spans the row instead of leaving that gap.
-      */}
-      <ul className="grid gap-px border border-rule bg-rule sm:grid-cols-2 sm:[&>li:last-child:nth-child(odd)]:col-span-2">
-        {CAPABILITIES.map((item) => (
-          <li key={item.href} className="bg-surface">
-            <Link
-              href={item.href}
-              className="block h-full px-4 py-3 transition-colors hover:bg-accent/5 focus-visible:bg-accent/5 focus-visible:outline-none"
-            >
-              <p className="text-sm font-medium">
-                {item.name}
-                <span aria-hidden className="ml-1.5 text-muted">
-                  →
-                </span>
-              </p>
-              <p className="mt-1 text-xs leading-relaxed text-muted">{item.answers}</p>
-            </Link>
-          </li>
-        ))}
-      </ul>
-    </section>
+    <nav aria-label="Quick actions" className="grid gap-3 md:grid-cols-3">
+      {actions.map(({ href, label, description, icon: Icon }) => (
+        <Link
+          key={href}
+          href={href}
+          className="focus-ring group flex items-center gap-3 border border-rule bg-surface p-4 transition-colors hover:border-accent/40 hover:bg-surface-2"
+        >
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center border border-rule bg-surface-2 text-muted group-hover:text-accent">
+            <Icon size={17} aria-hidden />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block text-sm font-medium">{label}</span>
+            <span className="mt-1 block text-xs leading-relaxed text-muted">{description}</span>
+          </span>
+          <LuArrowUpRight size={14} className="shrink-0 text-muted" aria-hidden />
+        </Link>
+      ))}
+    </nav>
   );
 }
 
-/**
- * Shown instead of an empty run list.
- *
- * A dashboard whose main panel is blank on first visit reads as broken. This
- * says what has to be true before a run can happen, in the order it has to
- * become true.
- */
-export function NoRunsYet({ hasRepo }: { hasRepo: boolean }) {
+export function NoRunsYet() {
   return (
-    <div className="border border-dashed border-rule px-6 py-10">
-      <p className="text-sm font-medium">No runs yet</p>
+    <div className="border border-dashed border-rule px-5 py-6">
+      <p className="text-sm font-medium">Your first update starts with a push</p>
       <p className="mt-1 text-xs leading-relaxed text-muted">
-        A run starts when a commit lands on a watched repository, or when you
-        trigger one by hand.
+        Once a repository is connected, push to its default branch. Your documentation updates will appear here.
       </p>
-      <ol className="mt-4 space-y-2 text-xs leading-relaxed text-muted">
-        <li>
-          <span className="text-foreground">1.</span> Connect the GitHub App and
-          your model provider —{" "}
-          <Link
-            href="/dashboard/integrations"
-            className="underline decoration-rule underline-offset-4 hover:text-accent hover:decoration-accent"
-          >
-            Integrations
-          </Link>
-        </li>
-        <li>
-          <span className="text-foreground">2.</span>{" "}
-          {hasRepo ? "Confirm the repository docxy watches" : "Add a repository to watch"} —{" "}
-          <Link
-            href="/dashboard/synced"
-            className="underline decoration-rule underline-offset-4 hover:text-accent hover:decoration-accent"
-          >
-            Synced
-          </Link>
-        </li>
-        <li>
-          <span className="text-foreground">3.</span> Push a commit, or run{" "}
-          <code className="font-mono text-foreground">docxy run HEAD</code> locally.
-        </li>
-      </ol>
     </div>
   );
 }

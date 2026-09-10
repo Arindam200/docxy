@@ -6,7 +6,7 @@ import { PgRunStore } from '../db/run-store.js';
 import { PgSessionStore } from '../db/session-store.js';
 import { KnowledgeStore, type KnowledgeMap } from './state.js';
 import { RunStore } from './store.js';
-import { SessionStore } from '../trueforge/session.js';
+import { SessionStore } from './session-store.js';
 
 /**
  * The three persistence interfaces, and the one place that decides which
@@ -42,7 +42,11 @@ export interface LogQuery {
   runId?: string;
   /**
    * Repositories whose runs the caller is allowed to see. Omitted only by
-   * callers that already are the deployment — the CLI reading its own runs.
+   * callers that already are the deployment - the CLI reading its own runs.
+   *
+   * An empty array is not the same as omitting it: it means the caller worked
+   * out its scope and the scope is nothing, which is what an organization
+   * owning no repositories looks like. That answer is no events.
    */
   repoPaths?: string[];
 }
@@ -66,6 +70,10 @@ export interface RunStorage {
    * installed on, each of which runs against its own managed checkout, and a
    * listing keyed only to the directory the server happens to have started in
    * shows an empty dashboard for all of them.
+   *
+   * Omitting it means "this deployment's own repository". Passing an empty
+   * array means "nothing", and the two must not be collapsed - see `visible` in
+   * pipeline/store.ts for what collapsing them cost.
    */
   list(limit?: number, repoPaths?: string[]): Promise<RunRecord[]>;
   pending(): Promise<RunRecord[]>;
@@ -120,7 +128,7 @@ export interface Stores {
 /**
  * Postgres when `DATABASE_URL` is set, JSON files otherwise.
  *
- * The JSON stores are not a fallback to be tolerated — they are what makes
+ * The JSON stores are not a fallback to be tolerated - they are what makes
  * `docxy run` work against a fresh clone with no setup at all, and they are
  * what the demo uses. Both are supported.
  */
@@ -139,7 +147,7 @@ export function createStores(config: Config): Stores {
   };
 }
 
-/** Which backend `createStores` will pick — for `docxy status` and the API. */
+/** Which backend `createStores` will pick - for `docxy status` and the API. */
 export function storageBackend(): 'postgres' | 'files' {
   return databaseConfigured() ? 'postgres' : 'files';
 }

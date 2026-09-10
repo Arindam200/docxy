@@ -1,531 +1,533 @@
 # Deploying docxy
 
-docxy is two processes: **docxy itself**, and the **TrueForge harness** it drives.
-The harness is a dependency, like a database — docxy talks to it over HTTP, and
-nothing else ever needs to.
+docxy is **one process**. The five agents run inside it through Mastra, so there
+is no second service to stand up and nothing to point it at. What it reaches out
+to is four managed things: **Nebius** for models, **Daytona** for the sandbox
+that runs the docs build, **Neon** for storage, and **GitHub** for the
+repositories it documents.
 
-That single fact decides the whole deployment: the harness is not a public API,
-so it does not get a public URL, and it needs no authentication of its own.
+> **If you are following an older copy of this guide:** it described a separate
+> harness service on its own Railway deployment, reached over private
+> networking. That service no longer exists - the agents moved in-process with
+> the Mastra migration, and `harness.Dockerfile` went with it. This file
+> replaces it entirely.
 
 ---
 
-## Local (what you have now)
+## The shape of it
+
+| Piece | What it is | Public URL | Required |
+|---|---|---|---|
+| **docxy** | This repository's `Dockerfile`. API, webhook receiver, and the five agents in one Node process. | **Yes** - GitHub's webhook and the dashboard both reach it from outside | Yes |
+| **dashboard** | `web/`, a Next app. Reads the docxy API server-side and holds the token. | Yes | No - the API and CLI work without it |
+| **Neon** | One Postgres database, two schemas: `public` for the pipeline, `auth` for the dashboard's sign-in. | - | Strongly recommended |
+| **Nebius** | Token Factory, as an OpenAI-compatible provider. | - | Yes - no run starts without it |
+| **Daytona** | The isolated workspace the docs build runs in. | - | See [the sandbox](#the-sandbox-what-the-daytona-key-has-to-be-able-to-do) |
+| **GitHub App** | The bot identity. Mints installation tokens, clones repositories, opens pull requests. | - | Yes, for anything webhook-driven |
+
+The instructions below use **Railway** for docxy and **Vercel** for the
+dashboard, because that is what this project has been deployed on. Nothing in
+the image is Railway-specific except two notes that are called out where they
+matter; [the last section](#the-alternative-one-vm) covers a single VM instead.
+
+---
+
+## Before you start
+
+Have these five things in hand. Each one has a step below that uses it.
+
+- [ ] A **Nebius Token Factory** API key.
+- [ ] A **Neon** project, and its **pooled** connection string - the one
+      containing `-pooler`.
+- [ ] A **Daytona** API key that can **create** sandboxes, not merely list them.
+      This distinction has cost real time; see [the sandbox](#the-sandbox-what-the-daytona-key-has-to-be-able-to-do).
+- [ ] A registered **GitHub App** with its App id, installation id, webhook
+      secret, and private key PEM. [GITHUB-APP.md](GITHUB-APP.md) registers one
+      and finds all four.
+- [ ] A shared secret for the API: `openssl rand -hex 32`.
+
+---
+
+## Test the build before you ship it
+
+Two suites, and they answer different questions. Run the first every time; run
+the second when the deployment's dependencies are what you are unsure about.
 
 ```bash
-npx @truefoundry/trueforge@latest      # harness on :8790
-npx tsx src/cli.ts setup               # register Nebius with it, once
-npx tsx src/cli.ts run HEAD            # run the pipeline
-npx tsx src/cli.ts serve               # timeline UI on :4317
+npm test          # 308 checks - no network, no model, no cost
+npm run typecheck
+npm run lint
 ```
 
-Nothing to configure. `TRUEFORGE_BASE_URL` defaults to `http://localhost:8790`,
-which is where `npx` puts the harness.
+That is the whole of the pure logic: parsing, edit application, the approval
+gate, the API's auth and repository allowlists, validation that never reads as
+validated when it was not, GitHub App credential handling, the secret guardrail,
+and code mode. It touches nothing outside the process, so a green run says the
+code is sound and says nothing about whether your keys work.
 
-TrueForge calls this **local mode**: one process, SQLite, no login. Their docs are
-explicit that it is for your own machine and should stay on localhost. That is
-fine — and correct — for development and for recording a demo.
+```bash
+npx tsx scripts/smoke.ts
+```
 
-**Local is the better demo, not the lesser one.** The `npx` harness carries a
-working sandbox, so `docs-build` runs for real; the Railway harness cannot,
-because the sandbox needs a privileged container. If you are recording, record
-here and follow [DEMO.md](DEMO.md) — which also needs
-`DOCXY_REQUIRE_APPROVAL=true`, since the approval gate is off by default and the
-demo's sign-off beat depends on it.
+That one does the opposite: Nebius answers, Neon stores, a Daytona workspace
+boots and returns real exit codes, all five roles run, the guardrails fire, a
+finished run resumes without re-paying for it, and the scorecard produces
+numbers. It costs roughly twenty cents, which is the point - the things worth
+checking before a deploy are the ones that cost something.
+
+It deliberately **suppresses the GitHub credentials**, so it opens no pull
+request. Publishing is the one step it leaves unexercised, and the first real
+webhook is where you will find out about it - which is why
+[step 2](#step-2--the-github-app-private-key) is worth reading rather than
+skimming.
+
+Run the smoke test with the same environment the deployment will have, not your
+laptop's. A key that works locally and is missing on the service is the failure
+this catches; a key that works locally because your `.env` has something the
+service does not is the one it hides.
 
 ---
 
-## Deployed: Railway
+## Step 1 - the database, before anything boots
 
-Five steps. The first three stand up the harness; the last two are docxy
-itself and the dashboard that reads it.
+**Migrations do not run at startup.** The `drizzle/` directory is in
+`.dockerignore` and nothing in `standalone.ts` applies it, which is deliberate -
+a container that migrates on boot migrates once per replica and once per restart.
+So the schema is your job, done once, from your machine, before the service
+first comes up.
 
-### 1. Add the harness as a service
+```bash
+export DATABASE_URL='postgresql://…-pooler…'   # the pooled Neon string
 
-**Do not use Railway's "deploy from Docker image" field.** It rejects the
-upstream tag with **`Invalid Docker image`**, even though the image is real and
-anonymously pullable — `docker pull tfy.jfrog.io/tfy-images/trueforge:0.1.4-fba492f`
-succeeds with no credential. Railway's registry probe fails against JFrog; the
-reference is fine.
+npm run db:migrate                 # pipeline tables, into `public`
+cd web && npm run db:migrate       # Better Auth tables, into `auth`
+```
 
-Deploy the harness **from this repository** instead, using
-[`harness.Dockerfile`](../harness.Dockerfile). It is four `apt-get` lines on top
-of the upstream image, so the base is pulled at build time — where it works.
+Two things worth knowing before you run that:
 
-New service → **GitHub Repo** → this repository → then, in its
-**Settings**, set two fields on the service itself:
+- **Use `db:migrate`, not `db:push` or `db:generate`.** Mastra's own storage
+  creates its tables in `public` on first boot (`store.init()`), and they are not
+  in `src/db/schema.ts`. `db:migrate` applies the migration files and does not
+  care; `push` diffs the live database against the schema file and will offer to
+  drop what it does not recognise.
+- **The two sides keep separate ledgers.** `__drizzle_migrations` for the
+  pipeline, `__drizzle_migrations_auth` for the dashboard, both in a `drizzle`
+  schema. They share one database and would otherwise read each other's journal
+  timestamps, judge each other's migrations already applied, and skip them while
+  reporting success.
 
-| Setting | Value |
+[DATABASE.md](DATABASE.md) has the full layout and the reasoning behind it.
+
+**Without `DATABASE_URL`, docxy still runs** - every run, session, and symbol map
+becomes JSON under the state directory. That is the right answer on a laptop and
+the wrong one in a container, where the next deploy takes it all with it. Set it.
+
+---
+
+## Step 2 - the GitHub App private key
+
+**On a deployment, set `GITHUB_APP_PRIVATE_KEY` - the PEM itself - and do not
+set `GITHUB_APP_PRIVATE_KEY_PATH` at all.**
+
+The path variable is the right shape on a laptop, where the key is a download
+that never has to move. It is the wrong shape on Railway, Render, Fly, or any
+other managed platform: they hand a service environment variables, not a
+filesystem you can place a secret on beforehand. A `_PATH` pointing at
+`/Users/you/.docxy/app.pem` resolves to nothing inside the container, and
+`readPrivateKey()` (`src/github/app.ts`) throws rather than guessing.
+
+That failure is worth understanding, because of *when* it lands. Nothing reads
+the key at boot. It is read when a run tries to mint an installation token - so
+the App looks configured, the webhook is accepted, all five roles run and are
+paid for, and the run dies at the publish step with a message about a path on a
+laptop. docxy now warns about this at startup, but the variable is still the
+thing to get right.
+
+### Pasting the PEM
+
+`normalizePem()` accepts three forms, so use whichever your platform's UI
+survives:
+
+| Form | When |
 |---|---|
-| Custom Build Command → **Dockerfile Path** | `harness.Dockerfile` |
-| Deploy → **Healthcheck Path** | `/healthz` |
+| The PEM verbatim, newlines and all | Railway's variable editor and Vercel's both accept multi-line values |
+| Base64 of the PEM | A one-line field, or a CI secret that mangles newlines |
+| A PEM whose newlines arrived as literal `\n` | What happens when a `.env` file gets pasted through a shell |
 
-Both are per-service settings, which is the whole point: they are what separate
-this service from the docxy one while both build from the same repository.
-
-**The health check path is the one that will bite you.** The harness does not
-serve `/health` — that is a docxy route:
-
-```
-GET /healthz              -> 200  OK!
-GET /health               -> 404
-GET /api/v1/capabilities  -> 200
-```
-
-Point it at `/health` and the check 404s for its whole timeout, the deployment
-never reaches Active, and `harness.railway.internal` never starts resolving.
-From the docxy side that is indistinguishable from a harness that was never
-deployed at all — `/health` reports `"harness":"unreachable"` either way.
-
-> **Why this is not a `railway.json`.** It used to be. A repo-root
-> `railway.json` applies to *every* service built from that repo, so the health
-> check it set for docxy (`/health`) was inherited by the harness and broke it
-> — and because Railway resolves config-as-code over dashboard values, setting
-> `/healthz` on the service did not win. The obvious fix, pointing the harness
-> at its own config file, is no longer available: Railway has deprecated config
-> as code, and the API now rejects setting a config file path outright with
-> *"Config as Code (railway.json / railway.toml) is deprecated. Use
-> Infrastructure as Code (.railway/railway.ts) instead."* Existing files keep
-> working until **2026-12-01**. So both services now carry their settings
-> per-service, and this repository has no `railway.json` at all.
-
-**Stay on the pinned base tag.** `0.1.4` is npm's `latest`, and therefore what
-`npx @truefoundry/trueforge@latest` runs on a laptop, so the deployed harness
-behaves like the one you developed against.
-[charts/trueforge/values.yaml](https://github.com/truefoundry/trueforge/blob/main/charts/trueforge/values.yaml)
-has moved ahead to `0.2.0-rc.0-…`, which is a release candidate; following it
-gets you a prerelease *and* a version skew with local.
-
-### 2. Set three variables on it
+For the base64 form:
 
 ```bash
-PORT=8790
-HOST=::
-STANDALONE=true
+base64 -i ~/.docxy/app.pem | tr -d '\n'      # macOS
+base64 -w0 app.pem                            # Linux
 ```
 
-**`STANDALONE=true` is not optional.** The container image defaults to
-`mode: distributed` and expects Postgres — without this it exits immediately
-with `Failed to start server: connect ECONNREFUSED 127.0.0.1:5432` and Railway
-shows a crash loop with no obvious cause. (The `npx` harness defaults the other
-way, which is why this never comes up locally.) With it set, the harness comes
-up on SQLite and logs `Standalone mode: sqlite at
-/root/.local/share/trueforge/db/db.sqlite`.
-
-`HOST=::` is the one that is easy to miss and hard to debug. Railway's private
-network is **IPv6-only**, and TrueForge's container image defaults to
-`HOST=0.0.0.0`, which does not accept IPv6. Without this, `harness.railway.internal`
-refuses the connection and docxy reports the harness as unreachable — exactly the
-same symptom as not setting the URL at all. Set correctly, the harness logs
-`Agent server listening on http://:::8790`.
-
-The health check path is `/healthz`, which answers `OK!` —
-[`harness.railway.json`](../harness.railway.json) already sets it, which is the
-whole reason that file exists. See step 1.
-
-**Attach a volume at `/root/.local/share/trueforge`.** That SQLite file is where
-the role sessions live. Without it, a redeploy discards every session and the
-next commit starts cold — the same loss the docxy service's own volume prevents,
-one layer down.
-
-### 3. Do **not** give it a public domain
-
-Leave the harness with no domain. It is reachable only from your other Railway
-services, which is the entire security model:
-
-TrueForge ships **no machine authentication** — no API key, no bearer token, no
-service account. Its only login is OIDC, a browser sign-in flow that a server
-process cannot complete. So a harness on a public URL is unauthenticated admin
-access to your Nebius key, every session, and the ability to run arbitrary agents.
-There is no key you can add to fix that.
-
-Keeping it private is not extra hardening. It is the access control.
-
-### 4. Deploy docxy itself
-
-A second service, from this repository. [`Dockerfile`](../Dockerfile) at the
-root is detected automatically, so the build needs no configuring. Set its
-**Healthcheck Path** to `/health` in the service's settings — the route
-`standalone.ts` serves, which reports the harness without depending on it.
-
-Two things about that image are load-bearing:
-
-- **It installs `git`.** The pipeline shells out to it for every diff, every
-  throwaway worktree, and every managed checkout. A slimmer base without it
-  builds fine and fails on the first run.
-- **It sets `HOME=/data`.** `checkoutPathFor()` puts managed clones under
-  `$HOME/.docxy/checkouts`, and role sessions and the symbol map both key on
-  that path. **Attach a Railway volume mounted at `/data`.** Without one, every
-  redeploy hands the next commit cold sessions and an empty symbol map — losing
-  precisely the accumulation this design exists to produce.
-
-  Two things about that volume:
-
-  - The image carries **no `VOLUME` instruction**, on purpose. Railway refuses
-    to build an image that has one (*"docker VOLUME at Line 47 is not supported,
-    use Railway Volumes"*), and an anonymous volume would shadow the mount
-    anyway. The mount is something you attach to the service, not something the
-    image declares.
-  - **Set `RAILWAY_RUN_UID=0`.** The image runs as a non-root user, which is
-    correct anywhere the volume's ownership can be set, but Railway mounts
-    volumes root-owned and documents the result: images running as a non-root
-    uid *"will have permissions issues when performing operations within an
-    attached volume."* Without this the container boots and then fails on the
-    first `git clone` into `/data`, which is a long way from the cause.
-
-Then point it at the harness:
-
-```bash
-TRUEFORGE_BASE_URL=http://harness.railway.internal:8790
-```
-
-`harness.railway.internal` is just what the other service is called on Railway's
-network — the same role `localhost` played on your laptop. Substitute your
-service's actual name if you called it something else.
-
-Give **this** service a public domain. Unlike the harness it is authenticated
-(`DOCXY_API_TOKEN`), and both the dashboard and GitHub's webhook have to reach
-it from outside the private network.
-
-### Register Nebius once
-
-The provider lives in the harness's own database, so a fresh harness has never
-heard of it. This has to run **inside** the docxy container, and the command is
-not the obvious one:
-
-```bash
-railway ssh --service docxy node dist/cli.js setup
-```
-
-**Attach the harness's volume before running this, not after.** The volume
-mounts at `/root/.local/share/trueforge`, which is where the SQLite database
-lives — so attaching it later shadows the directory the registration was
-written into, and the provider silently goes missing. Same registration, same
-success output, and the next run fails to resolve a model. Volume first, then
-setup.
-
-**`railway ssh` has three prerequisites that each fail differently.** None is
-hard, but the errors arrive one at a time:
-
-| what it says | what it wants |
-|---|---|
-| `No SSH keys found in your SSH agent or ~/.ssh/` | `ssh-keygen -t ed25519` |
-| `No registered SSH keys found` | `railway ssh keys add` — the local key is not automatically known to Railway |
-| `Host key verification failed.` | `ssh-keyscan ssh.railway.com >> ~/.ssh/known_hosts`, since a non-interactive command cannot accept the prompt |
-
-Both halves matter, and both have an obvious-looking wrong version:
-
-- **`railway ssh`, not `railway run`.** `railway run` executes on *your laptop*
-  with Railway's environment variables injected — and `harness.railway.internal`
-  resolves only inside Railway's network, so it fails with the harness
-  unreachable while every variable looks correct.
-- **`node dist/cli.js setup`, not `npm run setup`.** The `setup` script is
-  `tsx src/cli.ts setup`, and the runtime image has neither `tsx` (a
-  devDependency, dropped by `npm ci --omit=dev`) nor `src/`. It fails with
-  `sh: 1: tsx: not found`. The compiled CLI is the same program.
-
-Expect `✓ Nebius provider created` followed by `✓ All registered models
-resolve.` A warning about no sandbox provider is separate and expected — see
-below.
-
-Needs the Railway CLI: `npm i -g @railway/cli`, then `railway login` and
-`railway link` to the project.
-
-### 5. Point the dashboard at it
-
-**This is the step that makes the deployed dashboard show anything.**
-
-Every page under `/dashboard` reads through `web/src/lib/docxy.ts`, which
-fetches `DOCXY_API_URL` over HTTP and *fails soft* — a request that times out
-renders an empty "offline" state rather than an error. The default is
-`http://localhost:4317`, and on Vercel `localhost` is the serverless function's
-own container, where nothing is listening. So a dashboard deployed without this
-variable set does not look broken. It looks like a pipeline that has never run.
-
-On **Vercel**, set all three:
-
-```bash
-DOCXY_API_URL=https://<your-docxy-service>.up.railway.app
-DOCXY_API_TOKEN=<the same value as on the docxy service>
-DOCXY_ALLOWED_EMAILS=you@example.com
-```
-
-The token has to match on both sides exactly. Both callers trim it before
-sending, so trailing whitespace pasted into either dashboard is survivable, but
-a mismatched value is a 401 on every read with nothing on the page to say so.
+`GITHUB_APP_PRIVATE_KEY` wins whenever both are set, so an old `_PATH` left over
+on a service is harmless - but delete it anyway, so there is no ambiguity about
+which one is being read.
 
 ---
 
-### 6. Wire the GitHub App, so a push is all it takes
+## Step 3 - the docxy service
 
-Without this the deployment can be looked at but not exercised: nothing triggers
-a run except an API call. With it, anyone who can push to an installed
-repository can set the whole pipeline going and watch it on the dashboard.
+On Railway: **New Service → GitHub Repo → this repository.** The root
+`Dockerfile` is detected automatically, so the build needs no configuration.
+Then set **Healthcheck Path** to `/health` in the service settings.
 
-On the **docxy** service:
+### The volume, and the two settings around it
+
+`checkoutPathFor()` puts every managed clone under `$HOME/.docxy/checkouts`, and
+the image sets `HOME=/data` for exactly that reason. **Attach a volume mounted at
+`/data`.** Without one, every redeploy hands the next commit a cold clone and an
+empty symbol map - losing precisely the accumulation this design exists to build.
+
+Two things about that volume are easy to get wrong:
+
+- **The image carries no `VOLUME` instruction, on purpose.** Railway refuses to
+  build an image that has one (*"docker VOLUME at Line 47 is not supported, use
+  Railway Volumes"*), and an anonymous volume would shadow the real mount
+  anyway. The mount is something you attach to the service, not something the
+  image declares.
+- **Set `RAILWAY_RUN_UID=0`.** The image runs as a non-root user, which is
+  correct anywhere the volume's ownership can be set. Railway mounts volumes
+  root-owned and documents the consequence: images running as a non-root uid
+  *"will have permissions issues when performing operations within an attached
+  volume."* Without this the container boots green and then fails on the first
+  `git clone` into `/data`, a long way from the cause.
+
+And one that is easy to miss entirely:
+
+- **Set `DOCXY_STATE_DIR=/data/.docxy`.** The state directory defaults to
+  `.docxy` under the working directory, which in this image is `/app` - not on
+  the volume. It holds the standing instructions the dashboard edits, and, when
+  `DATABASE_URL` is unset, every run record too. Left at its default, all of it
+  is discarded on each deploy.
+
+### Environment
 
 ```bash
+# --- required ---------------------------------------------------------------
+NEBIUS_API_KEY=
+DOCXY_API_TOKEN=                 # openssl rand -hex 32 - the service will not boot without it
+DATABASE_URL=                    # the pooled Neon string
+DOCXY_STATE_DIR=/data/.docxy     # onto the volume, not into the image
+RAILWAY_RUN_UID=0                # Railway only; see above
+
+# --- the GitHub App ---------------------------------------------------------
 GITHUB_APP_ID=
-GITHUB_APP_PRIVATE_KEY=          # the PEM itself; no file to place first
 GITHUB_APP_INSTALLATION_ID=
-GITHUB_WEBHOOK_SECRET=           # openssl rand -hex 32
+GITHUB_APP_PRIVATE_KEY=          # the PEM itself - never the _PATH variant
+GITHUB_WEBHOOK_SECRET=           # openssl rand -hex 32, same value as in the App
+
+# --- the sandbox ------------------------------------------------------------
+DAYTONA_API_KEY=                 # must be able to create, not just list
+
+# --- worth setting ----------------------------------------------------------
+DOCXY_DOCS_BUILD_COMMAND=        # without it the docs build is skipped silently
+DOCXY_ALLOWED_REPOS=             # optional: narrows the App's installation further
 ```
 
-Then set the App's **webhook URL** to `https://<your-docxy-domain>/webhook` and
-its secret to the same value. [guides/GITHUB-APP.md](GITHUB-APP.md) finds the
-three ids.
+**Leave `DOCXY_REPO_PATH` unset.** On a webhook-driven deployment the repository
+comes from the delivery, and docxy manages its own checkout under `/data`.
+Setting it pins every run to one tree - and `ensureCheckout()` refuses outright
+if a push arrives for a repository that tree is not a clone of, which is the
+correct behaviour and a confusing one to debug.
 
-Until `GITHUB_WEBHOOK_SECRET` is set, `POST /webhook` answers `503` to
-everything rather than accepting unverified deliveries, so a webhook that
-appears to do nothing is usually this.
+`DOCXY_API_TOKEN` is not optional here. This entry point binds `0.0.0.0`, and the
+API behind it can approve proposals and open pull requests, so `standalone.ts`
+throws at startup rather than putting those routes on the public internet. The
+built-in timeline page stands itself down when a token is set - it drives itself
+from the browser with `fetch` and an `EventSource`, and `EventSource` cannot send
+an `Authorization` header at all. The dashboard is the operator UI for a
+deployment; `GET /` says so and `/health` stays open for the platform's probe.
 
-A push to an installed repository should now produce a run in the dashboard with
-nobody at a terminal. That is the whole difference between a hosted deployment
-and a CLI: the CLI documents the repository you are standing in; the deployment
-documents every repository the App is installed on.
+Finally, **give this service a public domain.** Both the dashboard and GitHub's
+webhook have to reach it from outside.
 
 ---
 
-## Where this deployment currently stands
+## Step 4 - the webhook, so a push is all it takes
 
-Railway project `tender-laughter`, environment `production`, as of
-**2026-08-30**. Recorded because the next person here — including you in a
-week — should not have to rediscover it.
+Without this the deployment can be looked at but not exercised: nothing starts a
+run except an API call.
 
-| | |
+In the App's settings, set the **webhook URL** to
+`https://<your-docxy-domain>/webhook` and its **secret** to the same value as
+`GITHUB_WEBHOOK_SECRET`. Subscribe to **Push** events.
+
+A push to a **connected repository's default branch** should now produce a run
+in the dashboard with nobody at a terminal. Connected, not merely installed -
+see the allowlist note below, and Step 5 for where repositories are connected.
+
+When it produces nothing instead, the receiver is deliberately quiet - it
+answers `200` to deliveries that are genuine but not actionable, so GitHub does
+not retry them forever. The body says which:
+
+| Response | Meaning |
 |---|---|
-| **harness** | Active. No public domain. Volume at `/root/.local/share/trueforge`. |
-| **docxy** | Active at `https://docxy-production.up.railway.app`. Volume at `/data`. |
-| **private networking** | Working. `/health` reports `"harness":"ok"`. |
-| **Nebius** | Registered. All four models resolve. |
-| **sandbox** | **Not available.** See below. |
-| **dashboard** | **Not deployed.** See below. |
+| `503 GITHUB_WEBHOOK_SECRET is not set` | The secret is missing. Every delivery is refused rather than accepted unverified. |
+| `401 bad signature` | The secret does not match the App's. |
+| `200 ignored: not the default branch` | Only pushes to the repository's default branch start a run. |
+| `200 ignored: <repo> is not connected to a project, so nothing is watching it` | The App can see the repository, but nobody connected it in the dashboard. **This is the usual answer** after an *All repositories* install. |
+| `200 ignored: the GitHub App is not installed on <repo>` | The delivery is correctly signed - the secret belongs to the App - and names a repository this installation was not given access to. |
+| `200 ignored: <repo> is not in DOCXY_ALLOWED_REPOS` | Connected, but excluded by the optional narrowing below. |
+| `200 ignored: payload named no commit` | A push event with no `after` SHA - nothing identifiable to run against. |
+| `503 ok: false` | The queue did not take the work. This is the one case where GitHub retrying is right. |
 
-Neither service uses a `railway.json` any more — see step 1 for why, and for
-what replaced it.
+**The allowlist is the set of connected projects, not the installation.**
+Installing the App is an access grant, and *All repositories* is how most people
+install one - it says which repositories docxy *can* read, never which ones
+anybody wants documented. A project is where that is said, one repository at a
+time, on **Repositories → Connect a repository** in the dashboard. `/webhook`
+checks each delivery against the projects table, re-read per delivery, so
+connecting a repository takes effect on its next push with nothing to redeploy;
+disconnecting it stops the runs the same way.
 
-### 1. No sandbox: the Daytona key is read-scoped
+This is the difference between a bot that documents the one repository you asked
+about and a bot that opens pull requests across every repository your account
+owns. Granting access to all of them is fine, and expected. Nothing runs until a
+project connects one.
 
-`/api/v1/capabilities` on the deployed harness reports:
+The installation is still checked, second, because the webhook secret belongs to
+the App rather than to a repository: if somebody else installs your App, their
+pushes reach your `/webhook` and pass the signature. Token minting is scoped to
+your `GITHUB_APP_INSTALLATION_ID`, so their code could never be cloned - but the
+run would still be queued and reported as a failure, which is a confusing way to
+find out.
 
-```json
-{"sandbox":{"enabled":false},
- "skill":{"enabled":false,"reason":"Skills run in a sandbox, which is not configured."}}
-```
+`DOCXY_ALLOWED_REPOS` remains, and only ever *narrows* - it cannot add a
+repository nobody connected. Use it to document fewer repositories than the
+projects cover; leave it unset otherwise, which is the normal case.
 
-`setup` explains why, and it is the failure this guide warns about above —
-*listing is not creating*:
-
-```
-! No remote sandbox provider: the harness refused the Daytona provider (HTTP 422):
-  {"error":{"message":"Daytona rejected the API key — check the credentials"}}
-```
-
-The consequence is bounded and by design: the docs build is **reported
-unvalidated** rather than run on the host, and proposals open as drafts carrying
-that reason. The isolation boundary holds. To fix it, replace `DAYTONA_API_KEY`
-on **both** services with a key that can create sandboxes, then re-run `setup`
-and look for `[daytona]` where the report currently reads `[sandbox]`.
-
-**For a demo, record locally instead.** The `npx` harness carries its own
-working sandbox, so `docs-build` actually runs and passes — see
-[DEMO.md](DEMO.md). Railway cannot match that at any price, because the sandbox
-needs a privileged container.
-
-### 2. `GITHUB_APP_PRIVATE_KEY_PATH` points at a laptop
-
-The docxy service currently sets:
-
-```
-GITHUB_APP_PRIVATE_KEY_PATH=/Users/arindammajumder/.docxy/app.pem
-```
-
-That path does not exist in the container, and `readPrivateKey()`
-(`src/github/app.ts`) **throws** rather than falling back:
-
-```
-GITHUB_APP_PRIVATE_KEY_PATH points at <path>, which could not be read: ...
-On a platform with nowhere to put the file, set GITHUB_APP_PRIVATE_KEY to the
-PEM itself instead.
-```
-
-Nothing surfaces this until a webhook actually fires, at which point the run
-fails at the pull-request step with everything before it having worked. Replace
-it with `GITHUB_APP_PRIVATE_KEY` holding the PEM itself — the variable table
-above already recommends this for exactly this reason — and delete the `_PATH`
-variable so there is no ambiguity about which one is read.
-
-### 3. The dashboard is not deployed
-
-Step 5 has not been done. Nothing on Vercel is reading this deployment yet, so
-there is currently no web UI for the hosted pipeline — only the API and the CLI.
-
-One related tidy-up: `DOCXY_API_URL=http://localhost:4317` is set on the **docxy
-service**, where it does nothing. It is the *dashboard's* variable and belongs on
-Vercel, pointing at the docxy domain. Harmless where it is, but it reads like the
-service is configured when it is not.
+A deployment with no `DATABASE_URL` has no projects at all. There, the
+installation *is* the answer, which is the single-repository install and the
+demo.
 
 ---
 
-## The sandbox in a container: what it actually takes
+## Step 5 - the dashboard
 
-The upstream image cannot run its own sandbox, and the earlier explanation here
-was wrong twice before the harness's own startup log settled it. It names each
-missing piece in turn, so the chain is worth reading rather than guessing at:
+**This is the step that makes a deployed dashboard show anything.**
 
-| what the harness said | what fixed it |
-|---|---|
-| `SRT host dependencies missing (linux: bwrap, socat, rg)` | install `bubblewrap socat ripgrep` |
-| `bwrap: Can't mount proc on /newroot/proc: Operation not permitted` | run the container **privileged** |
-| `No usable Python 3 interpreter in sandbox` | install `python3` |
-| `Local sandbox fallback is available` | — |
+Every page under `/dashboard` reads through `web/src/lib/docxy.ts`, which fetches
+`DOCXY_API_URL` server-side and **fails soft** - a request that times out renders
+an empty "offline" state rather than an error. The default is
+`http://localhost:4317`, which on Vercel is the serverless function's own
+container, where nothing is listening. A dashboard deployed without these
+variables does not look broken. It looks like a pipeline that has never run.
 
-At which point `/api/v1/capabilities` reports:
-
-```json
-{"sandbox":{"enabled":true},"skill":{"enabled":true},"settings":{"enabled":true}}
-```
-
-[`harness.Dockerfile`](../harness.Dockerfile) carries all four packages, so the
-only thing it cannot supply is the privilege.
-
-**`--cap-add SYS_ADMIN` is not enough.** Tested: it still fails at the `/proc`
-mount. It takes full `--privileged`.
-
-### What that means per platform
-
-**On Railway: no local sandbox.** Railway does not offer privileged containers,
-and no environment variable substitutes. The harness runs fine; its sandbox does
-not. What follows is by design rather than by accident —
-`DOCXY_SANDBOX_FALLBACK` defaults to `skip`, so the docs build is **reported
-unvalidated** rather than quietly executed on the host, and every proposal opens
-as a draft carrying that reason. The isolation boundary holds. The `[sandbox]`
-badge does not appear.
-
-To get it back on Railway, register a **Daytona** provider. The key must be able
-to *create*, not just read: registration builds a snapshot, and a read-scoped key
-authenticates against the API and is still refused —
-
-```
-GET https://app.daytona.io/api/sandbox   -> 200
-docxy setup                              -> HTTP 422: Daytona rejected the API key
-```
-
-Listing is not creating, and from outside the two failure modes look identical.
-Set the key on both services, re-run setup, and the validation report reads
-`[daytona]` where it used to read `[sandbox]`.
-
-**On a VM with Docker Compose: the sandbox works, with no third-party account.**
-Give the harness service `privileged: true` and build it from
-`harness.Dockerfile`. This is the only fully self-hosted route that keeps the
-sandbox — worth knowing if a Daytona key is not available.
-
-### Confirm rather than assume
+On Vercel, import this repository with **Root Directory** set to `web`, and set:
 
 ```bash
-curl -s https://<harness-domain>/api/v1/capabilities   # sandbox.enabled
-docxy doctor                                           # names the backend
+DOCXY_API_URL=https://<your-docxy-domain>
+DOCXY_API_TOKEN=<identical to the value on the docxy service>
+DATABASE_URL=<the same pooled Neon string>
+BETTER_AUTH_SECRET=              # openssl rand -base64 32
+BETTER_AUTH_URL=https://<your-dashboard-domain>   # the canonical one, exactly
+
+# Registration is open exactly when these are set, and closed otherwise.
+# Verify the domain in Resend BEFORE setting them: an unverified domain means
+# an open signup form whose confirmation mail is refused on every send.
+RESEND_API_KEY=
+EMAIL_DOMAIN=docxy.app
+
+# Optional. Email and password works without either; a provider's button
+# appears only once its credentials are set.
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
 ```
 
-The harness also states it plainly in its own startup log, one line, either
-`Local sandbox fallback is available` or `unavailable` with the reason.
+- The **token has to match exactly**. Both callers trim before sending, so
+  trailing whitespace is survivable, but a mismatched value is a `401` on every
+  read with nothing on the page to say so.
+- **`BETTER_AUTH_URL` is the canonical origin, not just any name that reaches
+  the dashboard.** A deployment usually answers on several - a custom domain,
+  its `www`, the platform's own `*.vercel.app` alias, a preview's one-off
+  hostname - and Better Auth refuses a sign-in whose origin is none of them.
+  Put the one you want in the address bar here, make every other name redirect
+  to it, and list any that must keep working in `BETTER_AUTH_TRUSTED_ORIGINS`
+  (comma-separated). The platform's own hostnames are trusted automatically.
+- **There is no operator allowlist.** Anyone who signs up and confirms their
+  address gets an account. Authorization is by organization membership: a
+  session carries the organization it is looking at, every dashboard read names
+  it, and the pipeline API refuses a read that does not. An account sees its own
+  organization's runs, logs, repositories and instructions, and nothing else.
+  `DOCXY_ALLOWED_EMAILS` is no longer read by anything; remove it.
+- Add each provider's callback URL - `https://<your-dashboard-domain>/api/auth/callback/google`,
+  and the same with `github` - to that provider's console.
+- `DOCXY_REQUIRE_AUTH=0` opens `/dashboard` without signing in. That is how the
+  demo runs; it is not how a deployment should.
+- **The dashboard holds a live-update stream open per open tab.** The overview,
+  activity and run pages subscribe to the pipeline's event feed through
+  `/api/docxy/events` and re-render themselves as a run progresses. Each stream
+  lasts `DOCXY_STREAM_SECONDS` (55 by default) and is then closed and reopened,
+  which is what re-checks the viewer's membership: a connection that never ends
+  is a permission nobody asks about again. Fifty-five seconds fits inside the
+  60-second function ceiling every plan has. Check what your plan actually
+  allows before raising it, and raise `maxDuration` in
+  `web/src/app/api/docxy/[...path]/route.ts` with it - the two are a pair, and a
+  stream longer than the invocation is cut off mid-event rather than closed.
+
+`web/.env.local.example` documents the rest.
 
 ---
 
-## Optional: durable sessions
-
-The steps above run the harness in standalone mode, which stores sessions in
-SQLite inside the container — they are lost on redeploy. Attach a Railway volume
-to keep them, or move to Postgres:
-
-Add Railway's **Postgres** and **Redis** plugins, then on the harness:
+## Step 6 - confirm it, rather than assume it
 
 ```bash
-STANDALONE=false
-POSTGRES_HOST=${{Postgres.PGHOST}}
-POSTGRES_PORT=${{Postgres.PGPORT}}
-POSTGRES_USER=${{Postgres.PGUSER}}
-POSTGRES_PASSWORD=${{Postgres.PGPASSWORD}}
-POSTGRES_DB=${{Postgres.PGDATABASE}}
-REDIS_URL=${{Redis.REDIS_URL}}
+curl -s https://<your-docxy-domain>/health
 ```
 
-This matters more than it looks. One role holds one long-lived session per
-repository, and what it learns on one commit is meant to still be there for the
-next. In SQLite-in-a-container that memory dies on every redeploy; in Postgres it
-survives.
+```json
+{
+  "ok": true,
+  "model": "configured",
+  "sandbox": "configured",
+  "repo": "/app"
+}
+```
+
+`ok: true` only means the process is up. The other three fields are the point:
+`model` reports whether a run could start at all, and `sandbox` whether the docs
+build has anywhere isolated to run. A deployment missing either is *running* and
+cannot do its job - the exact state a plain green health check used to hide.
+
+`"repo": "/app"` is expected and correct when `DOCXY_REPO_PATH` is unset; the
+repositories that matter are the managed checkouts under `/data`.
+
+Then push a docs-worthy commit to an installed repository and watch the run
+appear. The deploy logs also state the remaining problems at boot, one line each
+- a missing Nebius key, a code-mode configuration that cannot work, a private key
+still configured as a path.
+
+---
+
+## The sandbox: what the Daytona key has to be able to do
+
+**The key must be able to create sandboxes, not just read them.** Registration
+builds a snapshot. A read-scoped key authenticates against the API perfectly and
+is still refused at the moment it is used, and from outside the two failure modes
+look identical:
+
+```
+GET https://app.daytona.io/api/sandbox   -> 200          # listing works
+docxy setup                              -> HTTP 422     # creating does not
+```
+
+Without a working key the consequence is bounded and by design: `DOCXY_SANDBOX`
+is on but `DOCXY_SANDBOX_FALLBACK` defaults to `skip`, so the docs build is
+**reported unvalidated** rather than quietly executed on the host, and proposals
+open as drafts carrying that reason. The isolation boundary holds. Set
+`DOCXY_SANDBOX_FALLBACK=local` only where you have decided a host-run build is
+acceptable.
+
+**A container cannot run docxy's local sandbox on Railway.** The local backend
+needs `bwrap` mounting `/proc`, which needs a fully privileged container -
+`--cap-add SYS_ADMIN` is not enough, and no environment variable substitutes.
+Railway does not offer privileged containers. That is the whole reason Daytona
+is the deployed answer rather than a nicety.
+
+### Code mode
+
+`DOCXY_CODE_MODE` is **off by default**, and a deployment should leave it off
+until it has earned its cost against `docxy eval`. If you do turn it on:
+
+- It runs its program in a **Daytona workspace and nowhere else**. A missing
+  `DAYTONA_API_KEY` is an **error**, not a fallback - every run fails at
+  drafting, and the service says so at boot. That is deliberate: a missing
+  variable must never relocate model-authored code onto the production
+  container.
+- `DOCXY_CODE_MODE_SANDBOX=local` runs that program on the machine docxy is
+  running on. It is a development setting, it has to be asked for by name, and
+  the service warns at boot when a deployment has it set.
+- `DOCXY_SANDBOX=false` turns the *docs build* off and has no effect on where a
+  program runs. The two are deliberately independent.
 
 ---
 
 ## Environment variables
 
-Everything docxy reads is documented in [`.env.example`](../.env.example). The ones
-that matter for a deployment:
+Everything docxy reads is documented in [`.env.example`](../.env.example). These
+are the ones a deployment turns on.
 
-| Variable | Type | Default | Description |
-|---|---|---|---|
-| `TRUEFORGE_BASE_URL` | URL | `http://localhost:8790` | The harness. The default is wrong once deployed. |
-| `NEBIUS_API_KEY` | string | *required* | Model access. |
-| `DOCXY_REPO_PATH` | path | the working directory | **Give each repository a stable checkout directory.** Sessions and the symbol map key on this path. Clone to a fresh temp directory every run and each commit silently starts from cold sessions and an empty map. |
-| `DOCXY_PORT` | integer | `4317` | The port `docxy serve` listens on. |
-| `GITHUB_APP_ID` | string | *required* | The App's numeric id. `openPullRequest()` refuses to run without all three — there is no personal-token fallback. |
-| `GITHUB_APP_PRIVATE_KEY` | string | *one of these two* | The PEM itself. **Prefer this when deployed** — a managed platform gives you environment variables, not a filesystem to place a secret on first. Accepts the PEM verbatim, base64 of it, or one whose newlines arrived as literal `\n`. |
-| `GITHUB_APP_PRIVATE_KEY_PATH` | path | *one of these two* | The PEM as a file. The right shape on a laptop, where the key is a download that never has to move. |
-| `GITHUB_APP_INSTALLATION_ID` | string | *required* | The installation on the account being documented. |
-| `GITHUB_WEBHOOK_SECRET` | string | *required* | Shared with the App's webhook. Unset, `POST /webhook` answers 503 to everything. |
-| `DOCXY_API_TOKEN` | string | *required* | Shared secret between the dashboard and this API. `npm start` refuses to boot without it. Set the identical value on Vercel. |
-| `DOCXY_ALLOWED_EMAILS` | list | *required* | Who may sign in to the dashboard. Empty means nobody, and the dashboard says "No operators are configured". |
-| `DATABASE_URL` | URL | none | Neon connection string. **Set it when deployed.** Unset, runs are JSON files under the state directory, which a container loses on every redeploy unless the volume covers them. |
-| `DAYTONA_API_KEY` | string | none | Remote sandbox. See the sandbox note above — a container's own sandbox may not be available. |
-| `DOCXY_DOCS_BRANCH` | string | none | Only if docs live on their own branch. |
-| `DOCXY_REQUIRE_APPROVAL` | boolean | `false` | Hold every proposal behind a human sign-off before anything is published. |
-| `DOCXY_APPROVAL_STALE_MINUTES` | integer | `60` | Minutes before a pending request is *reported* stale. It is never auto-resolved. |
+| Variable | Default | Why it matters here |
+|---|---|---|
+| `NEBIUS_API_KEY` | *required* | Model access. No run starts without it. |
+| `DOCXY_API_TOKEN` | *required* | Shared secret for the API. `standalone.ts` refuses to boot without it. Identical value on the dashboard. |
+| `DATABASE_URL` | none | Neon, pooled. Unset, runs are JSON the container loses on redeploy. |
+| `DOCXY_STATE_DIR` | `<cwd>/.docxy` | Point at `/data/.docxy` so standing instructions and file-backed state land on the volume. |
+| `GITHUB_APP_ID` | *required* | The App's numeric id. There is no personal-token fallback. |
+| `GITHUB_APP_PRIVATE_KEY` | *required* | **The PEM itself.** See [step 2](#step-2--the-github-app-private-key). |
+| `GITHUB_APP_PRIVATE_KEY_PATH` | - | **Do not set on a deployment.** A laptop-shaped variable that fails at the publish step. |
+| `GITHUB_APP_INSTALLATION_ID` | *required* | The installation being documented. |
+| `GITHUB_WEBHOOK_SECRET` | *required* | Shared with the App. Unset, `/webhook` answers `503` to everything. |
+| `DOCXY_ALLOWED_REPOS` | empty | Optional narrowing of the connected projects. Empty - the normal case - means every repository connected in the dashboard. It cannot widen: an unconnected repository stays unwatched. |
+| `DAYTONA_API_KEY` | none | The sandbox. Must be create-capable. |
+| `DOCXY_SANDBOX_FALLBACK` | `skip` | `local` permits a host-run docs build. Leave it alone unless you mean it. |
+| `DOCXY_DOCS_BUILD_COMMAND` | empty | Without it the docs build is skipped and the sandbox never appears in the validation report. |
+| `DOCXY_REPO_PATH` | the working directory | **Leave unset when webhook-driven.** Setting it pins every run to one checkout. |
+| `DOCXY_CODE_MODE` | `false` | Off until measured. On, it requires a Daytona key. |
+| `DOCXY_DOCS_BRANCH` | none | Only if docs live on their own branch. |
+| `DOCXY_APPROVAL_STALE_MINUTES` | `60` | Minutes before a pending request is *reported* stale. Never auto-resolved. |
+| `PORT` | `4317` | Set by the platform. `DOCXY_PORT` stays the local default. |
 
-> **The approval gate is off by default.** A run publishes on its own, and the
-> pull request is the review surface. Set `DOCXY_REQUIRE_APPROVAL=true` to hold
-> proposals back instead; `decideScope()` in `src/approval/gate.ts` then decides
-> whether releasing one takes one reviewer or two. What the default protects is
-> not review but *quality*: a proposal the Coordinator rejected or validation
-> failed still opens, as a draft with the reasons at the top of its body.
->
-> `DOCXY_APPROVAL_MODE` is retired. A deployment that still sets it to
-> `elevated` or `always` is read as `DOCXY_REQUIRE_APPROVAL=true` and warned
-> about at startup, so a gate someone asked for is never quietly dropped — but
-> it will stop being read, so move across.
->
-> There is no `DOCXY_PROJECT_KEY`. `grep -rhno 'DOCXY_[A-Z_]*'
-> --include='*.ts' src/ | sed 's/.*://' | sort -u` prints the real list.
+---
+
+## Troubleshooting
+
+| Symptom | Cause |
+|---|---|
+| The service will not start, log names `DOCXY_API_TOKEN` | Working as intended. Set it. |
+| Container boots, first run fails on `git clone` into `/data` | No `RAILWAY_RUN_UID=0`; the volume is root-owned and the image is not. |
+| Every redeploy starts from cold sessions and an empty symbol map | No volume at `/data`, or `DOCXY_STATE_DIR` still on its default. |
+| The webhook "does nothing" | Check the response body - the table in [step 4](#step-4--the-webhook-so-a-push-is-all-it-takes) names each ignore reason. |
+| Everything runs, then the pull request fails | `GITHUB_APP_PRIVATE_KEY_PATH` is set instead of `GITHUB_APP_PRIVATE_KEY`. |
+| Proposals all open as drafts, "reported unvalidated" | No usable `DAYTONA_API_KEY`. Check it can create, not just list. |
+| Dashboard renders an empty "offline" state | `DOCXY_API_URL` unset or `DOCXY_API_TOKEN` mismatched. It fails soft by design. |
+| Login page renders and no button works | No OAuth provider configured. Email and password still works. |
+| Signup page says registration is closed | `RESEND_API_KEY` or `EMAIL_DOMAIN` unset. Registration opens only when a confirmation email can be sent. |
+| Signups open but no confirmation mail arrives | The sending domain is not verified in Resend. It accepts the key and refuses each message. |
+| Dashboard reads all fail with `organizationId is required` | Migrations not applied, so the session carries no organization. Run both migration sets. |
+| Every run fails at drafting | `DOCXY_CODE_MODE=true` with no Daytona key. Set the key or turn code mode off. |
 
 ---
 
 ## The alternative: one VM
 
-If you would rather not split this across managed services, the whole topology
-runs on a single small VM with Docker Compose — docxy, harness, Postgres, Redis
-on one box, roughly $5–15/month. TrueForge ships a
-[docker-compose.yml](https://github.com/truefoundry/trueforge/blob/main/docker-compose.yml)
-for its half.
+If you would rather not split this across managed services, the whole thing runs
+on a single small VM with Docker Compose: docxy from this `Dockerfile`, Postgres
+beside it, and a reverse proxy in front for TLS.
 
-The tradeoff is ownership: you handle TLS, restarts, and backups yourself. On
-Railway those are the platform's problem. The service definitions are the same
-either way, so this is not a decision you are locked into.
+The tradeoff is ownership - TLS, restarts, and backups become yours, where on
+Railway they are the platform's problem. One thing you gain: a VM **can** run a
+privileged container, so the local sandbox backend works there and a Daytona
+account becomes optional. Install `bubblewrap`, `socat`, `ripgrep`, and
+`python3` in the image and run it privileged.
 
 ---
 
 ## What a deployed docxy can do that a local one cannot
 
-The GitHub App is built, and it is what makes the deployment worth having. With
-`GITHUB_APP_ID`, a private key, `GITHUB_APP_INSTALLATION_ID` and
-`GITHUB_WEBHOOK_SECRET` set:
+This is what makes the deployment worth having:
 
-- `POST /webhook` accepts push deliveries, verifies the signature, and enqueues
-  a run. Point the App's webhook URL at your public docxy domain.
-- `ensureCheckout()` clones and fetches each installed repository itself, using
-  a short-lived installation token that is never written to disk. A commit
-  authored anywhere — the web editor, a colleague's machine — resolves, which is
-  not true of the CLI reading whatever your local checkout happens to have.
-- Runs across every installed repository show up in one dashboard, because
+- **`POST /webhook` accepts pushes.** A commit authored anywhere - the web
+  editor, a colleague's machine, another CI job - starts a run with nobody at a
+  terminal.
+- **`ensureCheckout()` clones each repository itself**, with a short-lived
+  installation token that is never written to disk. The CLI can only read
+  whatever your local checkout happens to have.
+- **Every installed repository appears in one dashboard**, because
   `syncedRepoPaths()` reports the managed checkouts alongside the local one.
 
-That is the whole point of hosting it: the CLI documents the repository you are
-standing in, and the deployment documents every repository the App is installed
-on, without anyone being at a terminal.
+The CLI documents the repository you are standing in. The deployment documents
+every repository the App is installed on.
+
+---
+
+## See also
+
+- [LOCAL-SETUP.md](LOCAL-SETUP.md) - from nothing to a documentation pull request on your own machine
+- [GITHUB-APP.md](GITHUB-APP.md) - registering the App and finding all four credentials
+- [DATABASE.md](DATABASE.md) - the two schemas, the two migration histories, and why
+- [OBSERVABILITY.md](OBSERVABILITY.md) - what each run records

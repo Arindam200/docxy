@@ -65,7 +65,7 @@ export function TrackingPanel({
 
       {tracking === null && (
         <p className="border-t border-rule px-4 py-3 text-xs text-muted">
-          Nothing learned yet — the knowledge map fills in as runs process commits.
+          No mappings yet. They appear as runs process commits.
         </p>
       )}
     </section>

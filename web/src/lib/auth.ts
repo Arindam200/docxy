@@ -2,17 +2,21 @@
  * Better Auth, backed by Neon through Drizzle.
  *
  * Built lazily and memoised. Constructing it eagerly would mean any module that
- * merely imports this file — the proxy, a layout, the landing page's shared
- * chunk — fails to load when `DATABASE_URL` is absent, which turns a missing
+ * merely imports this file - the proxy, a layout, the landing page's shared
+ * chunk - fails to load when `DATABASE_URL` is absent, which turns a missing
  * env var into a blank site rather than a legible message on /login.
  */
 
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { nextCookies } from "better-auth/next-js";
+import { organization as organizationPlugin } from "better-auth/plugins";
+import { and, asc, eq } from "drizzle-orm";
 import { getDb } from "@/db";
-import { schema } from "@/db/schema";
-import { appUrl } from "@/lib/env";
+import { member, organization, schema } from "@/db/schema";
+import type { DashboardOrganization } from "@/lib/dashboard-organization";
+import { appUrl, emailReady, signupOpen, trustedOrigins } from "@/lib/env";
+import { sendInvitationEmail, sendVerificationEmail, sendWelcomeEmail } from "@/lib/email";
 
 type Auth = ReturnType<typeof create>;
 
@@ -52,6 +56,10 @@ function create() {
     baseURL: appUrl(),
     secret: process.env.BETTER_AUTH_SECRET,
 
+    // The canonical domain is not the only name this deployment answers to.
+    // See `trustedOrigins` for why the list is built rather than written down.
+    trustedOrigins: trustedOrigins(),
+
     database: drizzleAdapter(getDb(), {
       provider: "pg",
       schema,
@@ -62,18 +70,49 @@ function create() {
     emailAndPassword: {
       enabled: true,
       minPasswordLength: 8,
-      // No transactional email provider is wired up yet, so requiring
-      // verification would strand every new account. Turn this on together
-      // with `sendVerificationEmail`.
-      requireEmailVerification: false,
-      autoSignIn: true,
-      // Registration is closed by default, and that is what makes an
-      // email-based operator allowlist safe to have. Open signup plus no
-      // verification step means an address can be claimed by whoever types it
-      // first — so an attacker who reads DOCXY_ALLOWED_EMAILS, or guesses it,
-      // registers the listed address before its owner does and is an operator.
-      // Existing accounts still sign in; only creating new ones is shut.
-      disableSignUp: process.env.DOCXY_ALLOW_SIGNUP !== "1",
+      // The address has to be proved before the account can do anything.
+      // Without it an address is claimed by whoever types it first, and an
+      // organization invitation sent to that address reaches them.
+      requireEmailVerification: emailReady(),
+      // Signing in immediately would defeat the line above.
+      autoSignIn: false,
+      // Open exactly when a verification email can actually be delivered. See
+      // `signupOpen()` - the invariant lives there, in one place, because the
+      // signup page renders from the same answer.
+      disableSignUp: !signupOpen(),
+    },
+
+    emailVerification: {
+      sendOnSignUp: true,
+      // The link is the last step of signing up, so it should land the person
+      // in the product rather than on a login form they have just filled in.
+      autoSignInAfterVerification: true,
+      sendVerificationEmail: async ({ user, url }) => {
+        await sendVerificationEmail(user.email, url);
+      },
+      /**
+       * The welcome, at the first moment it is honest to send one.
+       *
+       * Not at signup: that address is unproven, and the note would arrive
+       * beside the verification mail telling somebody to do things they cannot
+       * do yet. Here the person is real, confirmed, and one step from
+       * onboarding.
+       *
+       * Failure is swallowed deliberately. Verification has already succeeded
+       * by this point, and throwing would turn a missing welcome into a broken
+       * confirmation link - losing the account to save the greeting.
+       */
+      afterEmailVerification: async (user) => {
+        try {
+          await sendWelcomeEmail(user.email, user.name);
+        } catch (cause) {
+          console.error(
+            `could not send the welcome email to ${user.email}: ${
+              cause instanceof Error ? cause.message : String(cause)
+            }`,
+          );
+        }
+      },
     },
 
     socialProviders: socialProviders(),
@@ -98,9 +137,52 @@ function create() {
       },
     },
 
-    // Must stay last: it is what lets Better Auth set cookies from Server
-    // Actions and route handlers.
-    plugins: [nextCookies()],
+    /**
+     * Every session carries the organization it is looking at.
+     *
+     * Set when the session is created rather than read per request: the
+     * dashboard asks "which org am I in" on every server component, and that
+     * should not be a query each time. A user with no membership yet - signed
+     * up, verified, not yet through onboarding - gets null, which the dashboard
+     * reads as "send them to name their first organization".
+     */
+    databaseHooks: {
+      session: {
+        create: {
+          before: async (session) => {
+            const rows = await getDb()
+              .select({ organizationId: member.organizationId })
+              .from(member)
+              .where(eq(member.userId, session.userId))
+              .limit(1);
+            return { data: { ...session, activeOrganizationId: rows[0]?.organizationId ?? null } };
+          },
+        },
+      },
+    },
+
+    plugins: [
+      organizationPlugin({
+        // Anyone may create one, because everyone needs one: an account with no
+        // organization owns nothing and can see nothing.
+        allowUserToCreateOrganization: true,
+        // Whoever creates an org owns it, and an owner is the only role that
+        // can delete it or hand it over.
+        creatorRole: "owner",
+        invitationExpiresIn: 60 * 60 * 24 * 7, // one week
+        sendInvitationEmail: async ({ id, email, organization: org, inviter }) => {
+          await sendInvitationEmail({
+            to: email,
+            organizationName: org.name,
+            inviterName: inviter.user.name || inviter.user.email,
+            url: `${appUrl() ?? ""}/invite/${id}`,
+          });
+        },
+      }),
+      // Must stay last: it is what lets Better Auth set cookies from Server
+      // Actions and route handlers.
+      nextCookies(),
+    ],
   });
 }
 
@@ -126,41 +208,91 @@ export async function getSessionUser(headers: Headers): Promise<SessionUser | nu
 }
 
 /**
- * The addresses allowed to operate this deployment.
+ * The organization this session is looking at, or null.
  *
- * Being signed in and being an operator are two different questions. A session
- * proves somebody completed a sign-in; this answers whether they may read this
- * repository's runs and approve its pull requests.
+ * Null has one meaning and it is not "everything": the account has not finished
+ * onboarding and owns nothing yet. Callers send those people to /onboarding
+ * rather than rendering an empty dashboard that looks like a broken one.
  */
-export function allowedOperators(): string[] {
-  return (process.env.DOCXY_ALLOWED_EMAILS ?? "")
-    .split(",")
-    .map((entry) => entry.trim().toLowerCase())
-    .filter(Boolean);
+export async function getActiveOrganizationId(headers: Headers): Promise<string | null> {
+  const result = await getAuth().api.getSession({ headers });
+  // SAFETY: the organization plugin adds `activeOrganizationId` to the session
+  // model - it is in the schema this adapter reads and writes - but the
+  // inferred type does not carry plugin fields through. The property is read as
+  // optional and defaulted, so a build where it is genuinely absent yields null
+  // rather than lying.
+  const session = result?.session as { activeOrganizationId?: string | null } | undefined;
+  return session?.activeOrganizationId ?? null;
 }
-
-export type OperatorVerdict = "ok" | "unauthenticated" | "not-configured" | "not-an-operator";
 
 /**
- * One authorization rule, asked in every place that needs it.
+ * The organization this session is looking at, confirmed against the member
+ * table, or null.
  *
- * It lives here rather than in the proxy because the proxy is not the only way
- * to this deployment's data: dashboard pages are server components that read
- * the pipeline API directly. A check that only the proxy performed would leave
- * every read open to any account that could sign in.
+ * `activeOrganizationId` is written into the session when the session is
+ * created and trusted from then on, so removing somebody from an organization
+ * does not remove the organization from their session. Anything that hands out
+ * data for the whole life of a connection rather than for the life of one
+ * request has to ask the question that outlives the session field, and this is
+ * that question.
+ *
+ * It costs a query, which is why the ordinary per-request reads still use
+ * `getActiveOrganizationId`: closing that gap everywhere is separate work,
+ * tracked in guides/LIVE-UPDATES-PLAN.md. A live stream is where it matters
+ * most, because there the alternative is an hour of somebody else's runs.
  */
-export function operatorVerdict(user: Pick<SessionUser, "email"> | null): OperatorVerdict {
-  if (!user) return "unauthenticated";
+export async function getMemberOrganizationId(headers: Headers): Promise<string | null> {
+  const result = await getAuth().api.getSession({ headers });
+  // SAFETY: same reading as `getActiveOrganizationId` above - the organization
+  // plugin writes `activeOrganizationId` onto the session model but the
+  // inferred type does not carry plugin fields, so it is read as optional and
+  // an absent value yields null rather than a claim.
+  const session = result?.session as { activeOrganizationId?: string | null } | undefined;
+  const organizationId = session?.activeOrganizationId;
+  const userId = result?.user?.id;
+  if (!organizationId || !userId) return null;
 
-  // Closed by default. An empty allowlist on a deployment with auth switched on
-  // means nobody has said who the operators are — and the safe reading of
-  // "unspecified" is nobody, not everybody.
-  const operators = allowedOperators();
-  if (operators.length === 0) return "not-configured";
-
-  const email = user.email?.trim().toLowerCase();
-  return email && operators.includes(email) ? "ok" : "not-an-operator";
+  const rows = await getDb()
+    .select({ id: member.id })
+    .from(member)
+    .where(and(eq(member.organizationId, organizationId), eq(member.userId, userId)))
+    .limit(1);
+  return rows.length > 0 ? organizationId : null;
 }
+
+/** Every organization the user may switch this session to. */
+export async function getUserOrganizations(userId: string): Promise<DashboardOrganization[]> {
+  return getDb()
+    .select({
+      id: organization.id,
+      name: organization.name,
+      slug: organization.slug,
+      logo: organization.logo,
+    })
+    .from(member)
+    .innerJoin(organization, eq(member.organizationId, organization.id))
+    .where(eq(member.userId, userId))
+    .orderBy(asc(organization.name), asc(organization.id));
+}
+
+/*
+ * There was a deployment-wide operator allowlist here - DOCXY_ALLOWED_EMAILS,
+ * and an `operatorVerdict` every entry point asked before showing anything.
+ *
+ * It was removed when registration opened, because it answered the wrong
+ * question. It asked whether an address belonged to whoever runs the
+ * deployment, which is a sensible thing to ask of a single-operator install and
+ * meaningless once anybody can sign up: it let one person in and turned every
+ * other account into a dead end at /dashboard.
+ *
+ * What replaced it is not a laxer version of the same check. It is a different
+ * one, asked in a different place: authorization is now by organization
+ * membership, enforced where the data is read rather than at the door. The
+ * session carries `activeOrganizationId`, every API read names it, and the
+ * pipeline refuses a read that does not - see `requestPaths` in
+ * src/server/index.ts. Being signed in gets an account as far as its own
+ * organization, and no further.
+ */
 
 /**
  * Whether this deployment enforces sign-in at all.

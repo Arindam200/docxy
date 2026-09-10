@@ -117,7 +117,7 @@ export interface ValidationReport {
    * What the sandbox did, when a check ran in one.
    *
    * Validation is the only stage that executes anything, and its events were
-   * going to the live stream and nowhere else — so a run reopened an hour later
+   * going to the live stream and nowhere else - so a run reopened an hour later
    * showed `where: "sandbox"` with no trace of the sandbox behind it. Absent on
    * runs where nothing executed remotely, and on records written before this.
    */
@@ -132,7 +132,7 @@ export interface ApprovalRequest {
   runId: string;
   createdAt: string;
   scope: ApprovalScope;
-  /** Why this scope was chosen — shown to the human. */
+  /** Why this scope was chosen - shown to the human. */
   scopeRationale: string;
   /** Number of distinct sign-offs required. Elevated scope needs two. */
   requiredSignoffs: number;
@@ -142,6 +142,14 @@ export interface ApprovalRequest {
   summary: string;
 }
 
+/**
+ * `awaiting-approval` and `denied` are retired.
+ *
+ * The gate that produced them is gone - nothing merges without a human
+ * approving it on GitHub either way - but runs recorded under it are still in
+ * the database and still have to render, so the statuses stay readable and
+ * nothing writes them.
+ */
 export type RunStatus = 'running' | 'awaiting-approval' | 'approved' | 'denied' | 'failed' | 'done';
 
 /**
@@ -156,6 +164,8 @@ export type RoleFailure =
   | 'parse-error'
   | 'timeout'
   | 'aborted'
+  /** A guardrail refused the input before it reached a model. */
+  | 'blocked'
   | 'max-tokens'
   | 'context'
   | 'rate-limit'
@@ -188,13 +198,13 @@ export interface RoleTrace {
 
   /**
    * Exactly what this role was asked. The single most useful field when a
-   * classification comes back wrong. Truncated — see PROMPT_LIMIT.
+   * classification comes back wrong. Truncated - see PROMPT_LIMIT.
    */
   prompt?: string;
   /**
    * Exactly what came back, before parsing. Kept on success too: it is what
    * makes a run auditable, and on failure it is usually the only thing that
-   * explains it — a `max_tokens breached` error has as often meant a repetition
+   * explains it - a `max_tokens breached` error has as often meant a repetition
    * loop as a budget that was too small.
    */
   rawOutput?: string;
@@ -218,6 +228,15 @@ export interface PublicationIntent {
 export interface RunRecord {
   id: string;
   repoPath: string;
+  /**
+   * The checkout the documentation was read from, when it is not the code one.
+   *
+   * Recorded on the run for the same reason `repoPath` is: publishing can
+   * happen long after the run, from a process whose configuration points
+   * somewhere else entirely. The pull request belongs to the repository the
+   * docs came from, and this is what remembers which that was.
+   */
+  docsRepoPath?: string;
   commit: { sha: string; shortSha: string; subject: string };
   startedAt: string;
   finishedAt?: string;
@@ -240,8 +259,8 @@ export interface RunRecord {
    * What publishing this proposal should do, decided when the run finished
    * rather than when someone finally signs off.
    *
-   * The gate can hold a run for days, and the reasons a proposal is unfit —
-   * the Coordinator's rejection, a failed validation check — are known only
+   * The gate can hold a run for days, and the reasons a proposal is unfit -
+   * the Coordinator's rejection, a failed validation check - are known only
    * while the run is still in memory. Recording the decision here is what
    * keeps an approved-but-unsound proposal opening as a draft that says why,
    * instead of a clean pull request that says nothing.
@@ -257,17 +276,31 @@ export interface RunRecord {
    * dashboard, and the Coordinator all say so rather than quietly shipping a
    * thinner proposal than the pipeline promises.
    */
-  degraded?: Array<{ role: RoleName; reason: string }>;
+  degraded?: DegradedRole[];
   /** Knowledge-map symbols already known before this run started. */
   priorSymbolCount: number;
   newSymbolCount: number;
 
   durationMs?: number;
   /** Rolled up from the traces, so the run list needs no per-role arithmetic. */
-  totals?: {
-    inputTokens: number;
-    outputTokens: number;
-    cacheReadTokens?: number;
-    costUsd?: number;
-  };
+  totals?: RunTotals;
+}
+
+/** A role that failed without stopping the run. */
+export interface DegradedRole {
+  role: RoleName;
+  reason: string;
+}
+
+/**
+ * A run's spend, rolled up from its traces.
+ *
+ * `costUsd` is absent rather than zero when no rate was known: a run that cost
+ * nothing and a run nobody could price are different facts.
+ */
+export interface RunTotals {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens?: number;
+  costUsd?: number;
 }

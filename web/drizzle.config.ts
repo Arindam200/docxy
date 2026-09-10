@@ -2,7 +2,7 @@ import { defineConfig } from "drizzle-kit";
 
 /**
  * The dashboard owns only the `auth` schema. `schemaFilter` is what keeps
- * drizzle-kit from noticing the docxy pipeline's tables in `public` — which it
+ * drizzle-kit from noticing the docxy pipeline's tables in `public` - which it
  * would otherwise offer to drop, since they are absent from this schema file.
  * The pipeline has its own config one directory up, filtered the other way.
  */

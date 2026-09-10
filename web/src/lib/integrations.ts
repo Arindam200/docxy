@@ -2,7 +2,7 @@
  * The integrations catalogue.
  *
  * Deliberately a static list rather than something the API reports: these are
- * product integrations — the services a team would connect docxy to — and all
+ * product integrations - the services a team would connect docxy to - and all
  * but GitHub are still ahead of us. The pipeline's own dependencies (the
  * harness, the model provider, the database) are infrastructure and live on
  * Synced, not here.
@@ -59,7 +59,7 @@ export const CATALOG: CatalogEntry[] = [
     name: "Webhooks",
     category: "Automation",
     summary:
-      "Receive a signed event when a run starts, stalls at approval, or lands — and wire it to anything.",
+      "Receive signed events for run status changes.",
     action: "Configure",
     status: "soon",
   },

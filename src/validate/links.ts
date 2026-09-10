@@ -13,10 +13,10 @@ export interface BrokenLink {
  *
  * Each space becomes its own hyphen. Collapsing runs of them looks like the
  * same thing and is not: GitHub strips punctuation *before* replacing spaces,
- * so `## Stage 1 — the pipeline` loses the em dash and keeps the two spaces
+ * so `## Stage 1 : the pipeline` loses the colon and keeps the two spaces
  * that surrounded it, giving `stage-1--the-pipeline` with a double hyphen.
  * Collapsing produced `stage-1-the-pipeline`, which matches no anchor GitHub
- * will ever generate — so every heading with punctuation between two spaces was
+ * will ever generate - so every heading with punctuation between two spaces was
  * reported as a broken in-page link. A false failure here is expensive now that
  * a failed check opens the pull request as a draft that says why.
  */
@@ -40,7 +40,7 @@ function headingSlugs(markdown: string): Set<string> {
 /**
  * Check every markdown link in the proposed text. Relative file links must
  * resolve on disk (or against another proposed file); in-page anchors must match
- * a heading. External URLs are not fetched — this runs on every commit and must
+ * a heading. External URLs are not fetched - this runs on every commit and must
  * not depend on the network.
  */
 export function checkLinks(docsPath: string, files: ProposedFile[]): BrokenLink[] {

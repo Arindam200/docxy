@@ -1,6 +1,6 @@
 import Image from "next/image";
 import { SiGithub } from "react-icons/si";
-import { why, roles, integrations, validations, site, author } from "@/lib/site";
+import { why, roles, integrations, validations, author } from "@/lib/site";
 import { ButtonLink, CellGrid, Rule, Section, SectionHead } from "./primitives";
 import { brandIcons } from "./icons";
 
@@ -52,8 +52,8 @@ export function Why() {
     <>
       <Section className="pt-14 pb-12">
         <SectionHead
-          title="Your docs go stale the moment you ship"
-          lede="Documentation is the first thing developers read and the last thing anyone wants to maintain. Docxy catches the drift on the commit that caused it, and never lets a fix land without you saying yes."
+          title="Spend less time maintaining docs"
+          lede="Keep your documentation current while your team focuses on building."
         />
         <CellGrid>
           {why.map((item) => (
@@ -68,7 +68,7 @@ export function Why() {
           ))}
         </CellGrid>
         <div className="mt-8">
-          <ButtonLink href={site.install}>
+          <ButtonLink href="#setup">
             <SiGithub size={15} />
             Add it to your repo
           </ButtonLink>
@@ -80,22 +80,17 @@ export function Why() {
 }
 
 const flow = [
-  { stage: "you push code", kind: "event" },
-  { stage: "Change Analyst", kind: "role" },
-  { stage: "Impact Mapper", kind: "role" },
-  { stage: "Docs Updater  ·  Changelog Author", kind: "parallel" },
-  { stage: "Automatic checks", kind: "check" },
-  { stage: "Coordinator", kind: "role" },
-  { stage: "your approval", kind: "gate" },
-  { stage: "pull request merges", kind: "event" },
+  { stage: "You push code", kind: "event" },
+  { stage: "Docxy finds affected docs", kind: "step" },
+  { stage: "Updates and release notes are drafted", kind: "step" },
+  { stage: "Checks run", kind: "step" },
+  { stage: "You review the pull request", kind: "review" },
 ] as const;
 
 const kindStyle = {
   event: "bg-zinc-50 text-zinc-500 border-zinc-200 font-mono text-xs",
-  role: "bg-white text-zinc-900 border-zinc-300 text-sm font-semibold",
-  parallel: "bg-white text-zinc-900 border-zinc-300 text-sm font-semibold",
-  check: "bg-white text-zinc-900 border-zinc-300 text-sm font-semibold",
-  gate: "bg-zinc-950 text-white border-zinc-950 text-sm font-semibold",
+  step: "bg-white text-zinc-900 border-zinc-300 text-sm font-semibold",
+  review: "bg-zinc-950 text-white border-zinc-950 text-sm font-semibold",
 } satisfies Record<string, string>;
 
 export function HowItWorks() {
@@ -103,8 +98,8 @@ export function HowItWorks() {
     <>
       <Section id="how-it-works" className="pt-14 pb-12">
         <SectionHead
-          title="One push, six steps, one pull request"
-          lede="The order is fixed in code, not left to a prompt. Each agent hands a structured result to the next, and the run always ends at a pull request with your name on the reviewer list."
+          title="From code change to docs update"
+          lede="Push code. Get suggested updates. Review them in GitHub."
         />
 
         <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)] gap-10 lg:gap-16">
@@ -128,13 +123,11 @@ export function HowItWorks() {
 
           <div>
             <h3 className="text-sm font-semibold text-zinc-900 mb-3">
-              What gets checked before you see it
+              Checked before review
             </h3>
             <p className="text-sm text-zinc-500 leading-relaxed mb-6">
-              The usual way a model breaks your docs is by quoting a line that
-              was never there. So the strictest check runs first, against a real
-              checkout of your repository, before anything reaches a pull
-              request.
+              Docxy checks edits, links, and version suggestions.
+              Add your docs build and test commands for additional checks.
             </p>
 
             <CellGrid cols="sm:grid-cols-2">
@@ -150,12 +143,7 @@ export function HowItWorks() {
 
             <div className="mt-6 border border-zinc-200 bg-zinc-50 px-5 py-4">
               <p className="text-xs text-zinc-500 leading-relaxed">
-                Ship a{" "}
-                <span className="font-semibold text-zinc-700">breaking</span>{" "}
-                change with anything less than a{" "}
-                <span className="font-semibold text-zinc-700">major</span> bump
-                and the run fails on the spot. Docxy would rather tell you
-                nothing than tell you something contradictory.
+                Failed checks appear on a draft pull request, with the reasons attached.
               </p>
             </div>
           </div>
@@ -171,8 +159,8 @@ export function Roster() {
     <>
       <Section id="roster" className="pt-14 pb-12">
         <SectionHead
-          title="Meet the five agents"
-          lede="Each one carries a skill pack: a plain SKILL.md file holding the judgment that would otherwise be buried in a prompt. Editing those files is how you teach Docxy the rules of your codebase."
+          title="What you get"
+          lede="Focused updates to the docs your team already uses."
         />
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-px bg-zinc-200 border border-zinc-200">
@@ -189,28 +177,17 @@ export function Roster() {
               <p className="text-sm text-zinc-600 leading-relaxed mb-3">
                 {role.job}
               </p>
-              <p className="text-sm text-zinc-400 leading-relaxed flex-1">
-                {role.detail}
-              </p>
-              {role.skill && (
-                <p className="mt-4 text-xs font-mono text-zinc-400 border border-zinc-100 bg-zinc-50 px-2 py-1 self-start">
-                  skills/{role.skill}
-                </p>
-              )}
+
             </div>
           ))}
 
           <div className="bg-zinc-50 p-7 flex flex-col justify-center">
-            <p className="text-sm text-zinc-600 leading-relaxed">
-              Every agent keeps its own session{" "}
-              <span className="text-zinc-900 font-medium">
-                for each repository
-              </span>
-              , so what it learns on one commit is still there on the next. Your
-              tenth pull request is better than your first.
-            </p>
-            <p className="mt-4 text-xs font-mono text-zinc-400">
-              5 agents · 4 skill packs · 1 reviewer
+            <h3 className="text-base font-semibold text-zinc-900 mb-2">
+              Builds on previous runs
+            </h3>
+            <p className="text-sm text-zinc-500 leading-relaxed">
+              Docxy remembers which code relates to which docs and reuses that
+              context on the next update.
             </p>
           </div>
         </div>
@@ -225,8 +202,8 @@ export function Integrations() {
     <>
       <Section className="pt-14 pb-12">
         <SectionHead
-          title="Fits the stack you already have"
-          lede="No dashboard to live in and no platform in the middle. Docxy runs inside GitHub, writes to a branch in your repo, and speaks the formats your project already uses."
+          title="Built with"
+          lede="Works with GitHub and your existing Markdown or MDX docs."
         />
         <CellGrid cols="sm:grid-cols-2 lg:grid-cols-4">
           {integrations.map((item) => (

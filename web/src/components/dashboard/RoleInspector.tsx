@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import type { RoleFailure, RoleTrace } from "@/lib/docxy";
+import type { RoleFailure, RoleOutputs, RoleTrace } from "@/lib/docxy";
 import { clockTime, duration, roleTitle } from "@/lib/format";
 import { lookup } from "@/lib/lookup";
 
@@ -10,7 +10,7 @@ import { lookup } from "@/lib/lookup";
  * of it, and the event timeline.
  *
  * The failure rules from guides/OBSERVABILITY.md §5 live here. The important one
- * is that an error string is never shown on its own — `max_tokens breached` has
+ * is that an error string is never shown on its own - `max_tokens breached` has
  * as often meant a repetition loop as a budget that was too small, and only the
  * raw output tells the two apart. So a failed role opens on Raw output, not on
  * the error.
@@ -20,19 +20,21 @@ type Tab = "prompt" | "raw" | "parsed" | "events";
 
 const FAILURE_HELP = {
   "harness-error":
-    "The harness ended the turn in an error state. Read the raw output before the message — it usually explains what the message does not.",
+    "The harness ended the turn in an error state. Read the raw output for more detail.",
   "parse-error":
     "The response was not the JSON the pipeline expected, almost always prose wrapped around it or a truncated reply. The raw output shows which.",
   timeout: "The role did not answer in time. Whatever it had produced is below.",
   aborted: "The run was cancelled while this role was working.",
   "max-tokens":
-    "The model spent its whole output budget without finishing. Retried on a fresh session — a session carrying many commits is the usual cause — and still could not finish.",
+    "The model used its output limit without finishing, even after retrying with a fresh session.",
   context:
     "The prompt no longer fits the model's context window. The session was retired and rebuilt, and it still did not fit.",
   "rate-limit": "The provider rate-limited every attempt. Nothing is wrong with the proposal; try again shortly.",
   cancelled: "The harness cancelled the turn before it finished, usually a server-side execution timeout.",
   stalled:
     "The turn kept pausing for approvals or questions without ever settling on an answer. Nobody is attached to a pipeline run, so it was answered automatically and still did not converge.",
+  blocked:
+    "A guardrail refused the input before any model saw it. A commit diff is written by whoever opened the pull request, and this one was found to be addressing the agents rather than describing a change. Nothing was retried: the diff would be the same diff on a second attempt.",
 } satisfies Record<RoleFailure, string>;
 
 export function RoleInspector({
@@ -40,7 +42,7 @@ export function RoleInspector({
   parsed,
 }: {
   traces: RoleTrace[];
-  parsed: Partial<Record<string, unknown>>;
+  parsed: RoleOutputs;
 }) {
   // Open on whatever failed; that is what someone came to look at.
   const initial = traces.findIndex((trace) => trace.status === "failed");
@@ -111,7 +113,7 @@ function RolePanel({ trace, parsed }: { trace: RoleTrace; parsed: unknown }) {
         </Field>
         <Field label="duration">{duration(trace.durationMs)}</Field>
         <Field label="model">
-          <span className="font-mono text-[11px]">{trace.model ?? "—"}</span>
+          <span className="font-mono text-[11px]">{trace.model ?? "N/A"}</span>
         </Field>
         <Field label="session">
           <span className="font-mono text-[11px]" title={trace.sessionId}>
@@ -165,7 +167,7 @@ function RolePanel({ trace, parsed }: { trace: RoleTrace; parsed: unknown }) {
         {tab === "parsed" && (
           <Body
             text={parsed === undefined ? undefined : JSON.stringify(parsed, null, 2)}
-            missing="Nothing was parsed — this role did not produce usable output."
+            missing="This role did not produce usable output."
           />
         )}
         {tab === "events" && <Events trace={trace} />}

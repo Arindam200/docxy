@@ -13,7 +13,7 @@ const COMMIT_HISTORY = 500;
  * The symbol → doc-section map in Postgres.
  *
  * Commits are rows rather than an array column so that recording one is an
- * insert instead of a read-modify-write of the whole list — which is what makes
+ * insert instead of a read-modify-write of the whole list - which is what makes
  * it safe for two workers to process different commits on the same repository.
  */
 export class PgKnowledgeStore implements KnowledgeStorage {
@@ -112,8 +112,8 @@ export class PgKnowledgeStore implements KnowledgeStorage {
           .onConflictDoUpdate({
             target: [knowledgeSymbols.projectId, knowledgeSymbols.symbol],
             set: {
-              // `excluded` is the row Postgres was about to insert — the merged
-              // set computed above — rather than a second round trip per symbol.
+              // `excluded` is the row Postgres was about to insert - the merged
+              // set computed above - rather than a second round trip per symbol.
               docSections: sql`excluded.doc_sections`,
               updatedAt: now,
             },

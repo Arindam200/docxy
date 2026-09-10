@@ -1,0 +1,73 @@
+.step {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  column-gap: 10px;
+  padding: 4px 6px;
+  border-left: 2px solid transparent;
+  transition: background-color 250ms ease, border-color 250ms ease;
+}
+
+.indicator {
+  grid-row: span 2;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 5px;
+  color: #34d399;
+}
+
+.label { color: #71717a; transition: color 250ms ease; }
+.result {
+  grid-column: 2;
+  color: #a1a1aa;
+  opacity: 0;
+  transform: translateY(3px);
+  transition: opacity 300ms ease, transform 300ms ease;
+}
+
+.step[data-state="active"] {
+  background: rgb(33 121 252 / 8%);
+  border-color: var(--accent);
+}
+.step[data-state="active"] .label { color: #93c5fd; }
+.step[data-state="active"] .indicator { color: #60a5fa; }
+.step[data-state="done"] .label { color: #e4e4e7; }
+.step[data-state="done"] .result { opacity: 1; transform: translateY(0); }
+
+.spinner { animation: spin 1s linear infinite; }
+.check { animation: check-in 250ms ease-out both; }
+.preview[data-playing="false"] .spinner { animation-play-state: paused; }
+.progress {
+  height: 100%;
+  background: var(--accent);
+  transform-origin: left;
+  transition: transform 450ms ease;
+}
+
+/* Reserve the final result's height so playback never shifts the page. */
+.publication { display: grid; }
+.pullRequest, .waiting { grid-area: 1 / 1; }
+.waiting { align-self: center; }
+.pullRequest {
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 400ms ease, transform 400ms ease;
+}
+.pullRequest[data-visible="true"] { opacity: 1; transform: translateY(0); }
+
+@media (min-width: 640px) {
+  .step { grid-template-columns: 16px minmax(132px, 0.85fr) minmax(0, 1.4fr); }
+  .indicator { grid-row: auto; }
+  .result { grid-column: auto; }
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes check-in {
+  from { opacity: 0; transform: scale(0.6); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .step, .label, .result, .progress, .pullRequest { transition: none; }
+  .check, .spinner { animation: none; }
+}

@@ -9,8 +9,31 @@ const IGNORED_DIRS = new Set([
 
 const DOC_EXTENSIONS = new Set(['.md', '.mdx', '.rst', '.txt', '.adoc']);
 
-/** Cap on how much of a doc is inlined into a prompt. */
-const DOC_EXCERPT_BUDGET = 20_000;
+/**
+ * Cap on how much documentation is inlined into one prompt, in characters.
+ *
+ * This was 20,000 across *all* impacted files put together, which is where
+ * every `anchor-not-found` failure in this repository came from. The Docs
+ * Updater is asked to quote its `find` text verbatim from "the file text you
+ * were given"; on a run with three impacted docs totalling 58,000 characters it
+ * was given 56% of the first one and nothing at all of the other two - while
+ * the impact map in the same prompt named sections in all three. Asked to quote
+ * text it had never seen, it did the only thing it could and invented it.
+ *
+ * ~50k tokens against models with a 1M window, and about two cents of input at
+ * current rates on a run that costs fifteen. The old value was not buying
+ * anything worth an unusable proposal.
+ */
+const DOC_EXCERPT_BUDGET = Number.parseInt(process.env.DOCXY_DOC_EXCERPT_BUDGET ?? '', 10) || 200_000;
+
+/**
+ * Least text worth sending for a file at all.
+ *
+ * A few hundred characters of a long document is worse than nothing: too little
+ * to anchor an edit against, but enough to look like the file was provided. A
+ * file that cannot be given at least this much is reported omitted instead.
+ */
+const MIN_USEFUL_EXCERPT = 2_000;
 
 async function walk(root: string, base: string, acc: string[], depth = 0): Promise<void> {
   if (depth > 8) return;
@@ -89,29 +112,108 @@ export async function buildDocsOutline(
   return { outline: parts.join('\n\n'), paths };
 }
 
-/** Full text of the docs the Impact Mapper flagged, for the Docs Updater to edit. */
+export interface DocExcerpts {
+  /** The prompt section: every included file, whole or clearly marked as cut. */
+  text: string;
+  /** Paths that could not be read at all. */
+  missing: string[];
+  /**
+   * Paths left out entirely for want of budget.
+   *
+   * Separate from `missing` because the cause is different and so is the fix,
+   * but the caller must treat them the same way: tell the model to skip them.
+   * Silently dropping one is what produced anchors quoted from nothing.
+   */
+  omitted: string[];
+  /** Paths included only in part, and therefore only partly editable. */
+  truncated: string[];
+}
+
+/**
+ * Share a fixed budget across files by water-filling.
+ *
+ * Every file gets an equal share; whatever a small file does not need is
+ * redistributed to the ones that do, repeatedly, until nothing more can be
+ * given away. The first-come-first-served version spent the whole budget on
+ * whichever document happened to be listed first and left the rest with
+ * nothing - and "listed first" is the Impact Mapper's ordering, which carries
+ * no claim about importance.
+ */
+function allocate(sizes: number[], budget: number): number[] {
+  const grants: number[] = Array.from({ length: sizes.length }, () => 0);
+  const pending = sizes.map((_, i) => i);
+  let remaining = budget;
+
+  while (pending.length > 0 && remaining > 0) {
+    const share = Math.floor(remaining / pending.length);
+    if (share <= 0) break;
+
+    const satisfied = pending.filter((i) => sizes[i]! <= share);
+    if (satisfied.length === 0) {
+      // Every file left wants more than its share, so they all get exactly it
+      // and the loop is done.
+      for (const i of pending) grants[i] = share;
+      remaining -= share * pending.length;
+      break;
+    }
+    for (const i of satisfied) {
+      grants[i] = sizes[i]!;
+      remaining -= sizes[i]!;
+    }
+    pending.splice(0, pending.length, ...pending.filter((i) => sizes[i]! > share));
+  }
+  return grants;
+}
+
+/**
+ * Full text of the docs the Impact Mapper flagged, for the Docs Updater to edit.
+ *
+ * Every path handed in comes back accounted for - included, truncated, omitted
+ * or missing - because the caller has to be able to tell the model which files
+ * it may not propose edits against. A file the model is told is impacted but
+ * never shown is a file it will invent an anchor for.
+ */
 export async function readDocExcerpts(
   repoPath: string,
   paths: string[],
-): Promise<{ text: string; missing: string[] }> {
-  const chunks: string[] = [];
+): Promise<DocExcerpts> {
   const missing: string[] = [];
-  let budget = DOC_EXCERPT_BUDGET;
+  const found: Array<{ path: string; content: string }> = [];
 
   for (const path of paths) {
     const content = await readRepoFile(repoPath, path);
-    if (content === null) {
-      missing.push(path);
+    if (content === null) missing.push(path);
+    else found.push({ path, content });
+  }
+
+  const grants = allocate(found.map((f) => f.content.length), DOC_EXCERPT_BUDGET);
+
+  const chunks: string[] = [];
+  const omitted: string[] = [];
+  const truncated: string[] = [];
+
+  for (const [index, file] of found.entries()) {
+    const grant = grants[index] ?? 0;
+
+    if (grant < Math.min(file.content.length, MIN_USEFUL_EXCERPT)) {
+      omitted.push(file.path);
       continue;
     }
-    const slice = content.length > budget ? content.slice(0, Math.max(budget, 0)) : content;
-    budget -= slice.length;
+
+    if (grant >= file.content.length) {
+      chunks.push(`===== FILE: ${file.path} (complete) =====\n${file.content}`);
+      continue;
+    }
+
+    truncated.push(file.path);
+    const cut = file.content.length - grant;
     chunks.push(
-      `===== FILE: ${path} =====\n${slice}${
-        slice.length < content.length ? '\n... [truncated]' : ''
-      }`,
+      `===== FILE: ${file.path} (FIRST ${grant} OF ${file.content.length} CHARACTERS) =====\n` +
+        `${file.content.slice(0, grant)}\n` +
+        `... [${cut} characters were cut here and you cannot see them. ` +
+        `Do not propose an edit anchored anywhere past this point.]`,
     );
-    if (budget <= 0) break;
   }
-  return { text: chunks.join('\n\n'), missing };
+
+  return { text: chunks.join('\n\n'), missing, omitted, truncated };
 }

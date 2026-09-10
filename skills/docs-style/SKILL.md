@@ -23,7 +23,7 @@ sentence should say what makes it hard.
   cases. Never open with a caveat.
 - Code examples are complete enough to run. If an example needs an import or an
   env var, show it.
-- Reference tables list the parameter, its type, its default, and what it does —
+- Reference tables list the parameter, its type, its default, and what it does -
   in that order.
 
 ## Editing rules
@@ -34,7 +34,7 @@ You are editing existing prose, not rewriting it. This matters more than style:
   stale, replace that sentence, not the section.
 - **Match the surrounding voice** even where it differs from this guide. A
   consistent doc beats a doc with one paragraph in a different register.
-- **Preserve formatting exactly** — indentation, list markers, fence languages,
+- **Preserve formatting exactly** - indentation, list markers, fence languages,
   and trailing punctuation.
 - **Never touch an unrelated line.** A diff that reflows a paragraph hides the
   real change from the reviewer.
@@ -42,7 +42,7 @@ You are editing existing prose, not rewriting it. This matters more than style:
 ## Producing edits
 
 Each edit is a `find`/`replace` pair. The `find` text must appear **verbatim and
-exactly once** in the file as given to you — copy it character for character,
+exactly once** in the file as given to you - copy it character for character,
 including indentation. If you cannot find a unique anchor, widen the `find` span
 until it is unique rather than guessing.
 

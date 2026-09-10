@@ -4,7 +4,7 @@ import { duration, roleTitle } from "@/lib/format";
 /**
  * The five roles as a waterfall rather than a list.
  *
- * Two of them — Docs Updater and Changelog Author — run at the same time, and a
+ * Two of them - Docs Updater and Changelog Author - run at the same time, and a
  * flat list hides that. Offsetting each bar by when it actually started is what
  * explains why the wall-clock time is shorter than the sum of the parts.
  */

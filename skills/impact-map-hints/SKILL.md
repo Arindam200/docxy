@@ -19,7 +19,7 @@ mentions a similar word. A short, correct list beats a long, hedged one.
    an API reference page, a migration guide, and any doc whose title names the
    changed module.
 4. **Consult the running knowledge map** you are given. If a symbol was mapped to
-   a section on an earlier commit, that mapping is evidence — reuse it instead of
+   a section on an earlier commit, that mapping is evidence - reuse it instead of
    re-deriving it, and correct it only when the diff shows it is now wrong.
 
 ## What to report
@@ -33,16 +33,16 @@ would themselves need updating. Do not list the changed files themselves.
 
 ## Confidence
 
-- `0.9+` — the section names the changed symbol explicitly
-- `0.6–0.9` — the section documents the behavior that changed, by concept
-- `< 0.6` — plausible but unverified; say what you could not confirm
+- `0.9+` - the section names the changed symbol explicitly
+- `0.6–0.9` - the section documents the behavior that changed, by concept
+- `< 0.6` - plausible but unverified; say what you could not confirm
 
 ## What not to do
 
 - Do not invent paths. Every path you emit must appear in the docs outline you
   were given.
 - Do not list a doc merely because it shares a word with the diff.
-- Do not propose edits — that is the Docs Updater's job. Report location and
+- Do not propose edits - that is the Docs Updater's job. Report location and
   reason only.
 
 ## Growing the symbol index

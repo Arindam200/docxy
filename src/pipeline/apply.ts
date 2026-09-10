@@ -26,7 +26,7 @@ function occurrences(haystack: string, needle: string): number {
 }
 
 /**
- * Apply the proposed edits in memory. Nothing is written to disk here — the
+ * Apply the proposed edits in memory. Nothing is written to disk here - the
  * result feeds validation, the diff shown to the reviewer, and (only after
  * approval) the branch that becomes a pull request.
  */
@@ -131,7 +131,7 @@ export async function applyChangelogEntry(
   const unreleasedIndex = lines.findIndex((l) => /^##\s+\[?unreleased\]?/i.test(l.trim()));
 
   if (unreleasedIndex === -1) {
-    // No Unreleased block yet — open one directly under the title.
+    // No Unreleased block yet - open one directly under the title.
     const titleIndex = lines.findIndex((l) => /^#\s+/.test(l));
     const insertAt = titleIndex === -1 ? 0 : titleIndex + 1;
     const block = ['', '## [Unreleased]', '', `### ${proposal.section}`, '', line];

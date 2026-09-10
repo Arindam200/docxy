@@ -7,13 +7,16 @@ import { OAuthButtons } from "@/components/auth/OAuthButtons";
 import { signIn, signUp } from "@/lib/auth-client";
 
 /**
- * Email and password with the OAuth pair beneath it — the whole credentials
+ * Email and password with the OAuth pair beneath it - the whole credentials
  * block for both routes. Sign-in and sign-up differ by one field, one call, and
  * two strings, so they share a component rather than diverging into two that
  * drift apart.
  *
- * Better Auth runs with `autoSignIn`, so a successful sign-up lands with a
- * session already set and both paths can push straight to `next`.
+ * The two paths end differently, and that is the point. Signing in lands a
+ * session and navigates. Signing up does not: the address has to be confirmed
+ * first, so the form is replaced by the sentence saying so. Pushing to `next`
+ * there would land on a guard that bounces straight back to the login page,
+ * which reads as the sign-up having failed.
  */
 
 type Mode = "signin" | "signup";
@@ -54,6 +57,7 @@ export function CredentialsForm({
   const router = useRouter();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sentTo, setSentTo] = useState<string | null>(null);
 
   const signup = mode === "signup";
 
@@ -77,8 +81,31 @@ export function CredentialsForm({
       return;
     }
 
+    if (signup) {
+      // No session yet, by design - `requireEmailVerification` holds it until
+      // the link is clicked, and the link is what carries them onwards.
+      setPending(false);
+      setSentTo(email);
+      return;
+    }
+
     router.push(next);
     router.refresh();
+  }
+
+  if (sentTo) {
+    return (
+      <div className="rounded-lg border border-rule bg-surface/50 p-5 text-sm leading-relaxed">
+        <p className="font-medium text-foreground">Check your inbox</p>
+        <p className="mt-2 text-muted">
+          We sent a confirmation link to <span className="text-foreground">{sentTo}</span>. Open
+          it and you will land straight in Docxy - no need to sign in again.
+        </p>
+        <p className="mt-3 text-xs text-muted">
+          Nothing after a minute or two? Check spam, or try signing up again.
+        </p>
+      </div>
+    );
   }
 
   return (

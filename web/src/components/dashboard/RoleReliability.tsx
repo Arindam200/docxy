@@ -18,7 +18,7 @@ const FAILURE_LABELS = {
 } satisfies Record<string, string>;
 
 function usd(value: number | undefined): string {
-  if (value === undefined) return "—";
+  if (value === undefined) return "N/A";
   // Sub-cent roles are the common case, so two decimals would read as $0.00.
   return value < 0.01 ? `$${value.toFixed(4)}` : `$${value.toFixed(2)}`;
 }
@@ -79,7 +79,7 @@ export function RoleReliability({ roles }: { roles: RoleStats[] }) {
                   </td>
                   <td className="px-4 py-2.5 tabular-nums">{usd(role.costUsd)}</td>
                   <td className="px-4 py-2.5 tabular-nums text-muted">
-                    {role.reuseRate === undefined ? "—" : `${Math.round(role.reuseRate * 100)}%`}
+                    {role.reuseRate === undefined ? "N/A" : `${Math.round(role.reuseRate * 100)}%`}
                   </td>
                 </tr>
               );

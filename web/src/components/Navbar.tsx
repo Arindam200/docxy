@@ -1,8 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import { SiGithub } from "react-icons/si";
-import { nav, site } from "@/lib/site";
+import Link from "next/link";
+import { nav } from "@/lib/site";
+import { useSession } from "@/lib/auth-client";
 import { Wordmark } from "./Logo";
 import { Rule } from "./primitives";
 
@@ -10,13 +11,13 @@ export function Banner() {
   return (
     <div className="sticky top-0 z-40 bg-[var(--accent-deep)] flex items-center justify-center gap-2 px-4 py-2 text-[13px] text-white">
       <span className="font-medium">
-        The Docxy GitHub App is live.
+        Keep your docs up to date.
       </span>
       <a
-        href={site.install}
+        href="#how-it-works"
         className="inline-flex items-center gap-1 underline decoration-white/40 underline-offset-[3px] hover:decoration-white transition-[text-decoration-color]"
       >
-        Install it on your repos
+        See how it works
         <svg
           width="1em"
           height="1em"
@@ -40,6 +41,10 @@ export function Banner() {
 
 export function Navbar() {
   const [open, setOpen] = useState(false);
+  const { data: session, isPending } = useSession();
+  const signedIn = Boolean(session?.user);
+  const actionHref = signedIn ? "/dashboard" : "/signup";
+  const actionLabel = signedIn ? "Dashboard" : "Get started";
 
   return (
     <nav className="sticky top-[36px] z-40 w-full bg-white">
@@ -59,26 +64,19 @@ export function Navbar() {
           ))}
         </ul>
 
-        <div className="hidden md:flex items-center gap-3">
-          <a
-            href="/dashboard"
+        <div className={`hidden md:flex items-center gap-6 ${isPending ? "invisible" : ""}`}>
+          {!signedIn && <Link
+            href="/login"
             className="text-sm text-zinc-600 hover:text-zinc-900 transition-colors"
           >
-            Dashboard
-          </a>
-          <a
-            href={site.repo}
-            className="text-sm text-zinc-600 hover:text-zinc-900 transition-colors"
+            Sign in
+          </Link>}
+          <Link
+            href={actionHref}
+            className="inline-flex items-center gap-2 text-sm font-medium bg-zinc-900 text-white px-5 py-2 hover:bg-zinc-700 transition-colors"
           >
-            GitHub
-          </a>
-          <a
-            href={site.install}
-            className="inline-flex items-center gap-1.5 text-sm font-medium bg-zinc-900 text-white px-4 py-1.5 hover:bg-zinc-700 transition-colors"
-          >
-            <SiGithub size={14} />
-            Install
-          </a>
+            {actionLabel} <span aria-hidden>→</span>
+          </Link>
         </div>
 
         <button
@@ -111,13 +109,22 @@ export function Navbar() {
               {item.label}
             </a>
           ))}
-          <a
-            href={site.install}
-            className="inline-flex items-center gap-1.5 text-sm font-medium bg-zinc-900 text-white px-4 py-1.5"
-          >
-            <SiGithub size={14} />
-            Install
-          </a>
+          <div className={`flex items-center gap-6 pt-2 ${isPending ? "invisible" : ""}`}>
+            {!signedIn && <Link
+              href="/login"
+              onClick={() => setOpen(false)}
+              className="text-sm text-zinc-600 hover:text-zinc-900 transition-colors"
+            >
+              Sign in
+            </Link>}
+            <Link
+              href={actionHref}
+              onClick={() => setOpen(false)}
+              className="inline-flex items-center gap-2 text-sm font-medium bg-zinc-900 text-white px-5 py-2 hover:bg-zinc-700 transition-colors"
+            >
+              {actionLabel} <span aria-hidden>→</span>
+            </Link>
+          </div>
         </div>
       )}
 

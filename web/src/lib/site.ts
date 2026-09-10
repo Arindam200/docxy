@@ -1,17 +1,27 @@
+import { formatUsd, planList, type PlanKey } from "@billing";
+
 /**
- * Every piece of copy and every outbound link on the marketing page.
+ * Shared copy and outbound links on the marketing page.
  * Sections read from here so wording changes never mean touching layout.
  */
 
 export const site = {
   name: "docxy",
+  /**
+   * The canonical origin. Metadata is built at build time, so this is a
+   * constant rather than a request-time lookup - `BETTER_AUTH_URL` overrides it
+   * where a deployment answers on something else, which is what keeps a preview
+   * from advertising production's URL as its own canonical.
+   */
+  url: "https://docxy.app",
   tagline: "Documentation that keeps up with your code",
   description:
-    "Install the GitHub App and every push wakes five agents. They read the diff, find the docs that went stale, rewrite them, draft the release note, and open a pull request for you to approve.",
+    "Keep your docs and release notes up to date as you ship. Review the changes in GitHub and get back to building.",
   repo: "https://github.com/Arindam200/docxy",
   install: "https://github.com/apps/docxy",
   docs: "https://github.com/Arindam200/docxy#readme",
-  trueforge: "https://trueforge.dev",
+  mastra: "https://mastra.ai",
+  daytona: "https://www.daytona.io",
   nebius: "https://tokenfactory.nebius.com",
 } as const;
 
@@ -24,151 +34,145 @@ export const author = {
    * `hl: true` renders in the accent colour.
    */
   quote: [
-    { t: "I got tired of writing " },
-    { t: "the same docs twice", hl: true },
-    {
-      t: ". Ship the feature, forget the page, remember it a week later. Once the team grew it stopped being ",
-    },
-    { t: "one page and became ten", hl: true },
-    {
-      t: ", spread across a repo nobody had read end to end, and the community was already in the issues telling us ",
-    },
-    { t: "the examples were broken", hl: true },
-    {
-      t: ". Docxy is the thing I kept wishing existed while I was the one falling behind.",
-    },
+    { t: "Ship the feature, " },
+    { t: "forget the page", hl: true },
+    { t: ", remember it a week later. Docxy is the thing I kept wishing existed while I was the one falling behind." },
   ],
 } as const;
 
 export const nav = [
   { label: "How it works", href: "#how-it-works" },
-  { label: "The agents", href: "#roster" },
-  { label: "Approvals", href: "#approval" },
-  { label: "Install", href: "#setup" },
-  { label: "Docs", href: site.docs },
+  { label: "Features", href: "#roster" },
+  { label: "Review", href: "#approval" },
+  { label: "Pricing", href: "#cost" },
 ] as const;
 
 export const why = [
   {
-    title: "Install it once, forget it",
-    body: "No CLI to run, no scripts to babysit. Add the GitHub App to your org, pick your repos, and it starts watching. Every push is a chance to catch drift.",
+    title: "Less manual upkeep",
+    body: "Get suggested doc updates when your code changes, without writing them from scratch.",
   },
   {
-    title: "Five agents, not one prompt",
-    body: "Classify the change. Map what it broke. Rewrite the docs. Draft the release note. Review the lot. Each step is a separate agent with its own judgment, and the last one throws out work that contradicts itself.",
+    title: "Docs and release notes together",
+    body: "Review both in one pull request, with a summary of what changed.",
   },
   {
-    title: "It remembers your repo",
-    body: "Every agent keeps a long-lived session per repository, backed by a saved map of which symbol lives in which doc section. The tenth run knows things the first one had to work out.",
-  },
-  {
-    title: "Checked before you read it",
-    body: "Every edit has to anchor to text that really exists in your file, word for word, exactly once. Invented quotes fail the run instead of landing in your docs as a broken patch.",
-  },
-  {
-    title: "Reads code, not commit messages",
-    body: "Changelog tools that parse commit subjects fall apart the week your team gets sloppy. Docxy reads the actual diff, so a lazy commit message still gets an accurate release note.",
-  },
-  {
-    title: "You have the last word",
-    body: "Nothing merges on its own. Every run lands as a normal pull request with a summary of what changed and why, and it sits there until a human approves it.",
+    title: "You control the merge",
+    body: "Use your existing GitHub review process. Docxy never merges for you.",
   },
 ] as const;
 
 export const roles = [
   {
     step: "01",
-    title: "Change Analyst",
-    job: "Works out what kind of change you just shipped",
-    skill: "breaking-change-policy",
-    detail:
-      "Breaking, feature, fix, or chore, crossed with public API, internal, config, or test. Everything downstream leans on this call, so it is tuned to be careful rather than confident.",
+    title: "Find affected docs",
+    job: "See which pages need attention after a code change.",
   },
   {
     step: "02",
-    title: "Impact Mapper",
-    job: "Finds the docs and downstream code that just went stale",
-    skill: "impact-map-hints",
-    detail:
-      "Loads the saved symbol to doc-section map before it starts, so it builds on what earlier runs figured out instead of tracing the same links from scratch every time.",
+    title: "Review focused edits",
+    job: "Get targeted updates to your existing Markdown and MDX files.",
   },
   {
     step: "03",
-    title: "Docs Updater",
-    job: "Makes the smallest edit that makes each page correct",
-    skill: "docs-style",
-    detail:
-      "Plain instructional prose, anchored to text that already exists in the file. It proposes the minimum change that makes a section true again, never a rewrite you did not ask for.",
+    title: "Keep a useful changelog",
+    job: "Get a release note and a suggested version bump based on the diff.",
   },
   {
     step: "04",
-    title: "Changelog Author",
-    job: "Writes the release note and proposes a version bump",
-    skill: "changelog-voice",
-    detail:
-      "A deliberately different voice from the docs. Terse release-note register, one entry per change, plus the semver bump the change actually earns.",
+    title: "Follow your writing style",
+    job: "Set instructions for your docs and release notes.",
   },
   {
     step: "05",
-    title: "Coordinator",
-    job: "Reviews the other four and writes your summary",
-    skill: null,
-    detail:
-      "The last stop before a human. A breaking change paired with a minor bump does not get through, and the summary you read on the pull request is written here.",
+    title: "Track every update",
+    job: "See progress, check results, and pull requests in one dashboard.",
   },
 ] as const;
 
 export const validations = [
-  { label: "Edit anchors", detail: "real text, exactly once" },
-  { label: "Relative links", detail: "every path resolves" },
-  { label: "In-page anchors", detail: "every heading exists" },
-  { label: "Version bumps", detail: "breaking means major" },
-  { label: "Docs build", detail: "your own command" },
-  { label: "Test suite", detail: "your own command" },
+  { label: "Edits", detail: "match the existing file" },
+  { label: "Links", detail: "point to existing files" },
+  { label: "Heading links", detail: "point to existing sections" },
+  { label: "Version bumps", detail: "match the change" },
+  { label: "Docs build", detail: "runs when configured" },
+  { label: "Tests", detail: "run when configured" },
 ] as const;
 
 export const integrations = [
-  { name: "GitHub", detail: "Install once, every repo covered" },
-  { name: "GitHub Actions", detail: "Fires on push and pull request" },
-  { name: "Claude", detail: "The agent behind the roster" },
-  { name: "Nebius", detail: "Token Factory models" },
-  { name: "TrueForge", detail: "The open agent harness" },
-  { name: "Markdown & MDX", detail: "Small, anchored edits" },
-  { name: "Keep a Changelog", detail: "Release note format" },
-  { name: "Semantic Versioning", detail: "Bump proposals" },
+  { name: "GitHub", detail: "Code changes and pull requests" },
+  { name: "Mastra", detail: "Update workflow" },
+  { name: "Nebius", detail: "AI models" },
+  { name: "Daytona", detail: "Docs build checks" },
+  { name: "Neon", detail: "Run history" },
+  { name: "GitHub Actions", detail: "Manual runs" },
+  { name: "Markdown & MDX", detail: "Your existing docs" },
+  { name: "Semantic Versioning", detail: "Version suggestions" },
 ] as const;
+
+/**
+ * The hosted offer, as the pricing page shows it.
+ *
+ * Derived from the billing catalog rather than restated here. The page used to
+ * carry its own copy of the prices and allowances, which is one place for them
+ * to be wrong: a plan sold as fifteen runs and metered at three is a support
+ * ticket, not a typo. The catalog is the single source, shared with checkout
+ * and with admission - see src/billing/catalog.ts and guides/PRICING.md.
+ *
+ * Only what the catalog has no opinion about lives here: the line of copy that
+ * says why somebody should move up a plan.
+ */
+const planPitch = {
+  free: "No credit card required",
+  pro: "5× the Free allowance",
+  team: "Shared run allowance across repositories",
+} satisfies Record<PlanKey, string>;
+
+export const hostedPlans = planList.map((plan) => ({
+  name: plan.name,
+  description: plan.description,
+  /** Already formatted, because the catalog holds cents and the page holds copy. */
+  price: formatUsd(plan.monthlyPriceMinor),
+  repositories: plan.entitlements.repositories,
+  runsPerMonth: plan.entitlements.runsPerMonth,
+  trigger: plan.entitlements.automaticRuns
+    ? "Automatic runs on push + manual runs"
+    : "Start runs manually",
+  benefit: planPitch[plan.key],
+  featured: plan.featured,
+}));
 
 export const faqs = [
   {
-    q: "What is Docxy?",
-    a: "A GitHub App that keeps your documentation and changelog in step with your code. Install it, and every push wakes a Claude agent running a harness of five specialists. They classify the change, trace what it broke, rewrite the affected docs, draft the release note, and open a pull request for you to review.",
+    q: "What does Docxy do?",
+    a: "Docxy reads your code changes and opens a pull request with suggested doc updates and release notes. Your team reviews and merges it in GitHub.",
   },
   {
-    q: "Do I have to run anything myself?",
-    a: "No. Installing the GitHub App is the whole setup. It runs on GitHub's side and shows up as a pull request on your repo. If you would rather host it yourself, the same pipeline ships as a CLI and a GitHub Action you can drop into your own workflow.",
+    q: "Which docs can it update?",
+    a: "Markdown and MDX files in your GitHub repository, including your README and changelog. You choose which docs to track.",
   },
   {
-    q: "When does it trigger?",
-    a: "On push to your default branch by default. You can point it at pull requests instead, or restrict it to certain paths, in the app settings or in the Action's workflow file.",
+    q: "When does it run?",
+    a: "Free lets you start runs manually. Pro and Team also run automatically when you push to a connected repository’s default branch.",
   },
   {
-    q: "How is this different from Swimm, Mintlify, or semantic-release?",
-    a: "Each of those owns one slice in a single flat pass. Swimm syncs doc snippets with no impact mapping and no changelog. semantic-release reads your commit messages rather than your diff. Blast-radius tools hand you a report you still have to act on. Docxy chains all of it as separate agents that check each other.",
+    q: "Will it merge changes for me?",
+    a: "No. Docxy opens the pull request. Your team reviews and merges it using your GitHub review rules.",
   },
   {
-    q: "Will it merge anything without me?",
-    a: "Never. Every run stops at a pull request. Routine docs fixes need one approval. Anything breaking, anything touching public API, and anything proposing a major bump needs two approvals from two different people, and the same reviewer cannot count twice.",
+    q: "What if a check fails?",
+    a: "The update opens as a draft pull request with the failed checks listed. Docs builds and tests run only when configured.",
   },
   {
-    q: "What if nobody reviews a run?",
-    a: "Nothing expires in either direction. The pull request sits open and gets flagged as stale. It never merges itself and it never quietly disappears.",
+    q: "Can it follow our writing style?",
+    a: "Yes. Add instructions for your docs and release notes, including terminology, tone, and formatting.",
   },
   {
-    q: "How do I stop it inventing things?",
-    a: "The strictest check runs first. Every proposed edit has to anchor to text that appears in your file word for word, exactly once. A paraphrased anchor fails the run rather than producing a broken patch. Links, in-page anchors, version consistency, and your own docs build and test commands all run too.",
+    q: "Do we need our own API keys?",
+    a: "No. Hosted plans include AI usage, validation, and hosting. Self-hosting is also available with your own infrastructure.",
   },
   {
-    q: "Can I tune it for my repo?",
-    a: "Yes, and editing the skill packs is the intended way. Four plain SKILL.md files hold the judgment that would otherwise be buried in a prompt: what counts as breaking, how to trace impact, your docs voice, your changelog voice. Start with breaking-change-policy.",
+    q: "How does pricing work?",
+    a: "Free includes 3 runs per month on 1 repository. Pro is $19/month for 15 runs on 1 repository. Team is $129/month for 120 runs shared across 5 repositories. All plans include AI usage, validation, and hosting.",
   },
 ] as const;

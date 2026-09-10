@@ -33,8 +33,8 @@ export interface InstalledRepo {
 /**
  * The repositories this installation can see.
  *
- * This is the authority on what docxy documents. The alternative — a local path
- * in configuration — has to be kept in step with the install screen by hand,
+ * This is the authority on what docxy documents. The alternative - a local path
+ * in configuration - has to be kept in step with the install screen by hand,
  * and silently documents the wrong project when it drifts.
  */
 export async function installationRepositories(
@@ -50,8 +50,8 @@ export async function installationRepositories(
   const found: InstalledRepo[] = [];
   // Paginated, because the first page is not the answer. A hundred repositories
   // sounds like plenty until an installation is account-wide, and the ones past
-  // it did not fail — they were absent, from `syncedRepoPaths`, from the
-  // dashboard's list, and from the scope `docxy approve <short-id>` searches.
+  // it did not fail - they were absent, from `syncedRepoPaths`, from the
+  // dashboard's list, and from the scope `docxy publish <short-id>` searches.
   // Bounded so a malformed `Link` header cannot loop forever.
   let url: string | null = 'https://api.github.com/installation/repositories?per_page=100';
   for (let page = 0; url && page < 50; page += 1) {
@@ -66,7 +66,7 @@ export async function installationRepositories(
     const body = (await response.json()) as {
       repositories?: Array<{ full_name?: string; default_branch?: string }>;
     };
-    // SAFETY: the predicate below is the parse — an entry reaches `map` only
+    // SAFETY: the predicate below is the parse - an entry reaches `map` only
     // once both of the fields it reads have been proven present.
     for (const repo of body.repositories ?? []) {
       if (!repo.full_name || !repo.default_branch) continue;
@@ -108,14 +108,14 @@ export function checkoutPathFor(repo: string): string {
 /**
  * Every repository path whose runs belong to this deployment.
  *
- * The configured path is always included — a developer pointing
- * `DOCXY_REPO_PATH` at a working tree is still using docxy — and so is the
+ * The configured path is always included - a developer pointing
+ * `DOCXY_REPO_PATH` at a working tree is still using docxy - and so is the
  * managed checkout of each repository the App is installed on, because that is
  * where a webhook-driven run actually happened.
  *
  * Shared with the CLI rather than living in the server, because they were
  * drifting: the dashboard listed runs across every synced repository while
- * `docxy approve <short-id>` searched only the directory it was invoked from,
+ * `docxy publish <short-id>` searched only the directory it was invoked from,
  * so a run the dashboard showed could not be found by the command the
  * dashboard told you to run.
  *
@@ -144,15 +144,15 @@ async function exists(path: string): Promise<boolean> {
  *
  * A webhook carries a SHA, not the objects behind it, and nothing downstream
  * fetches: `resolveCommit` runs `git rev-parse` against whatever the checkout
- * already happens to have. A commit authored anywhere else — the GitHub web
- * editor, another clone, a colleague's machine — does not resolve, and the run
+ * already happens to have. A commit authored anywhere else - the GitHub web
+ * editor, another clone, a colleague's machine - does not resolve, and the run
  * dies before the first role starts, invisibly, because the delivery was
  * already answered 200.
  *
  * Cloned and fetched with an installation token rather than the machine's
  * credential helper: a server documenting a repository it was installed on has
  * no personal credentials for it and should not need any. The token is never
- * written to disk — `origin` is set to the plain URL and the tokenized one is
+ * written to disk - `origin` is set to the plain URL and the tokenized one is
  * passed per command.
  */
 export async function ensureCheckout(
@@ -166,7 +166,10 @@ export async function ensureCheckout(
     throw new Error(
       'A push webhook arrived but the GitHub App is not configured, so there is no ' +
         'way to fetch the commit it refers to. Set GITHUB_APP_ID, ' +
-        'GITHUB_APP_PRIVATE_KEY_PATH, and GITHUB_APP_INSTALLATION_ID.',
+        'GITHUB_APP_PRIVATE_KEY, and GITHUB_APP_INSTALLATION_ID. A webhook only ' +
+        'arrives at a deployment, so the key belongs in the environment as the PEM ' +
+        'itself rather than as GITHUB_APP_PRIVATE_KEY_PATH, which names a file no ' +
+        'managed platform gives you anywhere to put.',
     );
   }
 

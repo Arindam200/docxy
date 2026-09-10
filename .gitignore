@@ -7,7 +7,7 @@ dist/
 
 # Temporarily untracked: the pipeline workflow needs the NEBIUS_API_KEY secret,
 # the docxy-approval environment, and the docs branch before it can pass. The
-# file is still on disk at .github/workflows/docxy.yml — delete these two lines
+# file is still on disk at .github/workflows/docxy.yml - delete these two lines
 # to start tracking it again.
 .github/workflows/
 
@@ -15,5 +15,23 @@ dist/
 .claude/worktrees/
 .gstack/
 
-# GitHub App private keys — never commit one.
+# GitHub App private keys - never commit one.
 *.pem
+
+# Seatbelt profiles LocalSandbox writes when code mode runs.
+.sandbox-profiles/
+
+# Written by `vercel link`: the project id, and the OIDC token it pulls.
+.vercel
+.env*
+!.env.example
+
+# Local planning notes, drafts, and session checkpoints.
+/TODO.md
+/guides/*-PLAN.md
+/guides/PRICING.md
+/guides/DEMO.md
+/guides/SUBMISSION*.md
+/guides/WRITEUP.md
+/blog/*.md
+/.claude/RESUME.md

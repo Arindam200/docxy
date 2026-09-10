@@ -5,12 +5,13 @@
  * adapter never opens a transaction on Postgres (its transactional paths are
  * MySQL-only, and `transaction` defaults to false), so the extra machinery of a
  * pooled WebSocket connection would buy nothing here. The docxy pipeline is the
- * opposite case and uses `neon-serverless` — see guides/DATABASE.md.
+ * opposite case and uses `neon-serverless` - see guides/DATABASE.md.
  */
 
 import { neon } from "@neondatabase/serverless";
 import { drizzle } from "drizzle-orm/neon-http";
 import { schema } from "./schema";
+import { localDev } from "@/lib/runtime";
 
 export type Database = ReturnType<typeof create>;
 
@@ -26,7 +27,7 @@ declare global {
 let cached = globalThis.docxyDb;
 
 /**
- * Throws — with a message that names the fix — rather than failing later inside
+ * Throws - with a message that names the fix - rather than failing later inside
  * the driver with an opaque connection error.
  */
 export function getDb(): Database {
@@ -35,7 +36,9 @@ export function getDb(): Database {
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) {
     throw new Error(
-      "DATABASE_URL is not set. Copy web/.env.local.example to web/.env.local and paste your Neon connection string.",
+      localDev
+        ? "DATABASE_URL is not set. Copy web/.env.local.example to web/.env.local and paste your Neon connection string."
+        : "DATABASE_URL is not set on this deployment. Set it to the pooled Neon connection string on the hosting platform and redeploy.",
     );
   }
 

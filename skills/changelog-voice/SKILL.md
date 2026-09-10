@@ -22,7 +22,7 @@ and is written in the imperative-adjacent past tense used by the existing file.
 ## Voice
 
 Terse and user-facing. Name the user-visible thing that changed, not the
-internal one. `Fixed a crash when the config file is empty` — not `Fixed a null
+internal one. `Fixed a crash when the config file is empty` - not `Fixed a null
 dereference in ConfigLoader.parse`.
 
 Mention the migration inline when one is needed. If a change is breaking, the
@@ -30,14 +30,14 @@ entry must say what the reader has to do about it, in the same line.
 
 ## Semver policy
 
-- `major` — any `breaking` classification, without exception
-- `minor` — new public surface added, nothing removed or narrowed
-- `patch` — a `fix` with no public surface change
-- `none` — `chore` or `test-only`; nothing users can observe
+- `major` - any `breaking` classification, without exception
+- `minor` - new public surface added, nothing removed or narrowed
+- `patch` - a `fix` with no public surface change
+- `none` - `chore` or `test-only`; nothing users can observe
 
 State the bump rationale in one sentence referencing the classification you were
 given. If the classification says breaking and you propose anything below major,
-you are wrong — defer to the classification.
+you are wrong - defer to the classification.
 
 ## What not to do
 
