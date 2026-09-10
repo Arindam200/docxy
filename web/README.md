@@ -6,6 +6,34 @@ multi-agent documentation-and-changelog pipeline in the parent directory.
 Next.js 16 (App Router, Turbopack) · React 19 · Tailwind CSS v4 · TypeScript ·
 Better Auth on Neon Postgres via Drizzle.
 
+Requires Node.js 22.22.3 or newer (the Composio SDK's minimum).
+
+## Production connections
+
+The [shared connection map](../guides/CONNECTIONS.md) is the reference for every
+service, callback and environment-variable owner. This web app is Vercel's
+`docxy` project (`https://docxy.app`), built from `web/` on pushes to `main`.
+It calls `https://docxy-production.up.railway.app`, the `docxy` service in
+Railway's `tender-laughter` project, using a shared API token. Both use the same
+Neon database. Mastra, Nebius and Daytona run through that backend.
+
+Vercel owns Better Auth, GitHub App installation OAuth, Resend, optional Dodo
+billing and Composio account connection endpoints. GitHub App installation OAuth
+is separate from the optional GitHub sign-in provider. Composio does not replace
+the GitHub App or enable notifications/publishing just by connecting an account.
+
+Run production checks from the repository root:
+
+```bash
+node scripts/check-deploy-targets.mjs
+```
+
+For CLI uploads, also start at the repository root: this web app imports shared
+files from `src/`. Do not create or link a second Vercel project inside `web/`.
+See [deployment operations](../guides/DEPLOY.md) for exact platform IDs.
+
+## Local development
+
 ```bash
 npm install
 cp .env.local.example .env.local   # then fill in DATABASE_URL and BETTER_AUTH_SECRET
@@ -32,6 +60,8 @@ worse than no button.
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | no | enables the Google button |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | no | enables the GitHub button |
 | `DOCXY_API_URL` | no | where the pipeline API lives, default `http://localhost:4317` |
+| `DOCXY_API_TOKEN` | production | identical to the Railway backend's token |
+| `COMPOSIO_API_KEY` | for account connections | server-side key, in `web/.env.local` locally and Vercel in production |
 | `DOCXY_REQUIRE_AUTH` | no | set to `0` to open the dashboard unauthenticated, for demos |
 
 OAuth callback URLs are `/api/auth/callback/google` and
@@ -54,6 +84,11 @@ the pipeline's own tables in `public`. See [guides/DATABASE.md](../guides/DATABA
 
 ## Where things live
 
+For Slack, Notion, Linear, and Jira account connections, follow the
+[Composio setup guide](../guides/COMPOSIO.md). The dashboard uses Composio for
+organization account authentication; automated workflows for those services are
+still planned. GitHub continues to use the existing GitHub App.
+
 ```
 src/
   app/layout.tsx        fonts, metadata, the html shell
@@ -63,6 +98,7 @@ src/
   app/dashboard/        the operator views, all force-dynamic
   app/api/auth/[...all] every Better Auth endpoint
   app/api/docxy/        authenticated pass-through to the pipeline API
+  app/api/integrations/composio/ organization-authorized account connection management
   proxy.ts              the optimistic cookie gate on /dashboard
   db/schema.ts          Better Auth's tables, in the `auth` schema
   db/index.ts           the Neon connection
@@ -87,7 +123,7 @@ src/
   app/apple-icon.png    iOS home screen icon, generated from the logo
 public/logo.png         the original logo, untouched
 public/logo-mark.png    despeckled and trimmed, this is what the page renders
-public/brand/           Nebius and TrueForge favicons, vendored
+public/brand/           vendored provider marks; TrueForge is a legacy asset
 ```
 
 ## Design notes
@@ -115,10 +151,10 @@ Most changes are a `site.ts` edit: `why`, `roles`, `validations`,
 integration also needs a matching entry in `components/icons.tsx`, keyed by the
 same `name`.
 
-Brand marks come from `react-icons/si` (Simple Icons). Nebius and TrueForge have
-no Simple Icons entry, so their own favicons are vendored under `public/brand`
-rather than hotlinked, which keeps the page working offline and stops a remote
-404 from leaving a hole in the grid.
+Brand marks come from `react-icons/si` (Simple Icons), with additional provider
+assets under `public/brand`. Mastra is the current runtime. The retained
+TrueForge image is a legacy asset, not an active service. Asset presence is not
+connection status; use the [connection map](../guides/CONNECTIONS.md).
 
 House style for copy: no em dashes anywhere, second person, short sentences.
 

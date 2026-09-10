@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { LuArrowLeft, LuPlus } from "react-icons/lu";
+import { LuGithub, LuPlus } from "react-icons/lu";
 
 import { fetchProjects, fetchRepositories, fetchRuns } from "@/lib/docxy";
 import { activeOrganizationId } from "@/lib/organization";
@@ -39,28 +39,22 @@ export default async function RepositoriesPage({ searchParams }: {
 
   return (
     <Page>
-      {/* Reached from Integrations and from the GitHub install callback rather
-          than from the sidebar: this is the menu you connect a project from,
-          not somewhere to end up. */}
-      <Link
-        href="/dashboard/integrations"
-        className="focus-ring inline-flex items-center gap-2 text-xs text-muted hover:text-accent"
-      >
-        <LuArrowLeft aria-hidden /> Integrations
-      </Link>
       <PageHead
         title="Repositories"
-        lede="Every repository the GitHub App can see. Connect one to a project, and a push to its default branch starts a run."
+        lede="Manage connected repositories and choose which ones docxy documents."
       >
-        {/* Installing the App grants access; connecting a repository is the
-            separate, deliberate step that makes one a project. */}
-        <Link
-          href="/dashboard/projects/new"
-          className="focus-ring inline-flex shrink-0 items-center gap-1.5 border border-accent-deep bg-accent-deep px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-accent-deep/85"
-        >
-          <LuPlus size={13} aria-hidden />
-          Connect a repository
-        </Link>
+        <div className="flex flex-wrap items-center gap-2">
+          <a href="/api/github/install" className="focus-ring inline-flex items-center gap-1.5 border border-rule bg-surface px-3 py-1.5 text-xs font-medium transition-colors hover:border-accent hover:text-accent">
+            <LuGithub size={13} aria-hidden /> Manage GitHub access
+          </a>
+          <Link
+            href="/dashboard/projects/new"
+            className="focus-ring inline-flex shrink-0 items-center gap-1.5 border border-accent-deep bg-accent-deep px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-accent-deep/85"
+          >
+            <LuPlus size={13} aria-hidden />
+            Connect a repository
+          </Link>
+        </div>
       </PageHead>
 
       <GithubNotice error={notice.error} github={notice.github} />

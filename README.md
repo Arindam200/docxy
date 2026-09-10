@@ -2,6 +2,13 @@
 
 # Docxy
 
+**Deployment and integration map:** [what connects to what](guides/CONNECTIONS.md).
+Production is [docxy.app](https://docxy.app) on Vercel, calling the `docxy`
+backend in Railway's `tender-laughter` project. Both auto-deploy from this
+repository's `main` branch and share Neon and the API token. The old standalone
+harness deployment is retired. See [deployment operations](guides/DEPLOY.md),
+[Composio setup](guides/COMPOSIO.md), and [contributor/agent context](AGENTS.md).
+
 A multi-agent documentation-and-changelog pipeline built on
 [Mastra](https://mastra.ai), with models served by
 [Nebius Token Factory](https://tokenfactory.nebius.com) and validation run in a

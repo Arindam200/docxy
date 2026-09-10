@@ -1,5 +1,6 @@
 "use client";
 
+import { useToast } from "./Toast";
 import { useState } from "react";
 
 /**
@@ -15,6 +16,7 @@ export function InstructionsEditor({
 }) {
   const [value, setValue] = useState(initial);
   const [savedValue, setSavedValue] = useState(initial);
+  const notify = useToast();
   const [state, setState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const dirty = value !== savedValue;
 
@@ -30,8 +32,10 @@ export function InstructionsEditor({
       if (!res.ok) throw new Error(String(res.status));
       setSavedValue(value);
       setState("saved");
+      notify("Instructions saved. Applies from the next run.");
     } catch {
       setState("error");
+      notify("Could not save instructions. Please try again.", "error");
     }
   }
 

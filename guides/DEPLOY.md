@@ -1,5 +1,60 @@
 # Deploying docxy
 
+Start with [CONNECTIONS.md](CONNECTIONS.md) for the shared service map,
+configuration ownership, callbacks and retired-service context. This guide
+contains the deployment procedures and exact platform IDs.
+
+## Production targets
+
+Production deploys automatically from **`Arindam200/docxy`, branch `main`**.
+These are the established targets; use their IDs when operating a CLI.
+
+| Component | Project | Production URL | Build root |
+|---|---|---|---|
+| Vercel dashboard | `docxy` (`prj_3RMsBtkY6Xhe6XnODSW1M8q1DdyJ`), team `arindam-1729` | https://docxy.app | `web/` |
+| Railway backend | `tender-laughter` (`5c333e8f-d5fc-4440-82e8-427386ec0350`), service `docxy` (`af62c917-dffd-48f3-9b69-87f42b1f7a91`) | https://docxy-production.up.railway.app | Repository root, `Dockerfile` |
+
+Railway's production environment is `07200c23-c711-4fb6-a65e-09cbd4c22ea6`.
+Both platforms use the same `DATABASE_URL` and `DOCXY_API_TOKEN`. Vercel's
+production `DOCXY_API_URL` points to the Railway URL above. Keep the database,
+API token, GitHub App credentials, and volume on the existing backend when
+changing deployment settings.
+
+The former standalone harness at **`refreshing-tenderness/docxy`** is obsolete.
+It was disconnected from GitHub on September 11, 2026 after its remaining GitHub
+link deployed the new backend without backend credentials. Do not reconnect it
+or copy the production secrets there. Its historical failed deployment remains
+visible; future pushes deploy to `tender-laughter/docxy`.
+
+After pushing to `main`, check the deployment entries in GitHub, then run this
+read-only verification from the repository root with the Railway and Vercel
+CLIs signed in:
+
+```bash
+node scripts/check-deploy-targets.mjs
+```
+
+It verifies the project links, backend URL, Composio key presence, automatic
+deployment setting, successful deployments, matching Git revisions, and public
+health endpoints. Run it after both builds finish; it intentionally fails while
+one platform still runs an older revision. It does not print secret values.
+Automatic deployment routes pushes to the right services; application changes
+can still fail a build, so check locally before pushing:
+
+```bash
+npm run build
+npm --prefix web run typecheck
+npm --prefix web run build
+node_modules/.bin/tsx --test web/test/composio.test.ts
+```
+
+Composio's server key belongs in **Vercel production** and **`web/.env.local`**
+for local development. A key in the repository root `.env` is not loaded by
+Next.js running in `web/`. See [Composio setup](COMPOSIO.md) for the account
+authorization steps. Environment changes require a new Vercel deployment.
+
+## Architecture
+
 docxy is **one process**. The five agents run inside it through Mastra, so there
 is no second service to stand up and nothing to point it at. What it reaches out
 to is four managed things: **Nebius** for models, **Daytona** for the sandbox
@@ -20,10 +75,13 @@ repositories it documents.
 |---|---|---|---|
 | **docxy** | This repository's `Dockerfile`. API, webhook receiver, and the five agents in one Node process. | **Yes** - GitHub's webhook and the dashboard both reach it from outside | Yes |
 | **dashboard** | `web/`, a Next app. Reads the docxy API server-side and holds the token. | Yes | No - the API and CLI work without it |
-| **Neon** | One Postgres database, two schemas: `public` for the pipeline, `auth` for the dashboard's sign-in. | - | Strongly recommended |
+| **Neon** | One Postgres database, three schemas: `public` for the pipeline, `auth` for sign-in, `billing` for shared billing records. | - | Strongly recommended |
 | **Nebius** | Token Factory, as an OpenAI-compatible provider. | - | Yes - no run starts without it |
 | **Daytona** | The isolated workspace the docs build runs in. | - | See [the sandbox](#the-sandbox-what-the-daytona-key-has-to-be-able-to-do) |
 | **GitHub App** | The bot identity. Mints installation tokens, clones repositories, opens pull requests. | - | Yes, for anything webhook-driven |
+| **Composio** | Dashboard account authorization for Slack, Notion, Linear and Jira. Provider workflows are still planned. | Hosted authorization link | Optional |
+| **Resend** | Dashboard verification, welcome and invitation email. | - | Required for email registration |
+| **Dodo Payments** | Optional dashboard billing integration. Credentials and explicit switches are required. | Dashboard endpoints | Optional; not configured in the production verification |
 
 The instructions below use **Railway** for docxy and **Vercel** for the
 dashboard, because that is what this project has been deployed on. Nothing in
@@ -321,6 +379,7 @@ On Vercel, import this repository with **Root Directory** set to `web`, and set:
 DOCXY_API_URL=https://<your-docxy-domain>
 DOCXY_API_TOKEN=<identical to the value on the docxy service>
 DATABASE_URL=<the same pooled Neon string>
+COMPOSIO_API_KEY=                # account connections; see COMPOSIO.md
 BETTER_AUTH_SECRET=              # openssl rand -base64 32
 BETTER_AUTH_URL=https://<your-dashboard-domain>   # the canonical one, exactly
 
@@ -529,5 +588,5 @@ every repository the App is installed on.
 
 - [LOCAL-SETUP.md](LOCAL-SETUP.md) - from nothing to a documentation pull request on your own machine
 - [GITHUB-APP.md](GITHUB-APP.md) - registering the App and finding all four credentials
-- [DATABASE.md](DATABASE.md) - the two schemas, the two migration histories, and why
+- [DATABASE.md](DATABASE.md) - the three schemas, the two migration histories, and why
 - [OBSERVABILITY.md](OBSERVABILITY.md) - what each run records

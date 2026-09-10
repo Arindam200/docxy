@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
+import { ToastProvider } from "@/components/dashboard/Toast";
 import { Sidebar } from "@/components/dashboard/Sidebar";
 import { Breadcrumb } from "@/components/dashboard/Breadcrumb";
 import { HeaderActions } from "@/components/dashboard/HeaderActions";
@@ -102,29 +103,31 @@ export default async function DashboardLayout({
 
   return (
     <div className="theme-dark h-screen flex overflow-hidden bg-background text-foreground">
-      <Sidebar user={identity?.user ?? null} projects={identity?.projects} />
+      <ToastProvider>
+        <Sidebar user={identity?.user ?? null} projects={identity?.projects} />
 
-      <main className="flex-1 flex flex-col min-w-0">
-        <header className="h-14 shrink-0 flex items-center justify-between border-b border-rule px-5">
-          <div className="flex min-w-0 items-center gap-3 text-sm">
-            <span className="font-semibold tracking-tight">docxy</span>
-            {identity && (
-              <>
-                <span aria-hidden className="text-muted">/</span>
-                <OrganizationSwitcher
-                  organizations={identity.organizations}
-                  activeOrganizationId={identity.activeOrganizationId}
-                />
-              </>
-            )}
-            <Breadcrumb projects={identity?.projects ?? []} />
-          </div>
+        <main className="flex-1 flex flex-col min-w-0">
+          <header className="h-14 shrink-0 flex items-center justify-between border-b border-rule px-5">
+            <div className="flex min-w-0 items-center gap-3 text-sm">
+              <span className="font-semibold tracking-tight">docxy</span>
+              {identity && (
+                <>
+                  <span aria-hidden className="text-muted">/</span>
+                  <OrganizationSwitcher
+                    organizations={identity.organizations}
+                    activeOrganizationId={identity.activeOrganizationId}
+                  />
+                </>
+              )}
+              <Breadcrumb projects={identity?.projects ?? []} />
+            </div>
 
-          <HeaderActions />
-        </header>
+            <HeaderActions />
+          </header>
 
-        <div className="flex-1 min-h-0 overflow-y-auto">{children}</div>
-      </main>
+          <div className="flex-1 min-h-0 overflow-y-auto">{children}</div>
+        </main>
+      </ToastProvider>
     </div>
   );
 }

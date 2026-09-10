@@ -1,14 +1,16 @@
 import { LuCircleCheck, LuCircleDashed, LuClock } from "react-icons/lu";
 
+import { InfoTip } from "./InfoTip";
 import { catalogIcons, integrationIcons } from "@/components/icons";
 import type { CatalogEntry } from "@/lib/integrations";
 import { lookup } from "@/lib/lookup";
+import type { ReactNode } from "react";
 
 /**
  * One integration in the catalogue.
  *
  * A card can be in three states and each gets a different action: connected,
- * connectable (only GitHub today), or ahead of us. The last one renders its
+ * connectable, or ahead of us. The last one renders its
  * button disabled rather than hiding it, so the row of cards keeps its rhythm
  * and the reader can see what is planned without being invited to click it.
  */
@@ -18,6 +20,8 @@ export function IntegrationCard({
   connected,
   detail,
   href,
+  control,
+  unavailable,
 }: {
   entry: CatalogEntry;
   /** Live entries only: what the pipeline reports right now. */
@@ -25,11 +29,15 @@ export function IntegrationCard({
   /** A short live fact - the bot's name, the endpoint - under the summary. */
   detail?: string;
   href?: string;
+  control?: ReactNode;
+  unavailable?: boolean;
 }) {
   const soon = entry.status === "soon";
   const icon = lookup(catalogIcons, entry.id) ?? integrationIcons.plug;
 
-  const badge = soon
+  const badge = unavailable
+    ? { label: "Unavailable", tone: "border-rule bg-surface-2 text-muted", icon: <LuCircleDashed /> }
+    : soon
     ? { label: "Coming soon", tone: "border-rule bg-surface-2 text-muted", icon: <LuClock /> }
     : connected
       ? {
@@ -45,7 +53,7 @@ export function IntegrationCard({
 
   return (
     <article className="flex flex-col gap-3 bg-surface p-5">
-      <div className="flex items-start justify-between gap-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="flex min-w-0 items-start gap-3">
           <span
             aria-hidden
@@ -56,7 +64,10 @@ export function IntegrationCard({
             {icon}
           </span>
           <div className="min-w-0">
-            <h3 className="truncate text-sm font-semibold tracking-tight">{entry.name}</h3>
+            <div className="flex items-center gap-1">
+              <h3 className="truncate text-sm font-semibold tracking-tight">{entry.name}</h3>
+              {entry.note && <InfoTip label={`About ${entry.name} workflows`}>{entry.note}</InfoTip>}
+            </div>
             <p className="text-[10px] font-semibold uppercase tracking-[0.08em] text-muted">
               {entry.category}
             </p>
@@ -82,7 +93,7 @@ export function IntegrationCard({
       )}
 
       <div className="mt-auto pt-1">
-        {soon ? (
+        {control ?? (soon ? (
           <button
             type="button"
             disabled
@@ -94,13 +105,11 @@ export function IntegrationCard({
         ) : (
           <a
             href={href ?? entry.href}
-            target="_blank"
-            rel="noreferrer"
-            className="block w-full border border-transparent bg-accent px-3 py-1.5 text-center text-xs font-medium text-white transition-colors hover:bg-accent-deep"
+            className="focus-ring block w-full border border-transparent bg-accent-deep px-3 py-1.5 text-center text-xs font-medium text-white transition-colors hover:bg-accent-deep/85"
           >
             {connected ? "Manage installation" : entry.action}
           </a>
-        )}
+        ))}
       </div>
     </article>
   );

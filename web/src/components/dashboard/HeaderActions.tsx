@@ -10,6 +10,7 @@ import {
   LuX,
 } from "react-icons/lu";
 
+import { useToast } from "./Toast";
 import { site } from "@/lib/site";
 
 /**
@@ -94,6 +95,7 @@ const CONTROL =
   "flex h-8 items-center gap-1.5 border border-rule px-2 text-xs font-medium transition-colors hover:bg-surface-2";
 
 function ThemeMenu() {
+  const notify = useToast();
   // SAFETY: "system" is one of `Choice`'s values; without the assertion it widens to `string`.
   const choice = useSyncExternalStore(subscribe, readChoice, () => "system" as Choice);
   const [open, setOpen] = useState(false);
@@ -113,8 +115,9 @@ function ThemeMenu() {
     apply(value);
     try {
       localStorage.setItem(STORAGE_KEY, value);
+      notify(`${CHOICES.find((item) => item.value === value)?.label ?? value} theme saved.`);
     } catch {
-      // A preference that cannot be saved still applies for this session.
+      notify("Theme applied for this session. Your browser could not save the preference.", "info");
     }
     for (const listener of listeners) listener();
   }

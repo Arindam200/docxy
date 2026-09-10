@@ -15,9 +15,10 @@ import { projectHref, projectRunHref, projectRuns, projectTitle, rollUp } from "
 import { ApiOffline } from "@/components/dashboard/ApiOffline";
 import { Page, PageHead } from "@/components/dashboard/Page";
 import { StatCard } from "@/components/dashboard/StatCard";
-import { RunTimeline, StatusChip } from "@/components/dashboard/RunTimeline";
+import { RunTimeline } from "@/components/dashboard/RunTimeline";
 import { QuickActions } from "@/components/dashboard/Capabilities";
 import { GithubNotice } from "@/components/dashboard/GithubNotice";
+import { ProjectCard } from "@/components/projects/ProjectCard";
 import { LiveUpdates } from "@/components/dashboard/LiveUpdates";
 
 export const dynamic = "force-dynamic";
@@ -31,20 +32,7 @@ function percent(value: number | undefined): string {
   return value === undefined ? "N/A" : `${Math.round(value * 100)}%`;
 }
 
-/**
- * The organization: everything totalled, then the same figures per project.
- *
- * Both halves earn their place, and an earlier revision had only one of each at
- * a time. A bare project list answered "what exists" and left "is any of it
- * working" to be discovered one project at a time. The overview before it
- * answered the opposite question and never said which repository any of it was
- * about, so a bad number sent you hunting.
- *
- * So: the totals across every project first, because that is the glance this
- * page exists for, then one card per project carrying its own share of those
- * same figures - which turns the summary into a way in rather than a dead end.
- * Anything narrower than a project lives inside it.
- */
+/** Organization totals, a two-project preview, and recent activity. */
 export default async function OrganizationPage({
   searchParams,
 }: {
@@ -81,7 +69,8 @@ export default async function OrganizationPage({
   const summaries = projects
     .map((project) => ({ project, stats: rollUp(projectRuns(project, list)) }))
     .sort((a, b) =>
-      (b.stats.latest?.startedAt ?? "").localeCompare(a.stats.latest?.startedAt ?? ""),
+      (b.stats.latest?.startedAt ?? "").localeCompare(a.stats.latest?.startedAt ?? "") ||
+      projectTitle(a.project).localeCompare(projectTitle(b.project)),
     );
 
   const troubled = summaries.filter((entry) => entry.stats.needsAttention > 0);
@@ -152,7 +141,7 @@ export default async function OrganizationPage({
     <Page>
       <PageHead
         title="Overview"
-        lede="Every project's documentation work, totalled here and broken down below."
+        lede="Documentation activity and results across your organization."
       >
         <div className="flex items-center gap-4">
           <LiveUpdates />
@@ -242,9 +231,12 @@ export default async function OrganizationPage({
       )}
 
       <section aria-labelledby="org-projects" className="space-y-3">
-        <h2 id="org-projects" className="text-lg font-semibold tracking-tight">
-          Projects
-        </h2>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 id="org-projects" className="text-lg font-semibold tracking-tight">Recent projects</h2>
+          <Link href="/dashboard/projects" className="focus-ring inline-flex items-center gap-1.5 text-xs font-medium text-accent hover:underline">
+            View all projects{result ? ` (${projects.length})` : ""} <LuArrowRight size={13} aria-hidden />
+          </Link>
+        </div>
 
         {!result ? (
           <ApiOffline />
@@ -264,57 +256,9 @@ export default async function OrganizationPage({
           </div>
         ) : (
           <ul className="grid gap-4 lg:grid-cols-2">
-            {summaries.map(({ project, stats }) => (
+            {summaries.slice(0, 2).map(({ project, stats }) => (
               <li key={project.id} className="flex">
-                <Link
-                  href={projectHref(project.id)}
-                  className="focus-ring group flex flex-1 flex-col gap-4 border border-rule bg-surface p-5 transition-colors hover:border-accent/50"
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <h3 className="break-all font-semibold">{projectTitle(project)}</h3>
-                      <p className="mt-1 break-all text-xs text-muted">
-                        {project.sourceRepo || "Connected repository"}
-                      </p>
-                    </div>
-                    {stats.needsAttention > 0 ? (
-                      <span className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs font-medium text-danger">
-                        <LuCircleAlert size={13} aria-hidden />
-                        {stats.needsAttention}
-                      </span>
-                    ) : (
-                      <LuArrowRight className="shrink-0 text-accent" aria-hidden />
-                    )}
-                  </div>
-
-                  {/* The same figures as the totals above, for this one
-                      repository, so the summary is a way in rather than a
-                      number you have to go and re-derive. */}
-                  <dl className="grid grid-cols-3 gap-3 border-y border-rule py-3">
-                    <ProjectStat label="Runs" value={online ? String(stats.runs) : "N/A"} />
-                    <ProjectStat
-                      label="Success"
-                      value={percent(stats.successRate)}
-                      alert={stats.successRate !== undefined && stats.successRate < 0.8}
-                    />
-                    <ProjectStat label="Spend" value={usd(stats.costUsd)} />
-                  </dl>
-
-                  <div className="mt-auto flex items-center justify-between gap-3 text-xs">
-                    {!online ? (
-                      <span className="text-muted">Activity unavailable</span>
-                    ) : stats.latest ? (
-                      <>
-                        <StatusChip status={stats.latest.status} />
-                        <span className="text-muted tabular-nums">
-                          {timeAgo(stats.latest.startedAt)}
-                        </span>
-                      </>
-                    ) : (
-                      <span className="text-muted">No runs yet</span>
-                    )}
-                  </div>
-                </Link>
+                <ProjectCard project={project} stats={stats} online={online} />
               </li>
             ))}
           </ul>
@@ -367,24 +311,5 @@ export default async function OrganizationPage({
         )}
       </section>
     </Page>
-  );
-}
-
-function ProjectStat({
-  label,
-  value,
-  alert = false,
-}: {
-  label: string;
-  value: string;
-  alert?: boolean;
-}) {
-  return (
-    <div>
-      <dt className="text-[10px] font-semibold uppercase tracking-[0.08em] text-muted">{label}</dt>
-      <dd className={`mt-1 text-sm font-semibold tabular-nums ${alert ? "text-danger" : ""}`}>
-        {value}
-      </dd>
-    </div>
   );
 }

@@ -1,3 +1,5 @@
+import Link from "next/link";
+import { LuArrowLeft } from "react-icons/lu";
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 
@@ -34,6 +36,7 @@ export default async function NewProjectPage({ searchParams }: { searchParams: P
 
   return (
     <Page>
+      <Link href="/dashboard/repositories" className="focus-ring inline-flex items-center gap-2 text-xs text-muted hover:text-accent"><LuArrowLeft aria-hidden /> Repositories</Link>
       <PageHead
         title="Connect a repository"
         lede="One project documents one repository. Choose which, and say where its documentation lives."

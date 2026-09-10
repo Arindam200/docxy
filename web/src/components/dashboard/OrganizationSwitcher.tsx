@@ -1,5 +1,6 @@
 "use client";
 
+import { useToast } from "./Toast";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { LuBuilding2, LuCheck, LuChevronDown, LuPlus } from "react-icons/lu";
@@ -43,10 +44,15 @@ export function OrganizationSwitcher({
   activeOrganizationId: string;
 }) {
   const router = useRouter();
+  const notify = useToast();
   const [open, setOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  function reportError(message: string) {
+    setError(message);
+    notify(message, "error");
+  }
   const container = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
   const active = organizations.find((value) => value.id === activeOrganizationId);
@@ -86,14 +92,15 @@ export function OrganizationSwitcher({
     try {
       const result = await organization.setActive({ organizationId: next.id });
       if (result.error) {
-        setError(result.error.message ?? "Could not switch organizations.");
+        reportError(result.error.message ?? "Could not switch organizations.");
         return;
       }
 
       setOpen(false);
+      notify(`Switched to ${next.name}.`);
       router.refresh();
     } catch {
-      setError("Could not switch organizations. Please try again.");
+      reportError("Could not switch organizations. Please try again.");
     } finally {
       setPendingId(null);
     }

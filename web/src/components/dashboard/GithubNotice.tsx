@@ -1,4 +1,4 @@
-import { LuCircleAlert, LuCircleCheck } from "react-icons/lu";
+import { ToastNotice } from "./Toast";
 
 import { lookup } from "@/lib/lookup";
 
@@ -24,11 +24,11 @@ const MESSAGES = {
   },
   install_expired: {
     tone: "danger",
-    text: "This connection attempt expired or your active organization changed. Start again from Connect GitHub in Integrations.",
+    text: "This connection attempt expired or your active organization changed. Start again from Connect GitHub in Repositories.",
   },
   install_cancelled: {
     tone: "danger",
-    text: "GitHub authorization was cancelled. Use Connect GitHub in Integrations when you are ready to try again.",
+    text: "GitHub authorization was cancelled. Use Connect GitHub in Repositories when you are ready to try again.",
   },
   install_unverifiable: {
     tone: "danger",
@@ -63,24 +63,5 @@ export function GithubNotice({ error, github }: { error?: string; github?: strin
   const failure = error ? lookup(MESSAGES, error) : undefined;
   const outcome = github ? lookup(OUTCOMES, github) : undefined;
 
-  if (!failure && !outcome) return null;
-
-  if (failure) {
-    return (
-      <div
-        role="alert"
-        className="flex gap-3 border border-danger/30 bg-danger/5 px-4 py-3 text-sm leading-relaxed text-danger"
-      >
-        <LuCircleAlert size={16} aria-hidden className="mt-0.5 shrink-0" />
-        <p>{failure.text}</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="flex gap-3 border border-ok/30 bg-ok/5 px-4 py-3 text-sm leading-relaxed text-ok">
-      <LuCircleCheck size={16} aria-hidden className="mt-0.5 shrink-0" />
-      <p>{outcome}</p>
-    </div>
-  );
+  return <ToastNotice message={failure?.text ?? outcome} tone={failure ? "error" : github === "requested" ? "info" : "success"} parameters={["error", "github"]} />;
 }

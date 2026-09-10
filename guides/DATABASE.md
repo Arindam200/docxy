@@ -1,5 +1,15 @@
 # Persistence: Neon + Drizzle
 
+Production's Vercel dashboard and Railway `tender-laughter/docxy` backend use
+the same Neon connection string, verified September 11, 2026. The shared
+[connection map](CONNECTIONS.md) identifies the production targets and ownership
+of every credential. Local `.env` and `web/.env.local` are separate files; use
+the same development database in both, without assuming it should be production.
+
+Composio stores provider credentials under `docxy:org:<organization-id>` in its
+own project. The connection setup adds no provider-token tables or database
+migration to Docxy. Never treat the shared API token as an organization identity.
+
 **Status: built.** `DATABASE_URL` selects the backend. Unset, the pipeline keeps
 everything as JSON in `.docxy/` - zero setup, and what the demo uses. Set it and
 runs, sessions, and the symbol map move to Postgres. Both are supported; the

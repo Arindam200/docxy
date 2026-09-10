@@ -1,11 +1,14 @@
 "use client";
 
+import { useToast } from "./Toast";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   LuArrowLeft,
   LuGithub,
+  LuGitBranch,
+  LuFolderOpen,
   LuHouse,
   LuPlug,
   LuLogOut,
@@ -33,32 +36,31 @@ interface NavItem {
   match?: (pathname: string) => boolean;
 }
 
-/**
- * The rail has two contents, and which one it shows is a question about where
- * you are rather than about what you clicked.
- *
- * Outside a project the answer is short on purpose. Overview carries the
- * organization's totals and every project's share of them, so the two questions
- * this level can answer - how is it all going, and which project do I want -
- * are one page rather than two entries. What is left is who can reach the
- * organization and how it is configured. Role logs and per-run detail are
- * never asked about across every repository at once, so they are not here.
- */
+/** Organization navigation stays separate from each project's own sections. */
 const ORGANIZATION_NAV: NavItem[] = [
   {
     href: "/dashboard",
     label: "Overview",
     icon: <LuHouse />,
-    // Connecting one is still the organization asking for a project, so the
-    // form keeps this entry lit rather than dropping the rail into a project
-    // that does not exist yet.
-    match: (pathname) => pathname === "/dashboard" || pathname === "/dashboard/projects/new",
+    match: (pathname) => pathname === "/dashboard",
+  },
+  {
+    href: "/dashboard/projects",
+    label: "Projects",
+    icon: <LuFolderOpen />,
+    match: (pathname) => pathname === "/dashboard/projects",
+  },
+  {
+    href: "/dashboard/repositories",
+    label: "Repositories",
+    icon: <LuGitBranch />,
+    match: (pathname) => pathname.startsWith("/dashboard/repositories") || pathname === "/dashboard/projects/new",
   },
   {
     href: "/dashboard/integrations",
     label: "Integrations",
     icon: <LuPlug />,
-    match: (pathname) => pathname.startsWith("/dashboard/integrations") || pathname.startsWith("/dashboard/repositories"),
+    match: (pathname) => pathname.startsWith("/dashboard/integrations"),
   },
   { href: "/dashboard/members", label: "Members", icon: <LuUsers /> },
   {
@@ -133,14 +135,14 @@ function RailButton({
       href={href}
       aria-label={label}
       aria-current={active ? "page" : undefined}
-      className={`group relative flex h-9 w-9 mx-auto items-center justify-center rounded-md transition-colors ${
+      className={`focus-ring group relative flex h-9 w-9 mx-auto items-center justify-center rounded-md transition-colors ${
         active
           ? "bg-accent/10 text-accent"
           : "text-muted hover:bg-surface-2 hover:text-foreground"
       }`}
     >
       <span className="h-[18px] w-[18px] [&>svg]:h-full [&>svg]:w-full">{icon}</span>
-      <span className="pointer-events-none absolute left-[calc(100%+10px)] top-1/2 -translate-y-1/2 z-50 whitespace-nowrap rounded-md bg-zinc-100 px-2.5 py-1.5 text-xs font-semibold text-zinc-900 opacity-0 invisible shadow-lg shadow-black/30 transition-all duration-150 group-hover:opacity-100 group-hover:visible">
+      <span className="pointer-events-none absolute left-[calc(100%+10px)] top-1/2 -translate-y-1/2 z-50 whitespace-nowrap rounded-md bg-zinc-100 px-2.5 py-1.5 text-xs font-semibold text-zinc-900 opacity-0 invisible shadow-lg shadow-black/30 transition-all duration-150 group-hover:opacity-100 group-hover:visible group-focus-visible:visible group-focus-visible:opacity-100">
         {label}
       </span>
     </Link>
@@ -177,6 +179,7 @@ function Avatar({ user }: { user: DashboardUser }) {
 }
 
 function ProfileMenu({ user }: { user: DashboardUser }) {
+  const notify = useToast();
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
@@ -206,9 +209,12 @@ function ProfileMenu({ user }: { user: DashboardUser }) {
   async function handleSignOut() {
     setPending(true);
     try {
-      await signOut();
+      const result = await signOut();
+      if (result.error) throw new Error("Could not sign out. Please try again.");
       router.replace("/");
       router.refresh();
+    } catch {
+      notify("Could not sign out. Please try again.", "error");
     } finally {
       setPending(false);
     }
@@ -228,7 +234,7 @@ function ProfileMenu({ user }: { user: DashboardUser }) {
       >
         <Avatar user={user} />
         {!open && (
-          <span className="pointer-events-none absolute left-[calc(100%+10px)] top-1/2 z-50 -translate-y-1/2 whitespace-nowrap rounded-md bg-zinc-100 px-2.5 py-1.5 text-xs font-semibold text-zinc-900 opacity-0 shadow-lg shadow-black/30 transition-all duration-150 invisible group-hover:visible group-hover:opacity-100">
+          <span className="pointer-events-none absolute left-[calc(100%+10px)] top-1/2 z-50 -translate-y-1/2 whitespace-nowrap rounded-md bg-zinc-100 px-2.5 py-1.5 text-xs font-semibold text-zinc-900 opacity-0 shadow-lg shadow-black/30 transition-all duration-150 invisible group-hover:visible group-focus-visible:visible group-focus-visible:opacity-100 group-hover:opacity-100">
             {user.name}
           </span>
         )}
@@ -286,7 +292,7 @@ function SignInLink() {
       <span className="flex h-6 w-6 items-center justify-center rounded-full border border-rule bg-surface-2 font-mono text-[10px]">
         ?
       </span>
-      <span className="pointer-events-none absolute left-[calc(100%+10px)] top-1/2 -translate-y-1/2 z-50 whitespace-nowrap rounded-md bg-zinc-100 px-2.5 py-1.5 text-xs font-semibold text-zinc-900 opacity-0 invisible shadow-lg shadow-black/30 transition-all duration-150 group-hover:opacity-100 group-hover:visible">
+      <span className="pointer-events-none absolute left-[calc(100%+10px)] top-1/2 -translate-y-1/2 z-50 whitespace-nowrap rounded-md bg-zinc-100 px-2.5 py-1.5 text-xs font-semibold text-zinc-900 opacity-0 invisible shadow-lg shadow-black/30 transition-all duration-150 group-hover:opacity-100 group-hover:visible group-focus-visible:visible group-focus-visible:opacity-100">
         Sign in
       </span>
     </Link>
@@ -328,7 +334,7 @@ export function Sidebar({
               entry for a project's and left no route back to the list - which
               is how a switching nav becomes a trap.
             */}
-            <RailButton href="/dashboard" label={`All projects · ${projectLabel}`} icon={<LuArrowLeft />} />
+            <RailButton href="/dashboard/projects" label="All projects" icon={<LuArrowLeft />} />
             <div className="mx-3 my-2 rule-h" />
           </>
         )}
@@ -355,7 +361,7 @@ export function Sidebar({
           className="group relative flex h-9 w-9 mx-auto items-center justify-center rounded-md text-muted hover:bg-surface-2 hover:text-foreground transition-colors"
         >
           <span className="h-[18px] w-[18px] [&>svg]:h-full [&>svg]:w-full"><LuGithub /></span>
-          <span className="pointer-events-none absolute left-[calc(100%+10px)] top-1/2 -translate-y-1/2 z-50 whitespace-nowrap rounded-md bg-zinc-100 px-2.5 py-1.5 text-xs font-semibold text-zinc-900 opacity-0 invisible shadow-lg shadow-black/30 transition-all duration-150 group-hover:opacity-100 group-hover:visible">
+          <span className="pointer-events-none absolute left-[calc(100%+10px)] top-1/2 -translate-y-1/2 z-50 whitespace-nowrap rounded-md bg-zinc-100 px-2.5 py-1.5 text-xs font-semibold text-zinc-900 opacity-0 invisible shadow-lg shadow-black/30 transition-all duration-150 group-hover:opacity-100 group-hover:visible group-focus-visible:visible group-focus-visible:opacity-100">
             GitHub
           </span>
         </a>

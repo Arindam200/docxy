@@ -27,7 +27,11 @@ export function Breadcrumb({
   const project = projects.find((candidate) => candidate.id === projectId);
 
   if (!projectId) {
-    const section = pathname.startsWith("/dashboard/integrations") || pathname.startsWith("/dashboard/repositories")
+    const section = pathname.startsWith("/dashboard/repositories") || pathname === "/dashboard/projects/new"
+      ? "Repositories"
+      : pathname === "/dashboard/projects"
+        ? "Projects"
+      : pathname.startsWith("/dashboard/integrations")
       ? "Integrations"
       : pathname.startsWith("/dashboard/settings") || pathname.startsWith("/dashboard/instructions")
         ? "Settings"
@@ -48,10 +52,10 @@ export function Breadcrumb({
         /
       </span>
       <Link
-        href="/dashboard"
+        href="/dashboard/projects"
         className="focus-ring hidden text-muted transition-colors hover:text-accent sm:inline"
       >
-        Overview
+        Projects
       </Link>
       <span aria-hidden className="text-muted">
         /

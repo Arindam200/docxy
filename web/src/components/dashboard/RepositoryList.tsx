@@ -118,7 +118,7 @@ export function RepositoryList({ page, projects = [] }: { page: RepositoriesPage
       <Empty
         title="The App is not installed anywhere yet"
         body="Install the App on a repository to see it here."
-        href="https://github.com/settings/installations"
+        href="/api/github/install"
         action="Install on a repository"
       />
     );

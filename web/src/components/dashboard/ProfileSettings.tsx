@@ -1,5 +1,6 @@
 "use client";
 
+import { useToast } from "./Toast";
 import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { authClient } from "@/lib/auth-client";
@@ -9,6 +10,7 @@ export function ProfileSettings({ user }: { user: DashboardUser }) {
   const router = useRouter();
   const [name, setName] = useState(user.name);
   const [savedName, setSavedName] = useState(user.name);
+  const notify = useToast();
   const [state, setState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const pending = state === "saving";
 
@@ -21,14 +23,17 @@ export function ProfileSettings({ user }: { user: DashboardUser }) {
       const { error } = await authClient.updateUser({ name: nextName });
       if (error) {
         setState("error");
+        notify("Could not save your profile. Please try again.", "error");
         return;
       }
       setName(nextName);
       setSavedName(nextName);
       setState("saved");
+      notify("Profile saved.");
       router.refresh();
     } catch {
       setState("error");
+      notify("Could not save your profile. Please try again.", "error");
     }
   }
 

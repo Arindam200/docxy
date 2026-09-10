@@ -1,5 +1,6 @@
 "use client";
 
+import { useToast } from "./Toast";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { LuBuilding2, LuMail, LuTrash2, LuUserPlus } from "react-icons/lu";
@@ -62,10 +63,15 @@ export function MembersPanel({
   canSendEmail: boolean;
 }) {
   const router = useRouter();
+  const notify = useToast();
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<InvitableRole>("member");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  function reportError(message: string) {
+    setError(message);
+    notify(message, "error");
+  }
   const [sent, setSent] = useState<string | null>(null);
   /** The row currently being acted on, so only its own button shows progress. */
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -83,26 +89,27 @@ export function MembersPanel({
     // is about a constraint rather than about the person.
     if (members.some((entry) => entry.email.toLowerCase() === address.toLowerCase())) {
       setPending(false);
-      setError(`${address} is already in this organization.`);
+      reportError(`${address} is already in this organization.`);
       return;
     }
     if (invitations.some((entry) => entry.email.toLowerCase() === address.toLowerCase())) {
       setPending(false);
-      setError(`${address} already has an invitation waiting.`);
+      reportError(`${address} already has an invitation waiting.`);
       return;
     }
 
     try {
       const result = await organization.inviteMember({ email: address, role });
       if (result.error) {
-        setError(result.error.message ?? "The invitation could not be sent.");
+        reportError(result.error.message ?? "The invitation could not be sent.");
         return;
       }
       setEmail("");
       setSent(address);
+      notify(`Invitation sent to ${address}.`);
       router.refresh();
     } catch {
-      setError("The invitation could not be sent. Try again in a moment.");
+      reportError("The invitation could not be sent. Try again in a moment.");
     } finally {
       setPending(false);
     }
@@ -115,10 +122,13 @@ export function MembersPanel({
     try {
       const result = await organization.cancelInvitation({ invitationId: id });
       if (result.error) {
-        setError(result.error.message ?? `Could not cancel the invitation to ${address}.`);
+        reportError(result.error.message ?? `Could not cancel the invitation to ${address}.`);
         return;
       }
+      notify(`Invitation to ${address} cancelled.`);
       router.refresh();
+    } catch {
+      reportError(`Could not cancel the invitation to ${address}. Please try again.`);
     } finally {
       setBusyId(null);
     }
@@ -133,10 +143,13 @@ export function MembersPanel({
       // server re-checks the caller's rank before doing anything.
       const result = await organization.removeMember({ memberIdOrEmail: entry.userId });
       if (result.error) {
-        setError(result.error.message ?? `Could not remove ${entry.name}.`);
+        reportError(result.error.message ?? `Could not remove ${entry.name}.`);
         return;
       }
+      notify(`${entry.name || entry.email} removed from the organization.`);
       router.refresh();
+    } catch {
+      reportError(`Could not remove ${entry.name || entry.email}. Please try again.`);
     } finally {
       setBusyId(null);
     }

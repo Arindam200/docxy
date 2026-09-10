@@ -1,5 +1,6 @@
 "use client";
 
+import { useToast } from "@/components/dashboard/Toast";
 import { useState } from "react";
 import { LuArrowRight } from "react-icons/lu";
 
@@ -52,8 +53,10 @@ export function CreateOrganization({ connectGithub = true, onCreated, onPendingC
   onCreated?: () => void;
   onPendingChange?: (pending: boolean) => void;
 }) {
+  const notify = useToast();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  function reportError(message: string) { setError(message); notify(message, "error"); }
   const [createdId, setCreatedId] = useState<string | null>(null);
 
   async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
@@ -61,7 +64,7 @@ export function CreateOrganization({ connectGithub = true, onCreated, onPendingC
     const name = String(new FormData(event.currentTarget).get("name") ?? "").trim();
     if (pending) return;
     if (!name) {
-      setError("Enter an organization name.");
+      reportError("Enter an organization name.");
       return;
     }
 
@@ -76,7 +79,7 @@ export function CreateOrganization({ connectGithub = true, onCreated, onPendingC
       if (!organizationId) {
         const created = await organization.create({ name, slug: slugify(name) });
         if (created.error || !created.data) {
-          setError(created.error?.message ?? "Could not create the organization. Please try again.");
+          reportError(created.error?.message ?? "Could not create the organization. Please try again.");
           return;
         }
         organizationId = created.data.id;
@@ -85,10 +88,11 @@ export function CreateOrganization({ connectGithub = true, onCreated, onPendingC
 
       const activated = await organization.setActive({ organizationId });
       if (activated.error) {
-        setError("Your organization was created. Try again to open it.");
+        reportError("Your organization was created. Try again to open it.");
         return;
       }
 
+      notify(`${name} organization created.`);
       if (onCreated) {
         onCreated();
         return;
@@ -100,7 +104,7 @@ export function CreateOrganization({ connectGithub = true, onCreated, onPendingC
         ? `/api/github/install?organizationId=${encodeURIComponent(organizationId)}`
         : "/dashboard";
     } catch {
-      setError("Could not finish setting up your organization. Please try again.");
+      reportError("Could not finish setting up your organization. Please try again.");
     } finally {
       setPending(false);
       onPendingChange?.(false);

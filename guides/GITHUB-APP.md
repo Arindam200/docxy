@@ -1,13 +1,22 @@
 # Setting up the docxy GitHub bot
 
-Right now the demo has two things wrong with it, and they are separate problems:
+Production already uses the `docxy-bot` App. Its webhook was verified on
+September 11, 2026: `https://docxy-production.up.railway.app/webhook`, JSON,
+with TLS verification enabled. The App's private key and webhook secret belong
+to Railway `tender-laughter/docxy`; installation OAuth belongs to Vercel.
 
-| | Now | After |
-|---|---|---|
-| Who opens the PR | `Arindam200` (your `gh` CLI login) | `docxy[bot]` |
-| What triggers a run | you typing `docxy run` | a push to the repo |
+The dashboard's App callback is `https://docxy.app/api/github/callback` and its
+setup return is `https://docxy.app/api/github/installed`. These differ from
+Better Auth's optional GitHub sign-in callback, `/api/auth/callback/github`.
 
-This guide fixes both.
+A push to `Arindam200/docxy/main` deploys the application through the hosting
+providers' GitHub integrations. A push webhook from a customer repository
+connected as a Docxy project starts documentation work. Composio does not replace
+either GitHub path. See the [shared connection map](CONNECTIONS.md).
+
+The registration and Smee instructions below are for a new installation or a
+local development App. Do not replace the existing production webhook with a
+local Smee relay.
 
 ---
 

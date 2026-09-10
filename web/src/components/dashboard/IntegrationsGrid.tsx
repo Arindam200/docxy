@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 
 import { IntegrationCard } from "@/components/dashboard/IntegrationCard";
-import type { CatalogEntry } from "@/lib/integrations";
+import type { CatalogEntry, IntegrationConnections } from "@/lib/integrations";
 
 /**
  * The catalogue as one hairline-gapped field: the 1px gutters sit on the rule
@@ -12,10 +12,12 @@ export function IntegrationsGrid({
   entries,
   live,
   children,
+  controls,
 }: {
   entries: CatalogEntry[];
   /** Live status for the entries that have any, keyed by catalogue id. */
-  live?: Record<string, { connected: boolean; detail?: string; href?: string }>;
+  live?: IntegrationConnections;
+  controls?: Partial<Record<string, ReactNode>>;
   /** Rendered as the last cell, so a short final row is filled rather than bare. */
   children?: ReactNode;
 }) {
@@ -28,6 +30,8 @@ export function IntegrationsGrid({
           connected={live?.[entry.id]?.connected}
           detail={live?.[entry.id]?.detail}
           href={live?.[entry.id]?.href}
+          unavailable={live?.[entry.id]?.unavailable}
+          control={controls?.[entry.id]}
         />
       ))}
       {children}

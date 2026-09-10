@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { projectHref } from "@/lib/projects";
 import { LuArrowRight, LuBookText, LuCode } from "react-icons/lu";
 
+import { useToast } from "@/components/dashboard/Toast";
 import { Select } from "@/components/dashboard/Select";
 // `import type` only - erased at build, so the server-side module it lives in
 // is never pulled into this client bundle.
@@ -37,6 +38,7 @@ export function ConnectRepository({
   initialSource?: string;
 }) {
   const router = useRouter();
+  const notify = useToast();
   const [source, setSource] = useState(repositories.includes(initialSource) && !connected.includes(initialSource) ? initialSource : "");
   const [separateDocs, setSeparateDocs] = useState(false);
   const [docs, setDocs] = useState("");
@@ -50,12 +52,15 @@ export function ConnectRepository({
 
   async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (pending) return;
     if (!source) {
       setError("Choose the repository whose code you want documented.");
+      notify("Choose the repository whose code you want documented.", "error");
       return;
     }
     if (separateDocs && !docs) {
       setError("Choose the repository the documentation lives in.");
+      notify("Choose the repository the documentation lives in.", "error");
       return;
     }
 
@@ -74,23 +79,25 @@ export function ConnectRepository({
     // No organization in this payload, deliberately. The proxy writes the
     // session's one into the query string and the API reads it only from
     // there, so a value sent from the browser could not have counted anyway.
-    const response = await fetch("/api/docxy/projects", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-
-    // SAFETY: only `error` is read, as an optional string, and the `??` below
-    // supplies the message when the body is not that shape or not JSON at all.
-    const body = (await response.json().catch(() => null)) as { error?: string; project?: { id?: string } } | null;
-    if (!response.ok) {
+    try {
+      const response = await fetch("/api/docxy/projects", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      // SAFETY: the app endpoint returns an optional error and project id.
+      const body = (await response.json().catch(() => null)) as { error?: string; project?: { id?: string } } | null;
+      if (!response.ok) throw new Error(body?.error ?? "Could not connect the repository. Please try again.");
+      notify(`${source} connected. Documentation runs will start on new pushes.`);
+      router.push(body?.project?.id ? projectHref(body.project.id) : "/dashboard/repositories");
+      router.refresh();
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : "Could not connect the repository. Please try again.";
+      setError(message);
+      notify(message, "error");
+    } finally {
       setPending(false);
-      setError(body?.error ?? "Could not connect the repository. Please try again.");
-      return;
     }
-
-    router.push(body?.project?.id ? projectHref(body.project.id) : "/dashboard");
-    router.refresh();
   }
 
   if (available.length === 0) {

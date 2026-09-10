@@ -2,6 +2,10 @@
 
 From nothing to a documentation pull request on your own repository.
 
+See [CONNECTIONS.md](CONNECTIONS.md) for production targets and the full service
+map. This guide configures local processes: backend on `localhost:4317`, web app
+on `localhost:3000`. Local environment files do not update Vercel or Railway.
+
 There are two halves and you do not need both. The **pipeline** is the five
 agents, the CLI, and the API server - that is enough to run docxy end to end.
 The **dashboard** is a Next.js app that renders runs in a browser; it is
@@ -23,7 +27,7 @@ mistake surfaces where you made it rather than four steps later.
 
 | You need | Why |
 |---|---|
-| **Node 20.11+** and **npm 11+** | `node --version` |
+| **Node 22.22.3+** and **npm 11+** | Supports the full app including Composio; production Vercel uses Node 24 |
 | **git** | The pipeline reads commits and writes branches with it |
 | A **Nebius Token Factory** API key | Serves every model. Free tier is enough - [get one](https://tokenfactory.nebius.com) |
 
@@ -204,6 +208,17 @@ tables are kept in a separate `auth` schema.
 ---
 
 ## Stage 4 - the dashboard (optional)
+
+The web app reads `web/.env.local`, independently of root `.env`. Match
+`DATABASE_URL` and `DOCXY_API_TOKEN` with your local backend, and keep
+`DOCXY_API_URL=http://localhost:4317`. Never assume a key added to root `.env`
+configures the web app.
+
+For Slack, Notion, Linear and Jira account connections, add `COMPOSIO_API_KEY`
+to `web/.env.local`, restart the web process, then authorize each service from
+**Dashboard → Integrations** as an organization owner or admin. See
+[COMPOSIO.md](COMPOSIO.md). Account connections do not yet send notifications,
+publish pages or create issues automatically.
 
 A Next.js app that renders runs, logs, per-role traces, and spend. It needs
 Postgres (Stage 3) because sign-in stores sessions there.

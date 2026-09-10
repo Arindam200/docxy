@@ -2,8 +2,9 @@
  * The integrations catalogue.
  *
  * Deliberately a static list rather than something the API reports: these are
- * product integrations - the services a team would connect docxy to - and all
- * but GitHub are still ahead of us. The pipeline's own dependencies (the
+ * product integrations - the services a team would connect docxy to. Composio
+ * account connections are enabled at request time; their workflows are still
+ * planned. The pipeline's own dependencies (the
  * harness, the model provider, the database) are infrastructure and live on
  * Synced, not here.
  *
@@ -14,12 +15,23 @@
 
 export type IntegrationStatus = "live" | "soon";
 
+export interface IntegrationLiveStatus {
+  connected: boolean;
+  detail?: string;
+  href?: string;
+  unavailable?: boolean;
+}
+
+export type IntegrationConnections = Partial<Record<string, IntegrationLiveStatus>>;
+
 export interface CatalogEntry {
   /** Also the key into the brand-icon map. */
   id: string;
   name: string;
   category: string;
   summary: string;
+  /** Supporting context, revealed from the card’s info control. */
+  note?: string;
   /** Button label. Rendered disabled unless the entry is live. */
   action: string;
   status: IntegrationStatus;
@@ -33,7 +45,7 @@ export const CATALOG: CatalogEntry[] = [
     name: "GitHub",
     category: "Source",
     summary:
-      "Install the App on your repositories and every push opens a documentation pull request, authored by the bot.",
+      "Generate documentation pull requests from connected repositories.",
     action: "Install GitHub App",
     status: "live",
   },

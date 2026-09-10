@@ -4,6 +4,18 @@ Current implementation reference, checked against the working tree on September 
 
 ## Where to look
 
+For deployment health, first run `node scripts/check-deploy-targets.mjs`.
+Production logs belong to Vercel `docxy` and Railway **`tender-laughter/docxy`**;
+see [CONNECTIONS.md](CONNECTIONS.md) for the complete service map. The old
+`refreshing-tenderness/docxy` crash is a retired deployment, not the live backend.
+Historical failed GitHub statuses can remain on old commits after that service
+is disconnected.
+
+`/health` verifies that the backend responds and reports model/sandbox
+configuration. It does not execute a model request, launch a sandbox or certify
+a documentation run. Composio connection status belongs in **Integrations**;
+an API key does not prove that an organization authorized a provider account.
+
 Every view below is scoped to one project, because every one of them answers a
 question about a single repository. The organization level is the project list
 at `/dashboard`. The former organization-wide routes - `/dashboard/activity`,

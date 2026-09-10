@@ -7,7 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Production deployment routing now uses Vercel `docxy` and Railway
+  `tender-laughter/docxy`, both connected to `Arindam200/docxy` on `main`.
+  The obsolete `refreshing-tenderness/docxy` harness was disconnected from GitHub.
+- Mastra runs the five agents inside the backend, with Nebius models and
+  Daytona validation. A standalone TrueForge server is no longer part of the
+  deployment. The GitHub pull request is the review surface.
+
 ### Added
+
+- Composio account connection setup for Slack, Notion, Linear and Jira, scoped
+  to organizations and managed by owners/admins. Automated service workflows
+  remain planned; deploying the UI and authorizing accounts are separate steps.
+- A shared [connection map](guides/CONNECTIONS.md), contributor/agent deployment
+  instructions and a read-only `scripts/check-deploy-targets.mjs` check for
+  production routing, matching revisions and service health.
+
+### Original implementation (historical)
 
 - Five-role documentation pipeline on the TrueForge harness: Change Analyst,
   Impact Mapper, Docs Updater, Changelog Author, and Coordinator
