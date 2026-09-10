@@ -52,5 +52,6 @@
     "typescript": "^5.7.2"
   },
   "main": "dist/server/standalone.js",
-  "packageManager": "npm@11.17.0"
+  "packageManager": "npm@11.17.0",
+  "license": "SEE LICENSE IN LICENSE"
 }

@@ -215,11 +215,11 @@ function UpgradeButton() {
             </button>
           </div>
           <p className="mt-2 text-xs leading-relaxed text-muted">
-            Docxy is open source. Self-host the pipeline and dashboard with your own
-            infrastructure, or explore the proposed hosted plans.
+            Self-host Docxy for personal, non-commercial use. Business use requires
+            a separate written license.
           </p>
           <a
-            href={`${site.repo}/blob/main/guides/DEPLOY.md`}
+            href={site.docs}
             target="_blank"
             rel="noreferrer"
             className="mt-3 block border border-rule bg-surface-2 px-3 py-1.5 text-center text-xs font-medium transition-colors hover:border-accent hover:text-accent"

@@ -75,7 +75,7 @@ export function Footer() {
 
       <div className="pt-8 border-t border-zinc-100 flex flex-col sm:flex-row items-center justify-between gap-4">
         <p className="text-xs text-zinc-400">
-          © {new Date().getFullYear()} Docxy. Released under the MIT License.
+          © {new Date().getFullYear()} Docxy. Source available for personal, non-commercial use.
         </p>
         <p className="text-xs text-zinc-400">
           You decide what gets merged.

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Replaced MIT for new versions with the Docxy Personal Use License 1.0.
+  Personal, non-commercial use is permitted; resale and business or organizational
+  use require separate written permission. Earlier MIT grants remain unchanged.
+
 - Production deployment routing now uses Vercel `docxy` and Railway
   `tender-laughter/docxy`, both connected to `Arindam200/docxy` on `main`.
   The obsolete `refreshing-tenderness/docxy` harness was disconnected from GitHub.
