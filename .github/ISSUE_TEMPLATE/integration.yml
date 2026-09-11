@@ -1,0 +1,47 @@
+name: Docs platform or integration support
+description: Ask for support for a documentation framework, host, or service.
+labels: ["enhancement", "integration"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this for documentation platforms such as Mintlify, GitBook, or
+        Docusaurus, and for services such as Slack or Notion.
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform or service
+      placeholder: Mintlify
+    validations:
+      required: true
+
+  - type: input
+    id: docs-link
+    attributes:
+      label: Link to its documentation
+      description: The configuration reference or API docs a contributor would need.
+    validations:
+      required: true
+
+  - type: textarea
+    id: shape
+    attributes:
+      label: How its content is structured
+      description: >
+        File formats, where navigation or sidebar structure is defined, and any
+        config file that must stay in sync when a page is added or renamed.
+    validations:
+      required: true
+
+  - type: textarea
+    id: today
+    attributes:
+      label: What Docxy does with it today
+      description: Run Docxy against such a repository and describe where it gets things wrong.
+
+  - type: input
+    id: example
+    attributes:
+      label: Example public repository
+      description: A repository using this platform, so a contributor can test against it.

@@ -1,0 +1,73 @@
+name: ci
+
+# The gate. Nothing here talks to a model, a database, or a sandbox, so it needs
+# no secrets and runs on every push and every pull request — including from a
+# fork, where secrets would not be available anyway.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A second push to the same branch makes the first one's result irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pipeline:
+    name: Lint, types, tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - run: npm ci
+
+      # Oxlint plus the anti-slop plugin in tools/oxlint/anti-slop. Fifteen rules
+      # at `error`, so this fails the job rather than printing advice.
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # 303 checks, no network and no model. The code-mode sandbox checks detect
+      # their isolation backend and skip with a printed reason where there is
+      # none, so this passes on a runner without bubblewrap rather than lying.
+      - name: Test
+        run: npm test
+
+  dashboard:
+    name: Dashboard
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      # Deliberately no environment. The dashboard is written to come up without
+      # DATABASE_URL or BETTER_AUTH_SECRET and render a setup notice instead of
+      # crashing, so a build that needs them here is a regression worth failing
+      # on — not a reason to paste dummy secrets into CI.
+      - name: Build
+        run: npx next build

@@ -2,7 +2,7 @@
 
 # Docxy
 
-[Website](https://docxy.app) · [Issues](https://github.com/Arindam200/docxy/issues) · [Personal-use license](LICENSE)
+[Website](https://docxy.app) · [Issues](https://github.com/Arindam200/docxy/issues) · [License](LICENSING.md)
 
 **Keep documentation and changelogs in sync with your code.**
 
@@ -102,35 +102,41 @@ platform environment settings.
 
 ## Contributing
 
-Issues, focused pull requests, and documentation improvements are welcome.
-Include reproduction steps for bugs and relevant validation results in PRs.
+Contributions are welcome, from a typo fix to a new documentation platform.
+Start with [CONTRIBUTING.md](CONTRIBUTING.md) for setup, the checks to run, and
+how pull requests are reviewed. Good entry points are the
+[good first issue](https://github.com/Arindam200/docxy/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+and [help wanted](https://github.com/Arindam200/docxy/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22)
+issues. Comment on one to claim it.
 
 ```bash
 # Backend checks, from the repository root
-npm run build
 npm run lint
+npm run typecheck
 npm test
 
 # Dashboard checks
-cd web
-npm ci
-npm run build
-npm run lint
-npm test
+cd web && npm ci && npm run lint && npm run typecheck && npm run build && npm test
 ```
 
-Regular tests do not call live providers. The separate web `test:billing` command
-writes to a real database; use a dedicated development database for it.
+No check calls a live provider, so they run offline and on a fork. The separate
+web `test:billing` command writes to a real database; use a dedicated
+development database for it.
 
 Code lives in `src/` (backend and CLI) and `web/` (dashboard). Agent writing
 instructions live in `skills/`. Configuration options are documented in the
 [backend](.env.example) and [web](web/.env.local.example) environment templates.
+Please read the [code of conduct](CODE_OF_CONDUCT.md), and report security
+problems through [SECURITY.md](SECURITY.md) rather than a public issue.
 
 ## License
 
-[Docxy Personal Use License 1.0](LICENSE) © Arindam Majumder.
+Docxy is free software under the [GNU AGPL v3](LICENSE).
+Copyright (c) 2026 Arindam Majumder.
 
-Source is available for personal, non-commercial use only. Sales, paid hosting,
-client work, and business or organizational use require a separate written
-license. These restrictions also apply to modified versions. Earlier MIT
-releases retain their original permissions.
+Use it for anything, including commercially. If you run a modified Docxy as a
+service other people use, the AGPL requires you to offer those users your
+modified source. Personal use, internal company use, and contributing carry no
+such obligation. Earlier releases under MIT or the
+[personal-use license](licenses/PERSONAL-USE-1.0.txt) keep their original terms,
+as recorded in [LICENSING.md](LICENSING.md).

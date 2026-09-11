@@ -9,9 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Replaced MIT for new versions with the Docxy Personal Use License 1.0.
-  Personal, non-commercial use is permitted; resale and business or organizational
-  use require separate written permission. Earlier MIT grants remain unchanged.
+- Relicensed new versions under the GNU AGPL v3 (AGPL-3.0-only), making Docxy
+  open source. Commercial use is permitted; running a modified version as a
+  network service requires offering its source to that service's users. The
+  interim Docxy Personal Use License 1.0 is archived at
+  `licenses/PERSONAL-USE-1.0.txt`, and earlier MIT and personal-use grants remain
+  unchanged for the versions they shipped with. See
+  [LICENSING.md](LICENSING.md).
 
 - Production deployment routing now uses Vercel `docxy` and Railway
   `tender-laughter/docxy`, both connected to `Arindam200/docxy` on `main`.
@@ -21,6 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deployment. The GitHub pull request is the review surface.
 
 ### Added
+
+- Contributor documentation and intake: [CONTRIBUTING.md](CONTRIBUTING.md),
+  [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md), [SECURITY.md](SECURITY.md),
+  [CLA.md](CLA.md), structured issue forms, and a pull request template. A CLA
+  check runs on pull requests and records signatures once per contributor.
 
 - Composio account connection setup for Slack, Notion, Linear and Jira, scoped
   to organizations and managed by owners/admins. Automated service workflows

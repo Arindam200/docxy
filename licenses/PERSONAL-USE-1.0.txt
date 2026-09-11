@@ -1,0 +1,87 @@
+Docxy Personal Use License 1.0
+
+Copyright (c) 2026 Arindam Majumder. All rights reserved.
+
+1. Scope
+
+This license applies to the Docxy source code, executables, and accompanying
+documentation provided with this license (the "Software"), including modified
+versions and portions of the Software, except material identified as subject to
+separate third-party terms.
+
+2. Personal use permission
+
+Subject to all terms below, the copyright holder grants you, as an individual,
+a worldwide, non-exclusive, royalty-free license to view, download, copy, run,
+and modify the Software solely for your own personal, non-commercial use.
+Personal use includes private learning, experimentation, and hobby projects
+that do not serve a business or commercial purpose.
+
+You may share the source code, including your modifications, without charge
+under this same license for recipients' permitted personal use. Include this
+license and all copyright notices, identify modifications, and do not grant
+recipients broader rights. You may submit contributions to the Docxy project.
+No other distribution or sublicensing rights are granted.
+
+3. Prohibited uses
+
+Without a separate written license from the copyright holder, you may not:
+
+(a) Use the Software for, on behalf of, or in the operations of any company,
+    employer, client, organization, or other entity. Internal use, evaluation
+    for business adoption, and use without earning revenue are included.
+(b) Use the Software in employment, consulting, contracting, paid work, or
+    other commercial activity, or to develop, maintain, or support a business
+    product or service.
+(c) Sell, resell, rent, lease, sublicense, or charge for access to the Software
+    or a modified version, whether standalone, bundled, or incorporated into
+    another product.
+(d) Offer the Software or its functionality to others as a hosted service,
+    managed service, API, or software-as-a-service offering, whether paid or
+    free. Hosting solely for your own permitted personal use is allowed.
+(e) Use the Software to generate revenue or obtain commercial advantage,
+    including through advertising, paid access, or commercialization of a
+    product or service that incorporates the Software.
+(f) Remove or obscure copyright notices or these license restrictions.
+
+These restrictions apply equally to modified versions and to use of portions
+of the Software. Making a service free or modifying the Software does not
+exempt it from these terms.
+
+4. Reserved rights and separate permissions
+
+All rights not expressly granted are reserved. This license does not grant
+rights to Docxy names, logos, or trademarks. Business or commercial use requires
+a separate written license from the copyright holder; no such permission is
+implied by public source availability, a contribution, or payment to an
+unrelated hosting or model provider.
+
+This is a source-available personal-use license, not an open-source license.
+
+5. Third-party material and earlier releases
+
+Third-party dependencies and separately licensed files remain governed by their
+own licenses. This license does not replace or restrict rights granted under
+those licenses.
+
+This license applies to versions distributed with it. It does not revoke or
+change permissions already granted for earlier versions released under the MIT
+License. Those earlier versions remain usable under their original terms.
+
+6. Termination
+
+The permissions granted by this license terminate automatically if you violate
+its terms. Upon termination, stop using and distributing the Software and
+delete copies in your possession or control, except copies you are legally
+required to retain. Reinstatement requires the copyright holder's written
+permission. Termination does not affect rights independently granted under
+third-party licenses or the licenses of earlier releases.
+
+7. Disclaimer and limitation of liability
+
+To the maximum extent permitted by applicable law, the Software is provided
+"AS IS", without warranties of any kind, express or implied, including
+merchantability, fitness for a particular purpose, and noninfringement. The
+copyright holder and contributors are not liable for any claim, damages, or
+other liability arising from the Software or its use, whether in contract,
+tort, or otherwise.

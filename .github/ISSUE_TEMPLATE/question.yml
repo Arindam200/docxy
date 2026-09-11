@@ -1,0 +1,23 @@
+name: Question or help
+description: You are stuck, or something is unclear.
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check [guides/LOCAL-SETUP.md](https://github.com/Arindam200/docxy/blob/main/guides/LOCAL-SETUP.md)
+        first. It covers setup in stages, and has a troubleshooting section.
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+    validations:
+      required: true
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: What you have tried
+      description: Commands you ran and what they printed. Redact anything private.
+      render: text

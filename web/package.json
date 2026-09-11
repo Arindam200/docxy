@@ -44,5 +44,5 @@
     "tsx": "^4.23.13",
     "typescript": "^5"
   },
-  "license": "SEE LICENSE IN ../LICENSE"
+  "license": "AGPL-3.0-only"
 }

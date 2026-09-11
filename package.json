@@ -53,5 +53,5 @@
   },
   "main": "dist/server/standalone.js",
   "packageManager": "npm@11.17.0",
-  "license": "SEE LICENSE IN LICENSE"
+  "license": "AGPL-3.0-only"
 }
