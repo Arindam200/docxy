@@ -59,6 +59,13 @@ jobs:
 
       - run: npm ci
 
+      # next-env.d.ts and the route types under .next/types are generated, and
+      # gitignored on Next's own advice, so a fresh checkout has neither. Without
+      # this step every non-code import fails to resolve and the typecheck below
+      # reports a missing module for each image.
+      - name: Generate Next types
+        run: npx next typegen
+
       - name: Typecheck
         run: npm run typecheck
 
