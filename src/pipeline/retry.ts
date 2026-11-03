@@ -38,12 +38,23 @@ diff, the classification, or the impact map back to yourself. Do not deliberate
 in prose. Decide, then answer and stop. Keep every string field to the length the schema
 asks for and no longer.`.trim();
 
+/**
+ * What a stalled turn is told on its next attempt.
+ *
+ * A stall is the model going quiet mid-turn until the idle watch gave up on
+ * it, which is usually the provider rather than the prompt - so this asks for
+ * less deliberation and nothing else. It used to forbid tools as well, written
+ * for a harness that stalled by pausing for approvals; a code-mode turn's
+ * answer *is* its tool calls, and told not to make any it would "finish" with
+ * its schema's empty defaults and no edits at all.
+ */
 const DIRECTNESS = `
-## Retry - your previous attempt never finished
+## Retry - your previous attempt went quiet
 
-The last attempt stalled without producing a final answer. Answer directly from
-what you have been given. Do not call tools, do not spawn subagents, and do not
-ask questions - no human is attached. Answer and stop.`.trim();
+The last attempt stopped producing output part-way through and was abandoned;
+nothing from it was kept. Start again from what you have been given, keep any
+reasoning brief, and answer as soon as you can. Do not ask questions - no human
+is attached.`.trim();
 
 function repairNudge(raw: string): string {
   const excerpt = raw.length > 1200 ? `${raw.slice(0, 1200)}\n… [truncated]` : raw;
@@ -114,8 +125,16 @@ export function planRetry(
         freshSession: true,
         nudge: DIRECTNESS,
         delayMs: 500,
-        reason: 'the turn never settled - retrying on a fresh session, tools discouraged',
+        reason: 'the model went quiet mid-turn - retrying on a fresh session',
       };
+
+    case 'provider-rejected':
+      // Like a guardrail's verdict, a refused key or an unknown model is the
+      // same refusal on every attempt; unlike it, the fix is a setting.
+      return none(
+        'the provider refused the request outright - check NEBIUS_API_KEY and the model ' +
+          'configured for this role (DOCXY_MODEL_*); retrying would be refused the same way',
+      );
 
     case 'parse-error':
       // The first repair stays in-session on purpose: the model has the context

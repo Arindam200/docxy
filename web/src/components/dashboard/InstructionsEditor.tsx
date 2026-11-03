@@ -2,15 +2,25 @@
 
 import { useToast } from "./Toast";
 import { useState } from "react";
+import { ORGANIZATION_HEADER } from "@/lib/organization-guard";
+
+const SAVE_FAILED = "Could not save instructions. Please try again.";
 
 /**
  * Editor for the standing custom instructions handed to the docs agent.
  * Saves through the BFF to PUT /api/instructions on the pipeline server.
+ *
+ * The save names the organization these instructions were loaded for. One
+ * organization's house style typed into a tab that has since been switched to
+ * another would otherwise replace the other's, wholesale and without a trace,
+ * so the proxy refuses it and this says why.
  */
 export function InstructionsEditor({
+  organizationId,
   initial,
   updatedAt,
 }: {
+  organizationId: string;
   initial: string;
   updatedAt: string | null;
 }) {
@@ -18,24 +28,37 @@ export function InstructionsEditor({
   const [savedValue, setSavedValue] = useState(initial);
   const notify = useToast();
   const [state, setState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  // What went wrong, in the proxy's words when it gave any. "Is the API up?"
+  // is the wrong question to ask somebody whose organization changed.
+  const [failure, setFailure] = useState(SAVE_FAILED);
   const dirty = value !== savedValue;
 
   async function save() {
     if (!dirty || state === "saving") return;
     setState("saving");
+    // The proxy's own words when it gave any, and the generic message when the
+    // request never got that far - "Failed to fetch" helps nobody.
+    let message = SAVE_FAILED;
     try {
       const res = await fetch("/api/docxy/instructions", {
         method: "PUT",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", [ORGANIZATION_HEADER]: organizationId },
         body: JSON.stringify({ instructions: value }),
       });
-      if (!res.ok) throw new Error(String(res.status));
+      if (!res.ok) {
+        // SAFETY: only `error` is read, as an optional string, and a body that
+        // is not that shape - or not JSON - falls back to the generic message.
+        const body = (await res.json().catch(() => null)) as { error?: string } | null;
+        if (body?.error) message = body.error;
+        throw new Error(message);
+      }
       setSavedValue(value);
       setState("saved");
       notify("Instructions saved. Applies from the next run.");
     } catch {
+      setFailure(message);
       setState("error");
-      notify("Could not save instructions. Please try again.", "error");
+      notify(message, "error");
     }
   }
 
@@ -58,7 +81,7 @@ export function InstructionsEditor({
         <p className="text-xs text-muted" aria-live="polite">
           {state === "saving" && "Saving…"}
           {state === "saved" && "Saved. Applies from the next run."}
-          {state === "error" && <span className="text-danger">Could not save. Is the API up?</span>}
+          {state === "error" && <span className="text-danger">{failure}</span>}
           {state === "idle" &&
             (dirty
               ? "Unsaved changes"

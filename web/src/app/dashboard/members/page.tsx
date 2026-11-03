@@ -20,8 +20,12 @@ export const dynamic = "force-dynamic";
  * member for that reason, and editable only by owners and admins.
  */
 export default async function MembersPage() {
-  const organizationId = await activeOrganizationId();
-  const user = await getSessionUser(await headers());
+  // Side by side: both read the same memoised session, and neither needs the
+  // other's answer to ask its own question.
+  const [organizationId, user] = await Promise.all([
+    activeOrganizationId(),
+    getSessionUser(await headers()),
+  ]);
   // The dashboard layout already refuses an unsigned request, so this is the
   // narrow window where a session ended between the layout and this page.
   if (!user) redirect("/login?next=/dashboard/members");
@@ -43,6 +47,7 @@ export default async function MembersPage() {
         lede="Everyone here can see this organization's repositories, runs, and drafted documentation."
       />
       <MembersPanel
+        organizationId={organizationId}
         members={members}
         invitations={invitations}
         viewerId={user.id}

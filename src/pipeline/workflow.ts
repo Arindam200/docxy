@@ -28,7 +28,7 @@ import {
   type CoordinatorVerdict,
 } from '../agents/schemas.js';
 import { normalizeConfidence } from '../agents/parse.js';
-import { buildDocsOutline, readDocExcerpts, readRepoFile } from '../git/repo.js';
+import { buildDocsOutline, listDocs, readDocExcerpts, readRepoFile } from '../git/repo.js';
 import { renderKnowledgeMap, type KnowledgeMap } from './state.js';
 import { renderProjectMemory, type ProjectMemory } from './project-memory.js';
 import { draftWithCodeMode } from './code-mode.js';
@@ -177,7 +177,9 @@ const impactMapping = createStep({
     const { classification } = inputData;
 
       // 2. Impact Mapper --------------------------------------------------------
-      const { outline } = await buildDocsOutline(docsTree.path, config.docs.roots);
+      const { outline, paths: outlinePaths } = await buildDocsOutline(docsTree.path, config.docs.roots, {
+        priority: outlinePriority(priorMap, classification.changedSymbols),
+      });
       const impact = await invoke<ImpactMap>(
         IMPACT_MAPPER,
         [
@@ -204,10 +206,31 @@ const impactMapping = createStep({
           diffText,
         ].join('\n'),
       );
-      impact.docs = (impact.docs ?? []).map((d) => ({
-        ...d,
-        confidence: normalizeConfidence(d.confidence),
-      }));
+      /*
+       * Only paths from the outline count as impacted.
+       *
+       * The prompt says every outline path is real and not to invent others,
+       * and a model that reads a diff can still be talked out of that by the
+       * diff. Whatever survives here is what the drafting roles are shown and
+       * what code mode lets a program edit, so a path that is not a document
+       * under the configured roots stops here rather than becoming an edit.
+       */
+      const outlineSet = new Set(outlinePaths);
+      const mapped = impact.docs ?? [];
+      const outsideOutline = [...new Set(mapped.map((d) => d.path).filter((path) => !outlineSet.has(path)))];
+      if (outsideOutline.length > 0) {
+        ctx.hooks.onRoleEvent?.('impact-mapper', {
+          at: new Date().toISOString(),
+          kind: 'guardrail',
+          text: `dropped ${outsideOutline.length} path(s) not in the documentation outline: ${outsideOutline.slice(0, 5).join(', ')}`,
+        });
+      }
+      impact.docs = mapped
+        .filter((d) => outlineSet.has(d.path))
+        .map((d) => ({
+          ...d,
+          confidence: normalizeConfidence(d.confidence),
+        }));
       impact.code = impact.code ?? [];
       impact.symbolIndex = impact.symbolIndex ?? {};
       run.impact = impact;
@@ -477,7 +500,10 @@ const validation = createStep({
     const { classification, impact, docs, changelog } = inputData;
 
       // 4. Validation -----------------------------------------------------------
-      const firstPass = await applyDocEdits(docsTree.path, docs);
+      // The documentation outline, read again from the tree the edits apply to:
+      // the only files an edit may touch. See `applyDocEdits`.
+      const editable = new Set(await listDocs(docsTree.path, config.docs.roots));
+      const firstPass = await applyDocEdits(docsTree.path, docs, editable);
 
       /**
        * One targeted second look at the edits that did not anchor.
@@ -489,7 +515,7 @@ const validation = createStep({
        * than the first pass did.
        */
       const repair = config.agent.repairAnchors
-        ? await repairAnchors(ctx, docsTree.path, docs, firstPass)
+        ? await repairAnchors(ctx, docsTree.path, docs, firstPass, editable)
         : { docs, applied: firstPass };
       if (repair.attempted) {
         hooks.onRoleEvent?.('docs-updater', {
@@ -504,6 +530,11 @@ const validation = createStep({
       const applied = repair.applied;
       docs.edits = repair.docs.edits;
       docs.skipped = repair.docs.skipped;
+      // `docs` is Mastra's parsed copy of this step's input, not the object the
+      // drafting step put on the run - so the repair has to be handed back to
+      // the record explicitly, or the dashboard, project memory and a later
+      // `rebuildProposedFiles` all keep the edits that failed to anchor.
+      run.docs = docs;
       const changelogFile = changelog?.entry
         ? await applyChangelogEntry(docsTree.path, config.docs.changelogPath, changelog)
         : null;
@@ -710,4 +741,26 @@ export async function runRoles(
 /** The workflow, registered under the name `runRoles` looks it up by. */
 export function pipelineWorkflows() {
   return { docsPipeline: docsPipelineWorkflow };
+}
+
+/**
+ * Which documentation files keep their headings when the outline is too large
+ * to show whole: the ones the symbol map already ties to what this commit
+ * changed, then any file the map knows about at all. A file mapped before is
+ * far likelier to be affected again than one picked by alphabetical order.
+ */
+export function outlinePriority(
+  map: KnowledgeMap,
+  changedSymbols: readonly string[],
+): (path: string) => number {
+  const scores = new Map<string, number>();
+  const changed = new Set(changedSymbols);
+  for (const [symbol, sections] of Object.entries(map.symbols)) {
+    const weight = changed.has(symbol) ? 100 : 1;
+    for (const section of sections) {
+      const path = section.split('#')[0] ?? '';
+      if (path) scores.set(path, (scores.get(path) ?? 0) + weight);
+    }
+  }
+  return (path) => scores.get(path) ?? 0;
 }

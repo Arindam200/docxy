@@ -1,12 +1,10 @@
 import type { NextRequest } from "next/server";
-import {
-  authRequired,
-  getActiveOrganizationId,
-  getMemberOrganizationId,
-  getSessionUser,
-} from "@/lib/auth";
+import { authRequired, getMemberOrganizationId, getSessionUser } from "@/lib/auth";
 import { apiHeaders } from "@/lib/docxy";
 import { authReady } from "@/lib/env";
+import { getViewerRole } from "@/lib/members-store";
+import { ORGANIZATION_HEADER, STALE_ORGANIZATION, staleWrite } from "@/lib/organization-guard";
+import { MANAGERS_ONLY, managersOnly, writeAllowed } from "@/lib/proxy-access";
 
 /**
  * Backend-for-frontend pass-through to the docxy API server (Hono, port 4317).
@@ -41,7 +39,8 @@ const STREAM = "/api/events";
  *
  * `EventSource` reconnects on its own when the server closes the body, so a
  * bounded lifetime costs a reconnect rather than a gap: the client refreshes on
- * reconnection and picks up whatever it missed.
+ * reconnection when the gap was long or the feed was busy, which is when it
+ * could have missed something - see `refreshOnOpen` in lib/live-updates.ts.
  */
 const STREAM_SECONDS = Number(process.env.DOCXY_STREAM_SECONDS ?? 55);
 
@@ -54,6 +53,29 @@ const STREAM_SECONDS = Number(process.env.DOCXY_STREAM_SECONDS ?? 55);
 export const maxDuration = 60;
 
 /**
+ * How long an ordinary read may take upstream before this answers for it.
+ *
+ * Reads are listings and records, and one that has not come back in ten
+ * seconds is a pipeline that is down rather than one that is busy.
+ */
+const READ_TIMEOUT_MS = 10_000;
+
+/**
+ * How long a write may take upstream.
+ *
+ * Writes are not reads that happen to change something. Connecting a project
+ * clones its repository, and publishing a run opens a pull request through
+ * GitHub's API - both of which routinely outlast ten seconds, and a timeout
+ * here does not stop the pipeline finishing the work. It only tells the browser
+ * the work failed, so it retries, and the second attempt finds the project
+ * already connected or the pull request already open.
+ *
+ * Five seconds under `maxDuration`, so that a write that really is stuck gets
+ * this route's own 502 rather than the platform's cut-off.
+ */
+const WRITE_TIMEOUT_MS = (maxDuration - 5) * 1000;
+
+/**
  * Upstream paths whose data belongs to one organization.
  *
  * The pipeline has no session. It authenticates this proxy with a shared token
@@ -63,8 +85,11 @@ export const maxDuration = 60;
  * parameter: a signed-in operator could name somebody else's organization and
  * read, create, or delete inside it.
  *
- * The id is now taken from the session and written over whatever arrived in the
- * query. The browser may still send one there; it simply does not count.
+ * The id is now taken from the session, confirmed against the member table,
+ * and written over whatever arrived in the query. The browser may still send
+ * one there; it simply does not count. A write must also say which organization
+ * its page was rendered for - see `lib/organization-guard.ts` - and that may
+ * refuse the write, but it never chooses the tenant either.
  *
  * Note what that does *not* cover. Only the query string is rewritten - request
  * bodies are forwarded byte for byte - so an upstream endpoint that reads the
@@ -126,10 +151,11 @@ const BROWSER_MAY_NOT_WRITE = ["/api/installations"];
  * holding; and the lifetime is bounded on purpose, because a connection that
  * never ends is a permission that is never re-checked.
  *
- * The membership check is the other difference. A per-request read can lean on
- * the session's `activeOrganizationId`, which is written once and trusted; a
- * connection that outlives the request cannot, so this one asks the member
- * table whether the account is still in the organization it named.
+ * The membership check is the same one every proxied request makes now - the
+ * session's `activeOrganizationId` is written once and outlives a removal, so
+ * the member table is asked each time. What differs is how often "each time"
+ * comes round: a request asks once and is over, and a stream asks once and then
+ * stays open, which is why its lifetime is bounded.
  */
 async function openStream(request: NextRequest): Promise<Response> {
   const search = new URLSearchParams(request.nextUrl.search);
@@ -192,6 +218,9 @@ async function openStream(request: NextRequest): Promise<Response> {
 }
 
 async function forward(request: NextRequest, method: string): Promise<Response> {
+  // Who is asking, once sign-in has said so. Null when this deployment runs
+  // without sign-in, where there are no organizations and so no roles.
+  let userId: string | null = null;
   if (authRequired()) {
     // Sign-in is required but cannot be performed: the deployment is missing
     // DATABASE_URL or BETTER_AUTH_SECRET. Refusing is the only safe reading -
@@ -210,19 +239,21 @@ async function forward(request: NextRequest, method: string): Promise<Response> 
     }
 
     /*
-     * Signing in is the whole check now.
+     * Signing in is the whole check at this step.
      *
      * It used to also require membership of a deployment-wide operator
      * allowlist, which was the only thing keeping one account out of another's
      * data - and which made the product unusable by anyone who signed up. The
      * boundary moved down instead: every route that carries work product is
      * organization-scoped below, so being signed in gets a caller as far as
-     * their own organization and no further.
+     * their own organization and no further - and a write that reshapes that
+     * organization further asks for an owner or admin.
      */
     const user = await getSessionUser(request.headers).catch(() => null);
     if (!user) {
       return Response.json({ error: "Sign in to use the docxy API." }, { status: 401 });
     }
+    userId = user.id;
   }
 
   // `/api/docxy/<x>` maps to the pipeline's `/api/<x>`, not to `/<x>`.
@@ -233,6 +264,15 @@ async function forward(request: NextRequest, method: string): Promise<Response> 
   // `/instructions`, which does not exist. Saving standing instructions from
   // the dashboard has therefore never worked; it 404'd behind an error toast.
   const pathname = request.nextUrl.pathname.replace(/^\/api\/docxy/, "/api");
+
+  // Every check below compares this string, and upstream routes on its decoded
+  // form. `%72uns` is not `/api/runs` to `organizationScoped` but is to Hono, so
+  // a percent-escape, a dot segment or an empty segment would let a caller name
+  // an organization-scoped route without the proxy noticing. Upstream ids are
+  // UUIDs; nothing legitimate needs any of those characters.
+  if (!/^\/api(\/[A-Za-z0-9_-]+)*$/.test(pathname)) {
+    return Response.json({ error: "Not a docxy API path." }, { status: 400 });
+  }
 
   if (method !== "GET" && method !== "HEAD" && BROWSER_MAY_NOT_WRITE.includes(pathname)) {
     return Response.json(
@@ -257,12 +297,33 @@ async function forward(request: NextRequest, method: string): Promise<Response> 
 
   // The tenant is decided here or not at all - see ORGANIZATION_SCOPED above.
   if (organizationScoped(pathname)) {
-    const organizationId = await getActiveOrganizationId(request.headers).catch(() => null);
+    // Confirmed against the member table rather than read off the session: a
+    // removed member's session goes on naming the organization for as long as
+    // it lives, and this is the only thing standing between that session and
+    // the organization's runs.
+    const organizationId = await getMemberOrganizationId(request.headers).catch(() => null);
     if (!organizationId) {
       return Response.json(
-        { error: "No active organization. Create one before using the dashboard." },
+        { error: "No active organization membership. Create or join one to use the dashboard." },
         { status: 403 },
       );
+    }
+
+    // A stale tab, not an intruder: the session moved to another organization
+    // after this page was drawn. Refused rather than written, because the
+    // session's organization is not the one the person was looking at.
+    if (staleWrite(method, request.headers.get(ORGANIZATION_HEADER), organizationId)) {
+      return Response.json({ error: STALE_ORGANIZATION }, { status: 409 });
+    }
+
+    // Membership gets a caller into the organization; it does not let them
+    // reshape it. Asked only of writes that need it, so reads and runs cost
+    // no extra query - see lib/proxy-access.ts for which writes those are.
+    if (managersOnly(method, pathname)) {
+      const role = userId ? await getViewerRole(organizationId, userId).catch(() => null) : null;
+      if (!writeAllowed(method, pathname, role)) {
+        return Response.json({ error: MANAGERS_ONLY }, { status: 403 });
+      }
     }
 
     // The query string is the one place the tenant travels, for reads and
@@ -283,7 +344,9 @@ async function forward(request: NextRequest, method: string): Promise<Response> 
       headers: apiHeaders({ "content-type": "application/json" }),
       body: body?.byteLength ? body : undefined,
       cache: "no-store",
-      signal: AbortSignal.timeout(10_000),
+      signal: AbortSignal.timeout(
+        method === "GET" || method === "HEAD" ? READ_TIMEOUT_MS : WRITE_TIMEOUT_MS,
+      ),
     });
     return new Response(upstream.body, {
       status: upstream.status,

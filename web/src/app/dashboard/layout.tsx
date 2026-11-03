@@ -60,11 +60,21 @@ async function currentIdentity(): Promise<DashboardIdentity | null> {
   const user = await getSessionUser(requestHeaders);
   if (!user) redirect("/login?next=/dashboard");
 
-  const organizations = await getUserOrganizations(user.id);
-  const route = resolveOrganization(
-    organizations,
-    await getActiveOrganizationId(requestHeaders),
-  );
+  // The session is already read, and memoised, so this is a field rather than
+  // a second round trip.
+  const claimed = await getActiveOrganizationId(requestHeaders);
+
+  // The project list is asked for alongside the memberships rather than after
+  // them, for the organization the session *claims*. Nothing is shown before
+  // the claim is confirmed: a route that comes back "ready" names exactly this
+  // id, and any other answer redirects and drops the list unread. Fails soft,
+  // like every other read here: the pipeline being down should render an
+  // offline page rather than a dashboard with no chrome on it.
+  const [organizations, projects] = await Promise.all([
+    getUserOrganizations(user.id),
+    claimed ? fetchProjects(claimed) : null,
+  ]);
+  const route = resolveOrganization(organizations, claimed);
 
   // Belonging to nothing is an account that has not finished onboarding: every
   // page below reads per-organization data, so there is nothing here for them
@@ -75,10 +85,6 @@ async function currentIdentity(): Promise<DashboardIdentity | null> {
   // is nothing to create. The session needs writing, which a Server Component
   // may not do, so a route handler does it and the browser comes back here.
   if (route.kind === "activate") redirect("/api/organization/activate?next=/dashboard");
-
-  // Fails soft, like every other read here: the pipeline being down should
-  // render an offline page rather than a dashboard with no chrome on it.
-  const projects = await fetchProjects(route.activeOrganizationId);
 
   return {
     user: {

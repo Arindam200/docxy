@@ -37,7 +37,7 @@ narrowing happens in the query rather than in the dashboard: the listing is
 capped, so a busy repository would otherwise crowd a quiet one out of the window
 entirely. A `projectId` outside the calling organization narrows to nothing.
 
-The Next.js dashboard does not yet subscribe to the backend event stream. Navigate or refresh to retrieve updated records. The bundled operator page has an event consumer; it is a separate interface. Remaining dashboard streaming work is in [LIVE-UPDATES-PLAN.md](LIVE-UPDATES-PLAN.md).
+The dashboard subscribes to the backend event stream through [LiveUpdates](../web/src/components/dashboard/LiveUpdates.tsx) on the overview, activity and run pages, and refreshes when a relevant run, queue, skip or webhook event arrives; see [LIVE-UPDATES-PLAN.md](LIVE-UPDATES-PLAN.md).
 
 ## What gets recorded
 
@@ -70,8 +70,15 @@ Use a full run ID for an export requiring all stored bodies; summary listings ar
 1. Open the run and inspect the failed role or validation check.
 2. Compare the role's prompt, raw output and parsed result. A timeout or token-limit error alone may not explain the underlying generation failure. Bodies may be missing on older records or failures that returned no usable output.
 3. Read validation details literally. A build over proposed files only does not certify that the complete documentation site builds. A skipped check supplies no positive evidence.
-4. Preserve the distinction between execution failure and a review concern. Successful roles remain visible when another role fails. A rejected or invalid proposal may still be published as a draft carrying its concerns.
-5. Use the PR as the human review surface. Stored approval metadata describes pipeline scrutiny; it is not a separate customer approval gate or permission to merge automatically.
+4. Read the failure kind before retrying anything by hand:
+   - `provider-rejected`: the model provider refused the request outright (HTTP 401, 402, 403 or 404). It is never retried, because a bad `NEBIUS_API_KEY` or a model id the provider does not serve fails the same way every time. Check those first.
+   - `stalled`: the stream went quiet for `DOCXY_ROLE_IDLE_SECONDS`. This is only detected when that setting is above 0, which is off by default: streamed turns currently report no token usage, so cost figures would read zero.
+   - `timeout`: a deadline expired. An attempt's own deadline is retried; once the run's whole budget (`DOCXY_RUN_TIMEOUT_SECONDS`) is spent, the run ends.
+   - `aborted`: the run was cancelled by its caller, which is a decision rather than a fault.
+   - `blocked`: a guardrail refused the input. It now means only that, since a timed-out turn is no longer misreported as `blocked`.
+5. A push with no run may have been skipped deliberately rather than lost. The project's Activity page lists pushes that triage or the allowance passed over, with the reason, and can document one anyway.
+6. Preserve the distinction between execution failure and a review concern. Successful roles remain visible when another role fails. A rejected or invalid proposal may still be published as a draft carrying its concerns.
+7. Use the PR as the human review surface. Stored approval metadata describes pipeline scrutiny; it is not a separate customer approval gate or permission to merge automatically.
 
 The relevant UI components are [RoleInspector](../web/src/components/dashboard/RoleInspector.tsx), [Waterfall](../web/src/components/dashboard/Waterfall.tsx), [TokenBreakdown](../web/src/components/dashboard/TokenBreakdown.tsx) and [SandboxTrail](../web/src/components/dashboard/SandboxTrail.tsx).
 

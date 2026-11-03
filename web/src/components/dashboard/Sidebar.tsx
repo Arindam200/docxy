@@ -6,13 +6,14 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   LuArrowLeft,
-  LuGithub,
-  LuGitBranch,
-  LuFolderOpen,
-  LuHouse,
-  LuPlug,
-  LuLogOut,
   LuChartLine,
+  LuCreditCard,
+  LuFolderOpen,
+  LuGitBranch,
+  LuGithub,
+  LuHouse,
+  LuLogOut,
+  LuPlug,
   LuScrollText,
   LuSettings,
   LuUsers,
@@ -63,6 +64,12 @@ const ORGANIZATION_NAV: NavItem[] = [
     match: (pathname) => pathname.startsWith("/dashboard/integrations"),
   },
   { href: "/dashboard/members", label: "Members", icon: <LuUsers /> },
+  {
+    href: "/dashboard/billing",
+    label: "Billing",
+    icon: <LuCreditCard />,
+    match: (pathname) => pathname.startsWith("/dashboard/billing"),
+  },
   {
     href: "/dashboard/settings",
     label: "Settings",

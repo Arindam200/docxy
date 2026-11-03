@@ -3,6 +3,7 @@ import { LuArrowRight, LuCircleAlert, LuPlus } from "react-icons/lu";
 import {
   fetchIntegrations,
   fetchObservability,
+  fetchProjectRollups,
   fetchProjects,
   fetchRepositories,
   fetchRuns,
@@ -11,7 +12,7 @@ import {
 } from "@/lib/docxy";
 import { activeOrganizationId } from "@/lib/organization";
 import { duration, timeAgo, tokens } from "@/lib/format";
-import { projectHref, projectRunHref, projectRuns, projectTitle, rollUp } from "@/lib/projects";
+import { projectHref, projectRunHref, projectStats, projectTitle } from "@/lib/projects";
 import { ApiOffline } from "@/components/dashboard/ApiOffline";
 import { Page, PageHead } from "@/components/dashboard/Page";
 import { StatCard } from "@/components/dashboard/StatCard";
@@ -40,12 +41,15 @@ export default async function OrganizationPage({
 }) {
   const notice = await searchParams;
   const organizationId = await activeOrganizationId();
-  const [result, runs, report, integrations, repositories] = await Promise.all([
+  const [result, runs, rollups, report, integrations, repositories] = await Promise.all([
     fetchProjects(organizationId),
-    // One organization-wide listing rather than one request per project. It
-    // feeds the activity list and, through `rollUp`, every project's own
-    // figures - a report per project would be N requests to draw one grid.
+    // One organization-wide listing, which is what the activity list below is.
+    // It used to be every card's figures as well, and was wrong for any project
+    // quiet enough to fall out of its fifty; it is now only their fallback.
     fetchRuns(organizationId),
+    // Each project counted over its own runs, in one request for the grid.
+    // Null on a backend from before the endpoint existed, mid-deploy.
+    fetchProjectRollups(organizationId),
     // No `projectId`, so this is the whole organization: the same aggregate a
     // project's Insights page shows, computed over every repository at once.
     fetchObservability(organizationId),
@@ -64,14 +68,19 @@ export default async function OrganizationPage({
     ? repositories.repositories.length
     : undefined;
 
-  // Each project's own numbers, from the one listing above, newest activity
-  // first so a project that just ran is the one at the top.
-  const summaries = projects
-    .map((project) => ({ project, stats: rollUp(projectRuns(project, list)) }))
+  // Each project's own numbers, newest activity first so a project that just
+  // ran is the one at the top. From the API's rollups, or rolled up from the
+  // listing above when this is a backend that cannot send them yet.
+  const summaries = projectStats(projects, rollups, list)
     .sort((a, b) =>
       (b.stats.latest?.startedAt ?? "").localeCompare(a.stats.latest?.startedAt ?? "") ||
       projectTitle(a.project).localeCompare(projectTitle(b.project)),
     );
+
+  // The cards have figures to show if either source answered. A failed listing
+  // with working rollups is still a grid worth drawing; it is the activity
+  // list that has nothing.
+  const counted = rollups !== null || online;
 
   const troubled = summaries.filter((entry) => entry.stats.needsAttention > 0);
   const attentionTotal = troubled.reduce((sum, entry) => sum + entry.stats.needsAttention, 0);
@@ -144,7 +153,7 @@ export default async function OrganizationPage({
         lede="Documentation activity and results across your organization."
       >
         <div className="flex items-center gap-4">
-          <LiveUpdates />
+          <LiveUpdates running={list.some((run) => run.status === "running")} />
           <Link
             href="/dashboard/projects/new"
             className="focus-ring inline-flex shrink-0 items-center gap-2 border border-accent-deep bg-accent-deep px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-accent-deep/85"
@@ -258,7 +267,7 @@ export default async function OrganizationPage({
           <ul className="grid gap-4 lg:grid-cols-2">
             {summaries.slice(0, 2).map(({ project, stats }) => (
               <li key={project.id} className="flex">
-                <ProjectCard project={project} stats={stats} online={online} />
+                <ProjectCard project={project} stats={stats} online={counted} />
               </li>
             ))}
           </ul>

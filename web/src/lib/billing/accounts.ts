@@ -12,12 +12,13 @@
  * already been resolved to an organization, and pass the ids they proved.
  */
 
-import { and, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq } from "drizzle-orm";
 import { entitlementsFor, type Entitlements, type PlanKey } from "@billing";
 import { billingAccounts, subscriptions } from "@billing/schema";
+import { member } from "@/db/schema";
 import { billingEnvironment } from "./config";
 import { getBillingDb } from "./db";
-import { freePeriodBounds } from "@billing/periods";
+import { usageWindow } from "@billing/periods";
 import { ensureUsagePeriod, remainingRuns, type UsagePeriodRow } from "./periods";
 
 export type BillingAccountRow = typeof billingAccounts.$inferSelect;
@@ -34,17 +35,29 @@ export type SubscriptionRow = typeof subscriptions.$inferSelect;
  *
  * Test and live mode get separate rows for the same organization, so a pilot
  * cannot write over live entitlements.
+ *
+ * The billing owner is the organization's owner, not whoever asked first. Any
+ * member can open the billing page, and the first one to do so used to become
+ * the one person allowed to spend the organization's money, permanently.
+ * `requestingUserId` is only the fallback for an organization with no owner on
+ * record, which is a deployment running without sign-in.
  */
 export async function ensureBillingAccount(
   organizationId: string,
-  ownerUserId: string,
+  requestingUserId: string,
 ): Promise<BillingAccountRow> {
-  const db = getBillingDb();
-  const environment = billingEnvironment();
+  // Read first: every billing page view lands here, and all but the first find
+  // the row already exists.
+  const found = await findBillingAccount(organizationId);
+  if (found) return found;
 
-  await db
+  await getBillingDb()
     .insert(billingAccounts)
-    .values({ organizationId, ownerUserId, environment })
+    .values({
+      organizationId,
+      ownerUserId: (await organizationOwner(organizationId)) ?? requestingUserId,
+      environment: billingEnvironment(),
+    })
     .onConflictDoNothing({
       target: [billingAccounts.organizationId, billingAccounts.environment],
     });
@@ -56,7 +69,22 @@ export async function ensureBillingAccount(
   return account;
 }
 
-/** This organization's billing account in the current environment, or null. */
+/**
+ * The longest-standing member holding the owner role, if any.
+ *
+ * Better Auth stores several roles as one comma-separated string, so the role
+ * is split rather than compared whole.
+ */
+async function organizationOwner(organizationId: string): Promise<string | null> {
+  const rows = await getBillingDb()
+    .select({ userId: member.userId, role: member.role })
+    .from(member)
+    .where(eq(member.organizationId, organizationId))
+    .orderBy(asc(member.createdAt));
+  const owner = rows.find((row) => row.role.split(",").some((role) => role.trim() === "owner"));
+  return owner?.userId ?? null;
+}
+
 export async function findBillingAccount(
   organizationId: string,
 ): Promise<BillingAccountRow | null> {
@@ -126,17 +154,16 @@ export async function resolveEntitlement(
   // A paid plan uses the provider's own period boundaries. Falling back to the
   // Free window when a paid subscription has not reported them yet keeps the
   // account metered rather than unmetered - an unknown period is not a licence.
-  const paidBounds =
-    subscription?.currentPeriodStart && subscription.currentPeriodEnd
-      ? { start: subscription.currentPeriodStart, end: subscription.currentPeriodEnd }
-      : null;
+  // `usageWindow` is shared with the API's admission check, so the period this
+  // page shows is the period runs are counted against.
+  const usage = usageWindow(account.createdAt, subscription);
 
   const period = await ensureUsagePeriod(getBillingDb(), {
     accountId: account.id,
     planKey: plan,
     seats: account.purchasedSeats,
-    bounds: paidBounds ?? freePeriodBounds(account.createdAt),
-    subscriptionId: paidBounds ? (subscription?.id ?? null) : null,
+    bounds: usage.bounds,
+    subscriptionId: usage.subscriptionId,
   });
 
   return {

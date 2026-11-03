@@ -1,0 +1,2 @@
+CREATE INDEX "projects_source_repo_lower" ON "projects" USING btree (lower("source_repo"));--> statement-breakpoint
+CREATE INDEX "run_reservations_project_commit" ON "billing"."run_reservations" USING btree ("project_id","commit_sha");

@@ -30,15 +30,25 @@ export type UsagePeriodRow = typeof usagePeriods.$inferSelect;
 /**
  * The row for this period, opening it if this is the first time anyone asked.
  *
- * The insert is `on conflict do nothing` against the unique period key rather
- * than a check followed by an insert: two runs starting at the same moment on a
- * new period would both find nothing and both grant an allowance. Losing the
- * race here means reading the winner's row, which is the right answer anyway.
+ * Read first, because almost every call finds the row already there: every
+ * view of the billing page, and every poll of the status endpoint the checkout
+ * return page makes every few seconds while it waits for a webhook. Writing on
+ * each of those - even an insert that conflicts and does nothing - is a write
+ * transaction spent learning what a select would have said.
+ *
+ * Only a missing row is inserted, and then `on conflict do nothing` against the
+ * unique period key rather than trusting the read: two runs starting at the
+ * same moment on a new period would both find nothing and both grant an
+ * allowance. Losing that race means reading the winner's row, which is the
+ * right answer anyway.
  */
 export async function ensureUsagePeriod(
   db: BillingDatabase,
   request: PeriodRequest,
 ): Promise<UsagePeriodRow> {
+  const existing = await findUsagePeriod(db, request);
+  if (existing) return existing;
+
   const entitlements = entitlementsFor(request.planKey, request.seats);
 
   await db
@@ -58,6 +68,19 @@ export async function ensureUsagePeriod(
       target: [usagePeriods.accountId, usagePeriods.planKey, usagePeriods.periodStart],
     });
 
+  const row = await findUsagePeriod(db, request);
+  if (!row) {
+    // The insert either wrote a row or collided with one. Neither leaves
+    // nothing behind, so this is a database that is not what it claims to be.
+    throw new Error("the usage period for this account could not be opened");
+  }
+  return row;
+}
+
+async function findUsagePeriod(
+  db: BillingDatabase,
+  request: PeriodRequest,
+): Promise<UsagePeriodRow | null> {
   const rows = await db
     .select()
     .from(usagePeriods)
@@ -69,14 +92,7 @@ export async function ensureUsagePeriod(
       ),
     )
     .limit(1);
-
-  const row = rows[0];
-  if (!row) {
-    // The insert either wrote a row or collided with one. Neither leaves
-    // nothing behind, so this is a database that is not what it claims to be.
-    throw new Error("the usage period for this account could not be opened");
-  }
-  return row;
+  return rows[0] ?? null;
 }
 
 /** What is left of an allowance. Reserved work counts against it before it finishes. */

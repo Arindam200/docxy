@@ -6,11 +6,12 @@ import type {
 } from '../types.js';
 import { readCommitDiff, renderDiffForPrompt } from '../git/diff.js';
 import { openDocsTree } from '../git/worktree.js';
-import { readRepoFile } from '../git/repo.js';
+import { listDocs, readRepoFile } from '../git/repo.js';
 import { databaseConfigured } from '../db/index.js';
 import { projectForCheckoutPath } from '../db/project-store.js';
 import { createRuntime, type AgentRuntime } from '../runtime/index.js';
 import { loadPrices } from '../pricing.js';
+import { triageCommit, type TriageVerdict } from '../triage.js';
 import { createStores } from './stores.js';
 import { RunContext, type PipelineHooks } from './context.js';
 import { observeRun } from './project-memory.js';
@@ -65,7 +66,9 @@ import { openPullRequest } from '../github/pr.js';
  */
 export type { CoordinatorVerdict } from '../agents/schemas.js';
 
-export interface PipelineResult {
+export type PipelineResult = DocumentedResult | TriagedResult;
+
+export interface DocumentedResult {
   run: RunRecord;
   /** In-memory proposed file contents, for preview and PR creation. */
   proposedFiles: ProposedFile[];
@@ -76,6 +79,24 @@ export interface PipelineResult {
    * to record, and recording a run that did nothing would be the second lie.
    */
   skipped?: { reason: string; previousRunId: string; pullRequestUrl?: string };
+}
+
+/**
+ * Triage decided the commit needs no documentation, so nothing was run.
+ *
+ * No run record either, for the reason above: there is no earlier run to point
+ * at, and a new one would claim work that never happened. The verdict travels
+ * with the result instead, so the log and the event can say why.
+ */
+export interface TriagedResult {
+  run: null;
+  proposedFiles: [];
+  skipped: {
+    reason: string;
+    triage: TriageVerdict;
+    /** Which commit, since there is no run record to say so. */
+    commit: { sha: string; shortSha: string; subject: string };
+  };
 }
 
 export interface PipelineOptions extends PipelineHooks {
@@ -105,6 +126,14 @@ export interface PipelineOptions extends PipelineHooks {
    * before anyone noticed they were all the same commit.
    */
   force?: boolean;
+  /**
+   * Ask Jev whether this commit needs documenting before any agent does.
+   *
+   * For automatic runs only. A push nobody looked at can be skipped when Jev is
+   * confident there is nothing to document; a run somebody asked for cannot,
+   * and neither can a forced or resumed one. See `src/triage.ts`.
+   */
+  triage?: boolean;
 }
 
 
@@ -143,9 +172,7 @@ export async function runPipeline(
   // A resume is asking for one specific run to be finished, so the
   // already-documented guard has nothing to say about it.
   if (!options.force && !options.resume && priorMap.processedCommits.includes(diff.sha)) {
-    const previous = (await runs.list(200, [config.repoPath])).find(
-      (candidate) => candidate.commit.sha === diff.sha && candidate.status !== 'failed',
-    );
+    const previous = await runs.forCommit(diff.sha, config.repoPath);
     if (previous) {
       const skipped: NonNullable<PipelineResult['skipped']> = {
         reason:
@@ -158,9 +185,30 @@ export async function runPipeline(
     }
   }
 
-  // Docs may live on their own branch. This resolves to a throwaway worktree at
-  // that branch's tip, or to the code checkout when they live alongside the code.
-  const docsTree = await openDocsTree(config);
+  // Still before a token is spent, and before the docs worktree is opened: a
+  // commit Jev is confident needs nothing costs one sub-second call instead of
+  // four sequential agent turns and a run from the account's allowance.
+  if (options.triage && !options.force && !options.resume) {
+    const verdict = await triageCommit(config, diff);
+    if (verdict) {
+      console.log(
+        `triage ${diff.shortSha}: ${verdict.skip ? 'skip' : 'run'} ` +
+          `(needs docs ${verdict.needsDocs.toFixed(2)}, ${verdict.surface} ` +
+          `${verdict.surfaceConfidence.toFixed(2)}, ${verdict.model}, ${verdict.latencyMs}ms)`,
+      );
+      if (verdict.skip) {
+        return {
+          run: null,
+          proposedFiles: [],
+          skipped: {
+            reason: verdict.reason,
+            triage: verdict,
+            commit: { sha: diff.sha, shortSha: diff.shortSha, subject: diff.subject },
+          },
+        };
+      }
+    }
+  }
 
   /**
    * A resumed run keeps its own record, and therefore its own id.
@@ -174,6 +222,39 @@ export async function runPipeline(
   if (options.resume && !resumed) {
     throw new Error(`No run ${options.resume} to resume.`);
   }
+
+  /**
+   * The rest of what the run reads before it starts, at once.
+   *
+   * None of the three depends on another, and each is a network round trip:
+   * the price table can take its whole timeout when its endpoint is down.
+   *
+   * - What earlier runs learned about this repository: resource-scoped Mastra
+   *   working memory, keyed to the repository rather than to a thread - so it
+   *   survives session rotation, spans all five roles, and is available to the
+   *   two that carry no thread at all.
+   * - Free-form standing instructions, as saved from the dashboard. `PUT
+   *   /api/instructions` wrote this file for a long time and nothing ever read
+   *   it, so every instruction anyone typed into the dashboard was persisted,
+   *   rendered back to them, and silently ignored. The two drafting roles are
+   *   the ones the endpoint's own description promises read it, and they are
+   *   the two where a house style actually applies.
+   * - Prices: once per run, cached for an hour, and empty if the endpoint is
+   *   unreachable.
+   *
+   * All of it before the docs worktree is opened, because nothing between that
+   * and the `try` below may throw: a worktree opened and then abandoned by an
+   * exception is a temporary checkout nobody disposes of.
+   */
+  const [projectMemory, standingInstructions, prices] = await Promise.all([
+    runtime.loadProjectMemory(),
+    standingInstructionsFor(config),
+    loadPrices(config),
+  ]);
+
+  // Docs may live on their own branch. This resolves to a throwaway worktree at
+  // that branch's tip, or to the code checkout when they live alongside the code.
+  const docsTree = await openDocsTree(config);
 
   const started: RunRecord = {
     id: randomUUID(),
@@ -219,25 +300,6 @@ export async function runPipeline(
   // one; the rest have no such field rather than one holding `undefined`.
   if (docsTree.branch) run.docsBranch = docsTree.branch;
 
-  /**
-   * What earlier runs learned about this repository, read once at the door.
-   *
-   * Resource-scoped Mastra working memory, keyed to the repository rather than
-   * to a thread - so it survives session rotation, spans all five roles, and is
-   * available to the two that carry no thread at all.
-   */
-  const projectMemory = await runtime.loadProjectMemory();
-
-  /**
-   * Free-form standing instructions, as saved from the dashboard.
-   *
-   * `PUT /api/instructions` wrote this file for a long time and nothing ever
-   * read it, so every instruction anyone typed into the dashboard was
-   * persisted, rendered back to them, and silently ignored. The two drafting
-   * roles are the ones the endpoint's own description promises read it, and
-   * they are the two where a house style actually applies.
-   */
-  const standingInstructions = await standingInstructionsFor(config);
   const houseStyle = standingInstructions?.trim()
     ? [
         '',
@@ -251,9 +313,6 @@ export async function runPipeline(
       ].join('\n')
     : '';
 
-  // Once per run, cached for an hour, and empty if the endpoint is unreachable.
-  const prices = await loadPrices(config);
-
   /**
    * The run's state and the machinery that drives a role, in one object.
    *
@@ -264,9 +323,9 @@ export async function runPipeline(
   const ctx = new RunContext(config, runtime, { runs, sessions, knowledge }, run, prices, runDeadline, hooks);
   const flush = (): Promise<void> => ctx.flush();
 
-  await flush();
-
   try {
+    await flush();
+
     /**
      * The five roles, as a durable workflow.
      *
@@ -418,7 +477,8 @@ export async function rebuildProposedFiles(
 
   const docsTree = await openDocsTree(config);
   try {
-    const applied = await applyDocEdits(docsTree.path, run.docs);
+    const editable = new Set(await listDocs(docsTree.path, config.docs.roots));
+    const applied = await applyDocEdits(docsTree.path, run.docs, editable);
     const changelogFile = run.changelog.entry
       ? await applyChangelogEntry(docsTree.path, config.docs.changelogPath, run.changelog)
       : null;

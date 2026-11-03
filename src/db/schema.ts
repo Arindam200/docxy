@@ -13,6 +13,7 @@
  *      migration every time a role's output schema moves.
  */
 
+import { sql } from 'drizzle-orm';
 import {
   boolean,
   index,
@@ -36,6 +37,7 @@ import type {
   RunStatus,
   ValidationReport,
 } from '../types.js';
+import type { SkipKind, SkippedCommit } from '../api/contract.js';
 
 /**
  * The repository being documented. Sessions and knowledge hang off this.
@@ -118,7 +120,17 @@ export const projects = pgTable('projects', {
    */
   knowledgeUpdatedAt: timestamp('knowledge_updated_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
-});
+}, (t) => [
+  /*
+   * Every webhook delivery and every connect asks for its repository by
+   * `lower(source_repo)`, because GitHub is case-insensitive about names - and
+   * the unique index on `source_repo` cannot answer a lowercased comparison, so
+   * each of those was a scan of every project. Not unique: rows that differ
+   * only in case may already exist, and a migration that failed on them would
+   * fail in production. `createProject` checks case-insensitively as it is.
+   */
+  index('projects_source_repo_lower').on(sql`lower(${t.sourceRepo})`),
+]);
 
 /**
  * Which organization a GitHub App installation belongs to.
@@ -255,7 +267,7 @@ export const runRoles = pgTable(
     /** Which model actually ran; roles can be pointed at different ones. */
     model: text('model'),
     error: text('error'),
-    /** harness-error | parse-error | max-tokens | rate-limit | stalled | … */
+    /** harness-error | parse-error | max-tokens | rate-limit | stalled | provider-rejected | … */
     failure: text('failure').$type<RoleFailure>(),
     /**
      * Attempts spent, including the one that succeeded.
@@ -303,7 +315,12 @@ export const runEvents = pgTable(
     kind: text('kind').notNull(),
     text: text('text').notNull(),
   },
-  (t) => [index('run_events_role_ordinal').on(t.roleId, t.ordinal)],
+  // Unique, because the run store skips events it has already written by
+  // remembering a count per role - in memory, per store instance. Any other
+  // instance that saves the same run (the boot reaper, a resume, a publish)
+  // starts from zero and sends every event again; the index is what turns that
+  // second copy into a no-op instead of a duplicated timeline.
+  (t) => [uniqueIndex('run_events_role_ordinal').on(t.roleId, t.ordinal)],
 );
 
 /** Split out deliberately: large, and only read on the detail view. */
@@ -392,8 +409,43 @@ export const knowledgeCommits = pgTable(
   ],
 );
 
+/**
+ * A push docxy deliberately did not document, and why.
+ *
+ * A run that never started has no run record, and a commit that silently never
+ * got documentation is the one failure this product cannot afford to make
+ * invisible. Triage skips (`src/triage.ts`) and allowance refusals land here so
+ * the project's Activity page can say what was passed over and offer to
+ * document it anyway.
+ *
+ * One row per commit per project: a redelivered push replaces the reason
+ * rather than listing the commit twice, and documenting it removes the row.
+ */
+export const skippedCommits = pgTable(
+  'skipped_commits',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    projectId: uuid('project_id')
+      .references(() => projects.id, { onDelete: 'cascade' })
+      .notNull(),
+    commitSha: text('commit_sha').notNull(),
+    commitShortSha: text('commit_short_sha').notNull(),
+    commitSubject: text('commit_subject').notNull(),
+    kind: text('kind').$type<SkipKind>().notNull(),
+    reason: text('reason').notNull(),
+    /** What Jev answered, for a triage skip. */
+    triage: jsonb('triage').$type<SkippedCommit['triage']>(),
+    at: timestamp('at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex('skipped_commits_project_commit').on(t.projectId, t.commitSha),
+    index('skipped_commits_project_at').on(t.projectId, t.at),
+  ],
+);
+
 export const schema = {
   projects,
+  skippedCommits,
   githubInstallations,
   agentSessions,
   runs,

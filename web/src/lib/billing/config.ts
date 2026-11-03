@@ -13,6 +13,7 @@
 
 import type { BillingEnvironment, PlanKey } from "@billing";
 import { isPaidPlan, planKeys } from "@billing";
+import { appUrl } from "@/lib/env";
 
 function read(key: string): string | undefined {
   return process.env[key]?.trim() || undefined;
@@ -73,6 +74,22 @@ export function billingConfig(): BillingConfig | null {
 }
 
 /**
+ * Whether this deployment holds organizations to the seats their plan includes.
+ *
+ * Only where billing is configured. Seats are a paid entitlement, and on a
+ * deployment with no payment credentials every organization reads as Free -
+ * one seat, with nothing anybody could buy to get a second. Enforcing that
+ * would end invitations on every self-hosted install and on any hosted
+ * deployment that has not switched payments on yet. Pausing purchases with
+ * `DOCXY_BILLING_ENABLED` does not lift it: an organization that bought seats
+ * keeps them, and one that did not cannot invite past its plan while sales are
+ * paused.
+ */
+export function seatsEnforced(): boolean {
+  return billingConfig() !== null;
+}
+
+/**
  * The product id to sell a plan with, or undefined if this deployment cannot.
  *
  * Free never has one and never should: a zero-dollar subscription is a
@@ -86,6 +103,42 @@ export function productIdFor(key: PlanKey): string | undefined {
 
 export function seatProductId(): string | undefined {
   return productIds().teamSeat;
+}
+
+/**
+ * Which plan a provider product id belongs to, or null.
+ *
+ * The reverse of `productIdFor`, and the only way an arriving webhook learns
+ * what was bought: the event names a product, and this deployment decides what
+ * that product entitles. A product nobody recognises is answered with null and
+ * queued for review rather than guessed at.
+ */
+export function planForProduct(productId: string | null | undefined): PlanKey | null {
+  if (!productId) return null;
+  const products = productIds();
+  if (productId === products.pro) return "pro";
+  if (productId === products.team) return "team";
+  return null;
+}
+
+/**
+ * The origin this deployment answers on, for URLs a provider redirects back to.
+ *
+ * Derived on the server and never read from a request: a return URL taken from
+ * the browser is an open redirect with a payment attached to it.
+ */
+export function billingOrigin(): string {
+  return (appUrl() ?? "https://docxy.app").replace(/\/+$/, "");
+}
+
+/** Where hosted checkout sends somebody when it is finished with them. */
+export function checkoutReturnUrl(attemptId: string): string {
+  return `${billingOrigin()}/dashboard/billing/return?attempt=${encodeURIComponent(attemptId)}`;
+}
+
+/** Where the back button on hosted checkout goes. */
+export function checkoutCancelUrl(): string {
+  return `${billingOrigin()}/dashboard/billing?checkout=cancelled`;
 }
 
 /**

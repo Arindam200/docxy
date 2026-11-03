@@ -29,7 +29,19 @@ interface VerboseModel {
 
 const CACHE_TTL_MS = 60 * 60 * 1000;
 
+/**
+ * How long a failed price fetch is remembered.
+ *
+ * Without it the failure was never cached, so while the models endpoint was
+ * down every run sat out the full ten-second timeout to learn what the last one
+ * already knew. Short, because a cost figure is worth having back soon after
+ * the endpoint is - five minutes of tokens-without-dollars is the whole price.
+ */
+const FAILURE_TTL_MS = 5 * 60 * 1000;
+
 let cache: { at: number; table: PriceTable } | null = null;
+/** When the last fetch failed, or null when it did not. */
+let failedAt: number | null = null;
 
 /** Nebius sends rates as decimal strings; anything unparseable is not a price. */
 function toNumber(value: string | number | undefined): number {
@@ -41,10 +53,13 @@ function toNumber(value: string | number | undefined): number {
  * The account's price list, cached for an hour.
  *
  * Prices move rarely and a run is not the place to discover that the models
- * endpoint is slow, so failure is silent and empty rather than fatal.
+ * endpoint is slow, so failure is silent and empty rather than fatal - and
+ * remembered for `FAILURE_TTL_MS`, so the runs behind a failed one fall back
+ * at once instead of each waiting out the timeout again.
  */
 export async function loadPrices(config: Config, now = Date.now()): Promise<PriceTable> {
   if (cache && now - cache.at < CACHE_TTL_MS) return cache.table;
+  if (failedAt !== null && now - failedAt < FAILURE_TTL_MS) return new Map();
   if (!config.nebius.apiKey) return new Map();
 
   const table: PriceTable = new Map();
@@ -53,7 +68,10 @@ export async function loadPrices(config: Config, now = Date.now()): Promise<Pric
       headers: { Authorization: `Bearer ${config.nebius.apiKey}` },
       signal: AbortSignal.timeout(10_000),
     });
-    if (!res.ok) return new Map();
+    if (!res.ok) {
+      failedAt = now;
+      return new Map();
+    }
 
     // SAFETY: the shape is not trusted - every field below is read through
     // optional access and coerced, and a response that looks nothing like this
@@ -69,16 +87,19 @@ export async function loadPrices(config: Config, now = Date.now()): Promise<Pric
       table.set(model.id.toLowerCase(), { prompt, completion });
     }
   } catch {
+    failedAt = now;
     return new Map();
   }
 
   cache = { at: now, table };
+  failedAt = null;
   return table;
 }
 
 /** Only for tests and long-lived servers that want to force a refresh. */
 export function clearPriceCache(): void {
   cache = null;
+  failedAt = null;
 }
 
 /**

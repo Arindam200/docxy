@@ -1,5 +1,6 @@
 import type { RoleName } from '../config.js';
 import type { RoleFailure, RunRecord, RunStatus } from '../types.js';
+import type { ProjectRollup, RunSummary } from '../api/contract.js';
 import { round } from '../pricing.js';
 
 /**
@@ -237,4 +238,38 @@ export function buildReport(runs: RunRecord[]): ObservabilityReport {
       .slice(0, 10),
     series,
   };
+}
+
+/**
+ * One project's card figures, from that project's own newest runs.
+ *
+ * `succeeded` and `settled` above are the definitions, so a card cannot say
+ * 80% beside an Insights page saying 60% for the same project. Runs arrive
+ * newest first, as the store lists them.
+ */
+export function rollUpProject(
+  projectId: string,
+  runs: RunSummary[],
+): ProjectRollup {
+  const finished = runs.filter((run) => settled(run.status));
+  const priced = runs.filter((run) => run.totals?.costUsd !== undefined);
+
+  const rollup: ProjectRollup = {
+    projectId,
+    runs: runs.length,
+    needsAttention: runs.filter(
+      (run) =>
+        run.status === 'failed' ||
+        (!run.pullRequestUrl && (run.status === 'approved' || run.status === 'awaiting-approval')),
+    ).length,
+  };
+  const [latest] = runs;
+  if (latest) rollup.latest = latest;
+  if (finished.length > 0) {
+    rollup.successRate = finished.filter((run) => succeeded(run.status)).length / finished.length;
+  }
+  if (priced.length > 0) {
+    rollup.costUsd = round(priced.reduce((sum, run) => sum + (run.totals?.costUsd ?? 0), 0));
+  }
+  return rollup;
 }

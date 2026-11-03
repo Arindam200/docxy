@@ -139,6 +139,16 @@ own `GET /user/installations` before binding anything. No credentials, no
 verification, and the dashboard refuses the install rather than performing it
 unchecked.
 
+Appearing in that listing is not enough on its own: it includes installations a
+person can merely *access*, so a read-only collaborator on one repository of an
+organization would see it. Binding requires administering the installation's
+account - the account is the person's own, or `GET /user/memberships/orgs/{org}`
+answers `role: admin`, `state: active` (`administersAccount` in
+`web/src/lib/github-app.ts`). That call needs the **Members: Read-only**
+organization permission below; without it GitHub answers 403 and an
+organization install is refused with the `install_membership_hidden` notice.
+Personal-account installs do not need it.
+
 So: generate the client secret if you run the dashboard, and set both variables
 on it.
 
@@ -170,7 +180,11 @@ is scope on the install screen that no code path can use.
 > for the approval gate. Nothing in `src/` calls the Checks API - the gate lives
 > in docxy's own store and dashboard, never on the commit. Do not grant it.
 
-Organization, Account, and Enterprise permissions: **none**.
+Organization permissions: **Members: Read-only**, and nothing else. It is what
+lets the dashboard confirm that whoever binds an organization's installation is
+an admin of that organization (see above). Adding it to an existing App asks
+every organization that installed it to approve the change. Account and
+Enterprise permissions: **none**.
 
 > Ask for nothing more. Every extra permission is a line a stranger reads on the
 > install screen, and `Contents: write` is already the one that makes people pause.
@@ -424,8 +438,12 @@ await git(worktree, [
 ]);
 ```
 
-> The token appears in the command arguments. It is short-lived, but do not log
-> the command - scrub it before printing any error.
+> The tokenized URL is only how callers name "this remote, as the App".
+> `networkGit` in `src/github/checkout.ts` strips the token before git runs and
+> passes it as an `Authorization` header through git's environment config
+> (`GIT_CONFIG_COUNT`), with credential helpers emptied. Git never sees a
+> credential in a URL, so it never hands one to a helper to store, and `ps`
+> never shows it. Errors are still scrubbed before printing.
 
 **3. Commit as the bot.** Replace the hardcoded identity:
 

@@ -5,6 +5,8 @@
  * the /api/docxy BFF.
  */
 
+import { cache } from "react";
+
 const BASE = process.env.DOCXY_API_URL || "http://localhost:4317";
 
 /**
@@ -27,6 +29,16 @@ export function apiHeaders(base: Record<string, string> = {}) {
   return { ...base, authorization: `Bearer ${token}` };
 }
 
+/**
+ * One read, failing soft.
+ *
+ * The timeout signal is load-bearing - a pipeline that hangs would otherwise
+ * hang the page with it - and it is also what opts this fetch out of Next's
+ * per-render memoisation, which only dedupes a GET whose options match and
+ * carry no signal. So nothing here is deduplicated for free. A read that more
+ * than one place makes during the same render is wrapped in React's `cache`
+ * where it is exported, as `fetchProjects` is below.
+ */
 async function get<T>(path: string): Promise<T | null> {
   try {
     const res = await fetch(`${BASE}${path}`, {
@@ -61,6 +73,8 @@ export type {
   LogEntry,
   LogsPage,
   ObservabilityReport,
+  ProjectRollup,
+  ProjectRollupsPage,
   RepositoriesPage,
   RoleDot,
   RoleFailure,
@@ -74,6 +88,12 @@ export type {
   RunStatus,
   RunSummary,
   RunTotals,
+  SkipKind,
+  SkippedCommit,
+  SkippedCommitsPage,
+  StartProjectRun,
+  StartProjectRunRefusal,
+  StartProjectRunResult,
   SyncedRepo,
   Tracking,
   ValidationCheck,
@@ -85,9 +105,11 @@ import type {
   Integration,
   LogsPage,
   ObservabilityReport,
+  ProjectRollupsPage,
   RepositoriesPage,
   RunDetail,
   RunSummary,
+  SkippedCommitsPage,
   Tracking,
 } from "@contract";
 
@@ -140,17 +162,12 @@ export function fetchConfig(): Promise<DocxyConfig | null> {
 }
 
 /**
- * What the pipeline host itself watches: its configured checkout, that repo's
- * documentation roots, and the symbol map learned for it.
- *
- * Not organization-scoped, and deliberately not pretending to be. The knowledge
- * map behind it is keyed to the server's own configured project rather than to
- * a caller's, so an organization id would be a parameter the endpoint ignores.
- * Making this per-project is real work and is not done; what it discloses today
- * is the deployment's own repository, not another organization's.
+ * What the pipeline watches for one project: its documentation roots and the
+ * symbol map learned for it. On a database deployment the server requires the
+ * organization and project and answers with that project's map.
  */
-export function fetchTracking(): Promise<Tracking | null> {
-  return get<Tracking>("/api/tracking");
+export function fetchTracking(organizationId: string, projectId: string): Promise<Tracking | null> {
+  return scoped<Tracking>("/api/tracking", organizationId, { projectId });
 }
 
 export function fetchInstructions(organizationId: string): Promise<Instructions | null> {
@@ -204,9 +221,61 @@ export interface Project {
   key: string;
 }
 
-export function fetchProjects(organizationId: string): Promise<{ projects: Project[] } | null> {
-  return get<{ projects: Project[] }>(
-    `/api/projects?organizationId=${encodeURIComponent(organizationId)}`,
+/**
+ * The organization's projects, read once per render.
+ *
+ * Everything asks for this list: the dashboard layout to name the project the
+ * chrome is inside, `currentProject` to resolve the one in the path, and most
+ * pages for their own reasons. With the timeout signal opting `get` out of
+ * Next's fetch memoisation, that was the same request two or three times per
+ * page. `cache` lasts for exactly one request, so the list is never older than
+ * the render showing it.
+ */
+export const fetchProjects = cache(
+  (organizationId: string): Promise<{ projects: Project[] } | null> =>
+    get<{ projects: Project[] }>(
+      `/api/projects?organizationId=${encodeURIComponent(organizationId)}`,
+    ),
+);
+
+/**
+ * Each project's own figures, as the API rolls them up.
+ *
+ * The cards used to compute these here, from the one organization-wide listing
+ * `fetchRuns` returns - and that listing is the newest fifty runs across every
+ * repository. A quiet project fell out of it the moment a busy one filled it,
+ * and its card said "never run" beside an Insights page that knew better. The
+ * API counts each project over its own runs instead, by `buildReport`'s
+ * definitions, so the card and the page agree.
+ *
+ * Null on an API that predates the endpoint as well as on one that is down. A
+ * deploy does not swap both halves at the same instant, so for a while this
+ * dashboard can be talking to the previous backend, which answers 404; the
+ * caller falls back to rolling up the listing, which is what it did before -
+ * see `projectStats` in lib/projects.ts.
+ *
+ * Not wrapped in `cache`: one page asks for it, once.
+ */
+export function fetchProjectRollups(organizationId: string): Promise<ProjectRollupsPage | null> {
+  return scoped<ProjectRollupsPage>("/api/projects/rollups", organizationId);
+}
+
+/**
+ * Pushes to one project that docxy chose not to document, and why.
+ *
+ * Null when there is nothing to say about them, which includes an API too old
+ * to have the endpoint. The page hides the section either way: an empty list
+ * and an unanswered question both mean there is nothing here to act on, and a
+ * "could not load" notice for a section most people have never seen would be
+ * a warning about something nobody was waiting for.
+ */
+export function fetchSkippedCommits(
+  organizationId: string,
+  projectId: string,
+): Promise<SkippedCommitsPage | null> {
+  return scoped<SkippedCommitsPage>(
+    `/api/projects/${encodeURIComponent(projectId)}/skips`,
+    organizationId,
   );
 }
 

@@ -32,7 +32,9 @@ const FAILURE_HELP = {
   "rate-limit": "The provider rate-limited every attempt. Nothing is wrong with the proposal; try again shortly.",
   cancelled: "The harness cancelled the turn before it finished, usually a server-side execution timeout.",
   stalled:
-    "The turn kept pausing for approvals or questions without ever settling on an answer. Nobody is attached to a pipeline run, so it was answered automatically and still did not converge.",
+    "The model stopped sending anything part-way through the turn and stayed silent past the idle limit, on every attempt, even on a fresh session. That is usually the provider rather than the prompt; the run can be tried again as it is.",
+  "provider-rejected":
+    "The provider refused the request outright: a missing or wrong API key, a key without access to this model, or a model id it does not serve. Nothing was retried, because every attempt would be refused the same way. Check NEBIUS_API_KEY and the model configured for this role.",
   blocked:
     "A guardrail refused the input before any model saw it. A commit diff is written by whoever opened the pull request, and this one was found to be addressing the agents rather than describing a change. Nothing was retried: the diff would be the same diff on a second attempt.",
 } satisfies Record<RoleFailure, string>;

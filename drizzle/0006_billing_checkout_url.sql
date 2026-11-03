@@ -1,0 +1,1 @@
+ALTER TABLE "billing"."checkout_attempts" ADD COLUMN "checkout_url" text;

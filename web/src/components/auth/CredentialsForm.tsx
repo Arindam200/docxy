@@ -89,6 +89,17 @@ export function CredentialsForm({
       return;
     }
 
+    // A route handler is not a page the client router can render. Pushing to
+    // one fetches it as a Server Component payload, follows its redirect to
+    // GitHub inside that fetch, fails on the cross-origin hop, and only then
+    // falls back to loading it properly - running the handler twice and logging
+    // an error on the way. The GitHub install that resumes after sign-in (see
+    // `signInFirst` in lib/github-installation.ts) is the `next` that lands
+    // here, and it wants an ordinary navigation from the start.
+    if (next.startsWith("/api/")) {
+      window.location.assign(next);
+      return;
+    }
     router.push(next);
     router.refresh();
   }

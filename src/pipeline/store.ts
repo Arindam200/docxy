@@ -4,6 +4,9 @@ import type { Config } from '../config.js';
 import type { RunRecord } from '../types.js';
 import type { LogEntry, LogPage, LogQuery, RunStorage } from './stores.js';
 
+/** How many run files a listing reads at once. */
+const READ_BATCH = 32;
+
 /** Runs are plain JSON on disk: inspectable, diffable, and trivially replayable. */
 export class RunStore implements RunStorage {
   private readonly dir: string;
@@ -72,21 +75,49 @@ export class RunStore implements RunStorage {
     } catch {
       return [];
     }
-    const runs: RunRecord[] = [];
     // `.tmp` files are half-written saves in flight; they are not runs yet.
-    for (const name of names.filter((n) => n.endsWith('.json'))) {
-      try {
-        // SAFETY: these files are written only by `save` below, which serialises a RunRecord.
-        runs.push(JSON.parse(await readFile(join(this.dir, name), 'utf8')) as RunRecord);
-      } catch {
-        // skip a corrupt record rather than failing the listing
-      }
+    const files = names.filter((n) => n.endsWith('.json'));
+    const runs: RunRecord[] = [];
+    // Read in parallel batches rather than one file at a time: a listing reads
+    // every record in the directory, and awaiting each in turn made it as slow
+    // as the sum of the reads. Bounded so a large history does not open every
+    // file at once.
+    for (let start = 0; start < files.length; start += READ_BATCH) {
+      const batch = await Promise.all(
+        files.slice(start, start + READ_BATCH).map(async (name) => {
+          try {
+            // SAFETY: these files are written only by `save` below, which serialises a RunRecord.
+            return JSON.parse(await readFile(join(this.dir, name), 'utf8')) as RunRecord;
+          } catch {
+            // skip a corrupt record rather than failing the listing
+            return null;
+          }
+        }),
+      );
+      for (const run of batch) if (run) runs.push(run);
     }
     const wanted = repoPaths === undefined ? null : new Set(repoPaths);
     return runs
       .filter((run) => !wanted || wanted.has(run.repoPath))
       .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
       .slice(0, limit);
+  }
+
+  async listByRepo(limitEach: number, repoPaths: string[]): Promise<Map<string, RunRecord[]>> {
+    const out = new Map<string, RunRecord[]>(repoPaths.map((path) => [path, []]));
+    if (repoPaths.length === 0 || limitEach <= 0) return out;
+    // One pass over the directory for every repository, newest first, so each
+    // bucket fills with its own newest runs.
+    for (const run of await this.list(Number.POSITIVE_INFINITY, repoPaths)) {
+      const bucket = out.get(run.repoPath);
+      if (bucket && bucket.length < limitEach) bucket.push(run);
+    }
+    return out;
+  }
+
+  async forCommit(sha: string, repoPath: string): Promise<RunRecord | null> {
+    const runs = await this.list(Number.POSITIVE_INFINITY, [repoPath]);
+    return runs.find((run) => run.commit.sha === sha && run.status !== 'failed') ?? null;
   }
 
   /**

@@ -6,6 +6,7 @@ import { RoleReliability } from "@/components/dashboard/RoleReliability";
 import { RunTrend } from "@/components/dashboard/RunTrend";
 import { SpendPanel } from "@/components/dashboard/SpendPanel";
 import { duration, timeAgo } from "@/lib/format";
+import { activeOrganizationId } from "@/lib/organization";
 import { currentProject } from "@/lib/project-scope";
 
 export const dynamic = "force-dynamic";
@@ -31,12 +32,15 @@ export default async function ProjectInsightsPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const scope = await currentProject(id);
+  // Started beside the project lookup rather than after it - see "Reads beside
+  // the lookup" in lib/project-scope.ts for why that leaves nothing exposed.
+  const organizationId = await activeOrganizationId();
+  const [scope, report] = await Promise.all([
+    currentProject(id),
+    fetchObservability(organizationId, { projectId: id }),
+  ]);
   if (scope.kind === "offline") return null;
   if (scope.kind === "missing") notFound();
-
-  const { project, organizationId } = scope;
-  const report = await fetchObservability(organizationId, { projectId: project.id });
 
   const online = report !== null;
   const window = report?.window.runs ?? 0;

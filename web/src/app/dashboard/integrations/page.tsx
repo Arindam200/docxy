@@ -10,24 +10,45 @@ import { CATALOG, type IntegrationConnections } from "@/lib/integrations";
 import { site } from "@/lib/site";
 import { composioConfigured, listComposioAccounts } from "@/lib/composio";
 import { integrationScope } from "@/lib/integration-scope";
-import { COMPOSIO_TOOLKITS, isComposioToolkit, type IntegrationAccount } from "@/lib/composio-contract";
+import {
+  COMPOSIO_TOOLKITS,
+  isComposioToolkit,
+  type IntegrationAccount,
+  type IntegrationScope,
+} from "@/lib/composio-contract";
 import { ComposioConnection } from "@/components/dashboard/ComposioConnection";
 
 export const dynamic = "force-dynamic";
 
+/**
+ * The organization's connected accounts, or `unavailable` when Composio could
+ * not be asked. Its own function so the page can run it beside the pipeline's
+ * integration report instead of after it: the two have nothing to do with each
+ * other, and one waiting on the other was a provider round trip added to every
+ * load of this page.
+ */
+async function organizationAccounts(
+  configured: boolean,
+): Promise<{
+  scope: IntegrationScope | null;
+  accounts: IntegrationAccount[];
+  unavailable: boolean;
+}> {
+  const scope = await integrationScope(await headers());
+  if (!configured || !scope) return { scope, accounts: [], unavailable: false };
+  try {
+    return { scope, accounts: await listComposioAccounts(scope.organizationId), unavailable: false };
+  } catch {
+    return { scope, accounts: [], unavailable: true };
+  }
+}
+
 export default async function IntegrationsPage() {
   const configured = composioConfigured();
-  const scope = await integrationScope(await headers());
-  let accounts: IntegrationAccount[] = [];
-  let unavailable = false;
-  if (configured && scope) {
-    try {
-      accounts = await listComposioAccounts(scope.organizationId);
-    } catch {
-      unavailable = true;
-    }
-  }
-  const result = await fetchIntegrations();
+  const [{ scope, accounts, unavailable }, result] = await Promise.all([
+    organizationAccounts(configured),
+    fetchIntegrations(),
+  ]);
 
   const app = result?.integrations.find((item) => item.id === "github-app");
   const live: IntegrationConnections = {

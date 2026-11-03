@@ -55,8 +55,12 @@ export class KnowledgeStore implements KnowledgeStorage {
     let added = 0;
 
     for (const [symbol, sections] of Object.entries(incoming ?? {})) {
-      if (!symbol || !Array.isArray(sections)) continue;
-      const existing = new Set(map.symbols[symbol] ?? []);
+      // Symbol names come from a model reading code, so `toString` and
+      // `constructor` are ordinary answers - and on a plain object they are
+      // inherited functions, which `new Set` cannot iterate. That threw after
+      // every role had run. Own keys only, and `__proto__` is not a key at all.
+      if (!symbol || symbol === '__proto__' || !Array.isArray(sections)) continue;
+      const existing = new Set(Object.hasOwn(map.symbols, symbol) ? map.symbols[symbol] : []);
       const before = existing.size;
       for (const section of sections) {
         if (typeof section === 'string' && section.trim()) existing.add(section.trim());

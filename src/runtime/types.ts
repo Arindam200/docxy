@@ -53,13 +53,26 @@ export type TurnFailureKind =
   | 'rate-limit'
   | 'transient'
   | 'harness'
+  /**
+   * The model went quiet mid-turn for longer than `agent.idleTimeoutMs` and
+   * the turn was abandoned. Retried on a fresh session: a provider that hung
+   * once usually answers the next request, and a long transcript is what
+   * makes the wait for a first token longest.
+   */
   | 'stalled'
   /**
    * A guardrail refused the input. Never retried: the diff will be the same
    * diff on the second attempt, so asking again only spends another model call
    * to be told the same thing.
    */
-  | 'blocked';
+  | 'blocked'
+  /**
+   * The provider refused the call outright - a missing or wrong key, an
+   * account or key without access, a model id it does not serve. Never
+   * retried, for the same reason as `blocked`: nothing about the second
+   * request differs, and the fix is a setting an operator has to change.
+   */
+  | 'provider-rejected';
 
 export interface TurnResult<T = unknown> {
   turnId?: string;
@@ -208,13 +221,33 @@ export interface AgentRuntime {
 }
 
 /**
+ * HTTP statuses that mean the provider will not serve this request at all.
+ *
+ * 401 is a missing or wrong key, 402 an account that cannot pay for the call,
+ * 403 a key without access to the model, and 404 a model id - or a base URL -
+ * the provider does not know. Each of them used to fall through to `harness`
+ * and be retried with backoff - refused identically on every attempt, with a
+ * perfectly good session thrown away on the second - before the run reported
+ * "the harness errored", which names nothing an operator can change.
+ *
+ * 400 is deliberately absent. It is what an overlong prompt comes back as, and
+ * that has its own kind and its own fix; the rest of what it covers is too
+ * mixed to call permanent on the status alone.
+ */
+const REJECTING_STATUSES = new Set([401, 402, 403, 404]);
+
+/**
  * Name the failure from whatever the provider said.
  *
  * The message is free text from the model provider, so this matches on
- * substrings rather than pretending there is an error code.
+ * substrings rather than pretending there is an error code - except where the
+ * provider did answer with one. `status` is the HTTP status read off the error
+ * object, never parsed out of the message: a `404` in free text is as likely to
+ * be a file the model was talking about as a model the provider does not have.
  * Anything unrecognised stays `harness`, which the caller retries conservatively.
  */
-export function classifyTurnError(message: string): TurnFailureKind {
+export function classifyTurnError(message: string, status?: number): TurnFailureKind {
+  if (status !== undefined && REJECTING_STATUSES.has(status)) return 'provider-rejected';
   const text = message.toLowerCase();
   if (/max[_ ]?tokens|max output tokens|output (limit|budget)|finish[_ ]?reason\b[^a-z]*length/.test(text)) {
     return 'max-tokens';
@@ -226,6 +259,10 @@ export function classifyTurnError(message: string): TurnFailureKind {
   if (/timeout|timed out|deadline|econnreset|socket hang up|network|fetch failed|econnrefused|eai_again/.test(text)) {
     return 'transient';
   }
+  // Mastra's own wording when the model router has no key for the provider at
+  // all, so there is no response and no status to read. The phrase is the
+  // router's, not the model's, so it cannot arrive as something a model said.
+  if (/could not find api key/.test(text)) return 'provider-rejected';
   return 'harness';
 }
 

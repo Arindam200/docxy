@@ -8,7 +8,12 @@
  * resolver would pull server-only code into the browser bundle.
  */
 
-import type { Project, RunSummary } from "./docxy";
+import type {
+  Project,
+  ProjectRollup as ApiRollup,
+  ProjectRollupsPage,
+  RunSummary,
+} from "./docxy";
 
 /** Compare exact checkout keys; suffix matching can mix similarly named repos. */
 export function projectRuns(project: Pick<Project, "key">, runs: RunSummary[]): RunSummary[] {
@@ -50,30 +55,31 @@ export function projectTitle(project: Pick<Project, "name" | "sourceRepo">): str
 }
 
 /**
- * The few numbers a project card shows, rolled up from a run listing.
+ * The few numbers a project card shows.
  *
- * Computed here rather than fetched because the organization page already has
- * every project's runs in one listing, and asking the API for one report per
- * project would be N requests to render a grid.
+ * The API's own rollup, less the id it is keyed by - a card already knows which
+ * project it is. Derived rather than restated, so a field that changes in the
+ * contract changes the cards with it instead of drifting from them.
+ */
+export type ProjectRollup = Omit<ApiRollup, "projectId">;
+
+/**
+ * The same figures, rolled up here from a run listing.
+ *
+ * This is how every card was drawn until the API learned to count each project
+ * over its own runs, and it is now only the fallback for an API that has not -
+ * the previous backend, during a deploy. It works from the organization-wide
+ * listing, the newest fifty runs across every repository, so a quiet project
+ * can be missing from it entirely; that is the bug the API's rollups fix, and
+ * it is the reason this is a fallback rather than a second opinion.
  *
  * The definitions are copied from `buildReport` in
- * `src/server/observability.ts` on purpose, and have to stay copied: a card
- * saying 80% beside a project whose own Insights page says 60% is worse than
- * either number alone. `succeeded` and `settled` are that file's, verbatim.
+ * `src/server/observability.ts` on purpose, and have to stay copied for as long
+ * as this exists: a card that changed its arithmetic during a deploy would say
+ * 80% one minute and 60% the next about the same runs. `succeeded` and
+ * `settled` are that file's, verbatim.
  */
 const SUCCEEDED: ReadonlyArray<RunSummary["status"]> = ["done", "approved", "awaiting-approval"];
-
-export interface ProjectRollup {
-  runs: number;
-  /** Newest run, or undefined when the project has never run. */
-  latest?: RunSummary;
-  /** Undefined when nothing has finished yet, which is not the same as zero. */
-  successRate?: number;
-  /** Undefined when no run carried a price, rather than summing to a false zero. */
-  costUsd?: number;
-  /** Failures, and proposals that never became a pull request. */
-  needsAttention: number;
-}
 
 export function rollUp(runs: RunSummary[]): ProjectRollup {
   const finished = runs.filter((run) => run.status !== "running");
@@ -95,4 +101,30 @@ export function rollUp(runs: RunSummary[]): ProjectRollup {
           (run.status === "approved" || run.status === "awaiting-approval")),
     ).length,
   };
+}
+
+/**
+ * Every project with the figures its card shows.
+ *
+ * The API's rollups when it sent them, and a roll-up of the organization-wide
+ * listing when it did not - never a mix of the two. A project the rollups leave
+ * out is counted as never having run rather than looked up in the listing,
+ * because the two are different windows over different runs: a grid sorted by
+ * "latest run" with half its cards from each would put them in an order
+ * neither source agrees with, and a project with no rollup is a project the API
+ * found no runs for.
+ *
+ * Generic over the project so a caller keeps whichever fields it passed in -
+ * the projects page trims them before they cross into a client component.
+ */
+export function projectStats<P extends Pick<Project, "id" | "key">>(
+  projects: P[],
+  rollups: ProjectRollupsPage | null,
+  runs: RunSummary[],
+): Array<{ project: P; stats: ProjectRollup }> {
+  if (!rollups) {
+    return projects.map((project) => ({ project, stats: rollUp(projectRuns(project, runs)) }));
+  }
+  const own = new Map(rollups.rollups.map((rollup) => [rollup.projectId, rollup]));
+  return projects.map((project) => ({ project, stats: own.get(project.id) ?? rollUp([]) }));
 }

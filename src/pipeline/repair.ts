@@ -1,7 +1,7 @@
 import type { DocsProposal } from '../types.js';
 import type { ApplyResult } from './apply.js';
 import { applyDocEdits } from './apply.js';
-import { readRepoFile } from '../git/repo.js';
+import { readDocExcerpts } from '../git/repo.js';
 import { DOCS_UPDATER } from '../agents/roles.js';
 import type { RunContext } from './context.js';
 
@@ -49,6 +49,8 @@ export async function repairAnchors(
   docsPath: string,
   docs: DocsProposal,
   applied: ApplyResult,
+  /** The same scope the first pass was applied under; see `applyDocEdits`. */
+  editable?: ReadonlySet<string>,
 ): Promise<RepairOutcome> {
   const broken = applied.problems.filter((p) => REPAIRABLE.has(p.kind));
   if (broken.length === 0) return { docs, applied };
@@ -61,18 +63,21 @@ export async function repairAnchors(
    * edits to a file applied cleanly - and re-asking about an edit that worked
    * is far cheaper than leaving one that did not.
    */
-  const brokenPaths = new Set(broken.map((p) => p.path));
+  /*
+   * The files are shown under the same budget the first pass used.
+   *
+   * They used to go in whole, which is exactly what the first pass's budget
+   * exists to prevent: an anchor that failed in a generated reference page of
+   * a few megabytes sent all of it, and a context-length retry sent it again.
+   * A file the budget leaves out entirely is not asked about - an anchor cannot
+   * be copied from text the model is not shown.
+   */
+  const shown = await readDocExcerpts(docsPath, [...new Set(broken.map((p) => p.path))]);
+  const unseen = new Set([...shown.missing, ...shown.omitted]);
+  const brokenPaths = new Set(broken.map((p) => p.path).filter((path) => !unseen.has(path)));
   const toRepair = docs.edits.filter((e) => brokenPaths.has(e.path) && e.mode !== 'append');
-  if (toRepair.length === 0) return { docs, applied };
-
-  const excerpts: string[] = [];
-  for (const path of brokenPaths) {
-    const text = await readRepoFile(docsPath, path);
-    if (text === null) continue;
-    excerpts.push(`===== FILE: ${path} (complete) =====\n${text}`);
-  }
-  // Nothing readable to re-anchor against. The originals stand.
-  if (excerpts.length === 0) return { docs, applied };
+  // Nothing readable to re-anchor against, or nothing to re-anchor. The originals stand.
+  if (toRepair.length === 0 || !shown.text) return { docs, applied };
 
   const prompt = [
     'Your previous edits did not apply. Re-anchor them.',
@@ -84,11 +89,11 @@ export async function repairAnchors(
     'you proposed may well be right. The text you quoted to locate it was not in',
     'the file.',
     '',
-    ...broken.map((p) => `- ${p.path}: ${p.detail}`),
+    ...broken.filter((p) => brokenPaths.has(p.path)).map((p) => `- ${p.path}: ${p.detail}`),
     '',
-    '## The files, in full, as they are now',
+    '## The files as they are now (whole unless marked as cut)',
     '',
-    ...excerpts,
+    shown.text,
     '',
     '## The edits to re-anchor',
     '',
@@ -107,12 +112,32 @@ export async function repairAnchors(
     'that is complete.',
   ].join('\n');
 
+  /**
+   * The repair runs in the Docs Updater's own trace - one trace per role per
+   * run - so it replaces what that trace says the role was asked and answered,
+   * and a repair that fails marks the role failed. That is only true when the
+   * repair is what the run keeps. When it is not, the proposal that stands came
+   * from the first pass, and the trace is put back to say so. Usage and events
+   * stay: the repair was really spent and really happened.
+   */
+  const trace = ctx.run.traces.find((t) => t.role === DOCS_UPDATER.name);
+  const firstPass = trace ? { ...trace } : null;
+  const keepFirstPass = async (): Promise<void> => {
+    if (!trace || !firstPass) return;
+    for (const key of ['status', 'error', 'failure', 'finishedAt', 'prompt', 'rawOutput'] as const) {
+      if (firstPass[key] === undefined) delete trace[key];
+      else Object.assign(trace, { [key]: firstPass[key] });
+    }
+    await ctx.persist();
+  };
+
   let repaired: DocsProposal;
   try {
     repaired = await ctx.invoke(DOCS_UPDATER, prompt);
   } catch {
     // The repair is a bonus pass. Its failure must not take down a run that
     // already has a proposal, however partial.
+    await keepFirstPass();
     return { docs, applied, attempted: { broken: broken.length, fixed: 0 } };
   }
 
@@ -125,12 +150,16 @@ export async function repairAnchors(
   const merged: DocsProposal = {
     edits: [
       ...docs.edits.filter((e) => !brokenPaths.has(e.path)),
-      ...(repaired.edits ?? []),
+      // Only for the files it was asked about. An edit to any other file would
+      // sit beside that file's original edits and apply twice.
+      ...(repaired.edits ?? []).filter((e) => brokenPaths.has(e.path)),
     ],
     skipped: [...(docs.skipped ?? []), ...(repaired.skipped ?? [])],
   };
 
-  const reapplied = await applyDocEdits(docsPath, merged);
+  // Under the first pass's scope: the repaired edits are a second model answer,
+  // and nothing about being a repair makes its paths more trustworthy.
+  const reapplied = await applyDocEdits(docsPath, merged, editable);
   const stillBroken = reapplied.problems.filter((p) => REPAIRABLE.has(p.kind)).length;
 
   // Only kept if it is actually better. A second pass that anchors fewer edits
@@ -139,6 +168,7 @@ export async function repairAnchors(
   const before = applied.files.reduce((n, f) => n + f.appliedEdits, 0);
   const after = reapplied.files.reduce((n, f) => n + f.appliedEdits, 0);
   if (after <= before) {
+    await keepFirstPass();
     return { docs, applied, attempted: { broken: broken.length, fixed: 0 } };
   }
 

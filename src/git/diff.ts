@@ -1,4 +1,5 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { StringDecoder } from 'node:string_decoder';
 import { promisify } from 'node:util';
 import type { CommitDiff, DiffFile } from '../types.js';
 
@@ -21,6 +22,18 @@ const PATCH_BUDGET = 12_000;
  * documentation consequences.
  */
 const DIFF_BUDGET = 180_000;
+/**
+ * How much patch text a whole commit may hold in memory, in characters.
+ *
+ * `PATCH_BUDGET` bounds each file, which bounds nothing about a commit of
+ * forty thousand vendored files: a head for every one of them was kept, a few
+ * hundred megabytes to build a prompt that shows 180k - enough to run the
+ * container out of memory and take every lane down with it. The prompt keeps
+ * the smallest files first, so when this is exceeded the largest heads are the
+ * ones let go: they are the files the prompt would have dropped anyway. Kept
+ * at several times `DIFF_BUDGET` so that is true with room to spare.
+ */
+const RETAINED_PATCH_BUDGET = 2_000_000;
 /**
  * The share of the whole-diff budget the notice about dropped files may spend.
  *
@@ -89,8 +102,241 @@ function parseStatus(code: string): DiffFile['status'] {
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 
 /**
+ * The options the whole-commit `git diff` runs with.
+ *
+ * Pinned, because its output is parsed and a user's configuration can reshape
+ * it: a colour setting adds escapes, an external diff tool replaces the patch
+ * with whatever it prints, and `diff.submodule=log` swaps a submodule's
+ * `diff --git` header for a summary line. `-M` is the rename detection the
+ * file list has always used.
+ */
+const DIFF_OPTIONS = ['-M', '--no-color', '--no-ext-diff', '--submodule=short'];
+
+/** One file's patch as it streams past: the part worth keeping, and how long it really was. */
+interface PatchText {
+  head: string;
+  length: number;
+  /** The head was let go to keep the commit within `RETAINED_PATCH_BUDGET`. */
+  evicted?: boolean;
+}
+
+/**
+ * A copy of a string that shares no memory with the one it came from.
+ *
+ * A head is built from slices of the stream's chunks, and V8 keeps a sliced
+ * string's whole parent alive: a 300-character patch pinned the 64 KB chunk it
+ * was cut from, for as long as the diff was held.
+ */
+function detached(text: string): string {
+  return Buffer.from(text, 'utf8').toString('utf8');
+}
+
+function appendPatch(patch: PatchText, text: string): void {
+  if (patch.head.length < PATCH_BUDGET) {
+    patch.head += text.slice(0, PATCH_BUDGET - patch.head.length);
+  }
+  patch.length += text.length;
+}
+
+/** Sections of one file, in order, as though they had streamed past as one. */
+function joinPatches(parts: PatchText[]): PatchText {
+  const joined: PatchText = { head: '', length: 0 };
+  for (const part of parts) {
+    appendPatch(joined, part.head);
+    joined.length += part.length - part.head.length;
+    if (part.evicted) joined.evicted = true;
+  }
+  if (joined.evicted) joined.head = '';
+  return joined;
+}
+
+/**
+ * How many `diff --git` sections a file's patch is printed as.
+ *
+ * Two for a type change - a file that became a symlink or a submodule, or the
+ * reverse - because git prints that as the old thing's deletion followed by
+ * the new thing's creation, under one entry in the file list. Asking for that
+ * one path on its own printed both, so both belong to it here too.
+ */
+function sectionsFor(code: string): number {
+  return code.startsWith('T') ? 2 : 1;
+}
+
+/**
+ * Splits `git diff --raw --numstat -p -z` output as it arrives.
+ *
+ * The output comes in two parts. First the file list, NUL-separated: a raw
+ * entry per file, then a numstat entry per file in the same order, and an
+ * empty field closing the list. No field in it is ever empty, so the first
+ * pair of NULs is that end. Then the patch text, a section per file, each
+ * opening with a `diff --git ` line. That opening is unambiguous: inside a
+ * hunk every line starts with a space, `+`, `-` or a backslash, so a file
+ * whose *content* contains a diff header arrives as `+diff --git ...` and
+ * splits nothing.
+ *
+ * Streamed rather than buffered because the commits this has to survive are
+ * the vendored dependency bump and the regenerated client - hundreds of
+ * megabytes of patch, of which no file keeps more than `PATCH_BUDGET`. The
+ * rest is counted and dropped as it passes.
+ */
+class DiffSplitter {
+  /** The file list, once the patch text has begun; everything so far before then. */
+  listing = '';
+  readonly sections: PatchText[] = [];
+  private inPatch = false;
+  private carry = '';
+  /** Head characters held by finished sections. */
+  private retained = 0;
+
+  /**
+   * Close the section that just ended: copy its head out of the chunks it was
+   * sliced from and, if the commit is now holding too much, let the largest
+   * heads go - down to half the budget, so this runs rarely rather than on
+   * every section once a commit is large.
+   */
+  private finish(section: PatchText | undefined): void {
+    if (!section || section.evicted) return;
+    section.head = detached(section.head);
+    this.retained += section.head.length;
+    if (this.retained <= RETAINED_PATCH_BUDGET) return;
+    const largest = this.sections
+      .filter((candidate) => !candidate.evicted && candidate.head.length > 0)
+      .sort((a, b) => b.head.length - a.head.length);
+    for (const candidate of largest) {
+      if (this.retained <= RETAINED_PATCH_BUDGET / 2) break;
+      this.retained -= candidate.head.length;
+      candidate.head = '';
+      candidate.evicted = true;
+    }
+  }
+
+  push(text: string): void {
+    if (this.inPatch) {
+      this.patchText(text);
+      return;
+    }
+    const searchFrom = Math.max(0, this.listing.length - 1);
+    this.listing += text;
+    const close = this.listing.indexOf('\0\0', searchFrom);
+    if (close === -1) return;
+    const rest = this.listing.slice(close + 2);
+    this.listing = this.listing.slice(0, close + 1);
+    this.inPatch = true;
+    this.patchText(rest);
+  }
+
+  /** Flush the final line, which git ends with a newline but a truncated stream may not. */
+  end(): void {
+    const tail = this.carry;
+    this.carry = '';
+    if (tail) this.lines(tail, tail.length);
+    this.finish(this.sections.at(-1));
+  }
+
+  private patchText(text: string): void {
+    const pending = this.carry + text;
+    // A trailing partial line waits for the next chunk: a header split across
+    // two chunks would otherwise be read as more of the file before it.
+    const complete = pending.lastIndexOf('\n') + 1;
+    this.carry = pending.slice(complete);
+    this.lines(pending, complete);
+  }
+
+  private lines(text: string, end: number): void {
+    let at = 0;
+    while (at < end) {
+      if (text.startsWith('diff --git ', at)) {
+        this.finish(this.sections.at(-1));
+        this.sections.push({ head: '', length: 0 });
+      }
+      const next = text.indexOf('\ndiff --git ', at);
+      const stop = next === -1 ? end : Math.min(next + 1, end);
+      const current = this.sections.at(-1);
+      if (current) appendPatch(current, text.slice(at, stop));
+      at = stop;
+    }
+  }
+}
+
+/** One file from the list: its raw status code, its names, and its line counts. */
+interface ListedFile {
+  code: string;
+  /** One name, or the old and new names for a rename or copy. */
+  paths: string[];
+  additions: number;
+  deletions: number;
+}
+
+/**
+ * The file list half of the output.
+ *
+ * Read with `-z`, so names arrive verbatim. Without it git quotes any name
+ * outside plain ASCII and writes a rename's line counts against
+ * `old => new`, which matched no file - every renamed file reported +0/-0.
+ */
+function parseListing(listing: string): ListedFile[] {
+  const fields = listing.split('\0');
+  let at = 0;
+
+  const raw: Array<{ code: string; paths: string[] }> = [];
+  while ((fields[at] ?? '').startsWith(':')) {
+    const code = fields[at]?.split(' ').at(-1) ?? '';
+    const width = code.startsWith('R') || code.startsWith('C') ? 2 : 1;
+    raw.push({ code, paths: fields.slice(at + 1, at + 1 + width) });
+    at += 1 + width;
+  }
+
+  const listed: ListedFile[] = [];
+  for (const entry of raw) {
+    // `added<TAB>deleted<TAB>name`, or for a rename an empty name followed by
+    // both names as fields of their own. Binary files count as `-`.
+    const [added = '', deleted = '', ...name] = (fields[at] ?? '').split('\t');
+    at += name.join('\t') === '' ? 3 : 1;
+    listed.push({
+      ...entry,
+      additions: Number.parseInt(added, 10) || 0,
+      deletions: Number.parseInt(deleted, 10) || 0,
+    });
+  }
+  return listed;
+}
+
+/** Run the whole-commit diff once and split it as it streams. */
+async function streamDiff(repoPath: string, range: string[]): Promise<DiffSplitter> {
+  const splitter = new DiffSplitter();
+  const child = spawn('git', ['diff', '--raw', '--numstat', '-p', '-z', ...DIFF_OPTIONS, ...range], {
+    cwd: repoPath,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  const decoder = new StringDecoder('utf8');
+  let stderr = '';
+  child.stdout.on('data', (chunk: Buffer) => splitter.push(decoder.write(chunk)));
+  child.stderr.on('data', (chunk: Buffer) => {
+    if (stderr.length < 8_192) stderr += chunk.toString('utf8');
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`git diff exited with ${code ?? 'a signal'}: ${stderr.trim()}`));
+    });
+  });
+
+  splitter.push(decoder.end());
+  splitter.end();
+  return splitter;
+}
+
+/**
  * Read one commit as a structured diff. Diffs against the first parent so a merge
  * commit reports what actually landed on the branch, not the whole other side.
+ *
+ * One `git diff` for the whole commit, split per file as it streams. It used
+ * to be a process per changed file, run one after another, so a formatter run
+ * across three hundred files was three hundred sequential spawns before the
+ * first role saw anything.
  */
 export async function readCommitDiff(repoPath: string, ref: string): Promise<CommitDiff> {
   const sha = await resolveCommit(repoPath, ref);
@@ -114,50 +360,58 @@ export async function readCommitDiff(repoPath: string, ref: string): Promise<Com
     (await git(repoPath, ['rev-list', '--parents', '-n1', sha])).trim().split(/\s+/).length - 1;
   const range = parentCount > 0 ? [`${sha}^1`, sha] : [EMPTY_TREE, sha];
 
-  const nameStatus = await git(repoPath, ['diff', '--name-status', '-M', ...range]);
-  const numstat = await git(repoPath, ['diff', '--numstat', '-M', ...range]);
+  const { listing, sections } = await streamDiff(repoPath, range);
+  const listed = parseListing(listing);
 
-  const counts = new Map<string, { additions: number; deletions: number }>();
-  for (const line of numstat.split('\n').filter(Boolean)) {
-    const [add = '0', del = '0', ...pathParts] = line.split('\t');
-    const path = pathParts[pathParts.length - 1] ?? '';
-    counts.set(path, {
-      additions: Number.parseInt(add, 10) || 0,
-      deletions: Number.parseInt(del, 10) || 0,
-    });
-  }
+  // Sections are matched to files by position, which holds only while there
+  // is exactly the number the list predicts. Should some configuration ever
+  // print one more or one fewer, every patch after it would land on the wrong
+  // file - so instead each file is asked for on its own, the slow way, which
+  // cannot be misattributed.
+  const aligned = sections.length === listed.reduce((n, file) => n + sectionsFor(file.code), 0);
 
   const files: DiffFile[] = [];
-  for (const line of nameStatus.split('\n').filter(Boolean)) {
-    const parts = line.split('\t');
-    const status = parseStatus(parts[0] ?? '');
-    const previousPath = status === 'renamed' ? parts[1] : undefined;
-    const path = (status === 'renamed' ? parts[2] : parts[1]) ?? '';
+  let cursor = 0;
+  // The slow path asks per file, so it is held to the same total here.
+  let fetched = 0;
+  for (const entry of listed) {
+    const own = sections.slice(cursor, cursor + sectionsFor(entry.code));
+    cursor += sectionsFor(entry.code);
+
+    const status = parseStatus(entry.code);
+    const previousPath = status === 'renamed' ? entry.paths[0] : undefined;
+    const path = entry.paths.at(-1) ?? '';
     if (!path) continue;
 
-    let patch = '';
+    let text: PatchText = { head: '', length: 0 };
     if (status !== 'deleted') {
-      try {
-        patch = await git(repoPath, ['diff', ...range, '--', path]);
-      } catch {
-        patch = '';
+      if (aligned) {
+        text = joinPatches(own);
+      } else if (fetched > RETAINED_PATCH_BUDGET) {
+        text = { head: '', length: 0, evicted: true };
+      } else {
+        appendPatch(text, await git(repoPath, ['diff', ...range, '--', path]).catch(() => ''));
+        text.head = detached(text.head);
+        fetched += text.head.length;
       }
     }
-    const truncated = patch.length > PATCH_BUDGET;
-    if (truncated) {
-      const dropped = patch.length - PATCH_BUDGET;
-      patch = `${patch.slice(0, PATCH_BUDGET)}\n... [patch truncated: ${dropped} more characters]`;
-    }
 
-    const count = counts.get(path) ?? { additions: 0, deletions: 0 };
-    const file = {
+    const truncated = text.length > PATCH_BUDGET;
+    const patch = text.evicted
+      ? ''
+      : truncated
+        ? `${text.head}\n... [patch truncated: ${text.length - PATCH_BUDGET} more characters]`
+        : text.head;
+
+    const file: DiffFile = {
       path,
       status,
-      additions: count.additions,
-      deletions: count.deletions,
+      additions: entry.additions,
+      deletions: entry.deletions,
       patch,
-      truncated,
+      truncated: truncated || Boolean(text.evicted),
     };
+    if (text.evicted) file.omitted = true;
     // A rename carries the name it had before; everything else has no such
     // field at all, rather than one holding `undefined`.
     files.push(previousPath ? { ...file, previousPath } : file);
@@ -192,7 +446,12 @@ function renderFile(file: DiffFile): string {
  * restored afterwards: a diff should read in the order git reported it.
  */
 function withinBudget(files: DiffFile[], budget: number) {
-  const rendered = files.map((file) => ({ file, size: renderFile(file).length + 2 }));
+  // A file whose patch was not kept cannot be shown, so it never fits: it is
+  // named among the dropped files instead of rendered as an empty patch.
+  const rendered = files.map((file) => ({
+    file,
+    size: file.omitted ? Number.POSITIVE_INFINITY : renderFile(file).length + 2,
+  }));
   const bySize = [...rendered].sort((a, b) => a.size - b.size);
 
   const keep = new Set<DiffFile>();

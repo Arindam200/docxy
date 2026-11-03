@@ -31,6 +31,7 @@ import {
   type ResolvedSession,
   type RunTurnOptions,
   type TraceEvent,
+  type TurnFailureKind,
   type TurnResult,
   type TurnUsage,
 } from './types.js';
@@ -89,11 +90,175 @@ function objectFrom<T>(role: RoleDefinition<T>, text: string): T | undefined {
   return empty.success ? empty.data : undefined;
 }
 
+/** Chunks that say one of this turn's own tools has finished, one way or another. */
+const TOOL_ENDINGS = new Set(['tool-result', 'tool-error', 'tool-output-denied']);
+
+/**
+ * A turn's pulse, and what happens when it stops.
+ *
+ * The per-attempt deadline is the only other bound on a turn, and it has to be
+ * long: a reasoning model writing a sixteen-thousand-token answer is minutes of
+ * honest work. So a provider that accepted a request and then went silent held
+ * the role for all of it, three attempts over - about twenty minutes before
+ * anything gave up on it. A stream says something every few hundred
+ * milliseconds while it is working, which makes silence the signal, and it can
+ * be acted on in seconds rather than minutes.
+ *
+ * Every chunk Mastra hands `onChunk` counts as life: text, reasoning, a tool
+ * call being written. The clock stops while one of this turn's own tools is
+ * running, because that silence is ours - a sandboxed program is bounded by its
+ * own timeout, and a model cannot be expected to speak while it waits for the
+ * result. It starts again when the last running tool reports back.
+ *
+ * Expiry aborts the call through the same signal the caller's deadline uses,
+ * and is remembered here, so the turn is reported as `stalled` rather than
+ * mistaken for the caller giving up on it.
+ */
+class IdleWatch {
+  private readonly controller = new AbortController();
+  private timer: ReturnType<typeof setTimeout> | undefined;
+  private toolsRunning = 0;
+  private stopped = false;
+
+  constructor(private readonly limitMs: number) {
+    this.arm();
+  }
+
+  get signal(): AbortSignal {
+    return this.controller.signal;
+  }
+
+  /** True once the turn went quiet for the whole limit and was aborted for it. */
+  get expired(): boolean {
+    return this.controller.signal.aborted;
+  }
+
+  /** One chunk arrived; `kind` is Mastra's name for it. */
+  saw(kind: string): void {
+    if (kind === 'tool-call') this.toolsRunning += 1;
+    else if (TOOL_ENDINGS.has(kind)) this.toolsRunning = Math.max(0, this.toolsRunning - 1);
+    this.arm();
+  }
+
+  /** The call is over. A chunk that straggles in afterwards must not start the clock again. */
+  stop(): void {
+    this.stopped = true;
+    clearTimeout(this.timer);
+  }
+
+  private arm(): void {
+    clearTimeout(this.timer);
+    if (this.stopped || this.expired || this.toolsRunning > 0) return;
+    this.timer = setTimeout(() => {
+      this.controller.abort(
+        new DOMException(`no progress for ${this.limitMs / 1000}s`, 'TimeoutError'),
+      );
+    }, this.limitMs);
+  }
+}
+
+/**
+ * The error an aborted call is raised as.
+ *
+ * Mastra does not throw when a call is aborted. It finishes the turn early -
+ * as a tripwire with no processor behind it when the model was mid-answer - and
+ * the runtime used to read that as a guardrail refusing the diff: every
+ * attempt deadline was reported as `blocked`, never retried, and blamed on
+ * whoever wrote the commit. The abort is raised here instead, as the caller's
+ * own reason when it is one of the two `RunContext` interprets, so a spent
+ * attempt is retried and a spent run is not, exactly as that code intends.
+ */
+function abortOf(signal: AbortSignal): Error {
+  const reason = signal.reason;
+  if (reason instanceof Error && (reason.name === 'AbortError' || reason.name === 'TimeoutError')) {
+    return reason;
+  }
+  return new DOMException('the turn was aborted', 'AbortError');
+}
+
+/**
+ * Where a provider's HTTP status lives on a failed call.
+ *
+ * The AI SDK raises an `APICallError` carrying `statusCode`, and Mastra may
+ * wrap it, so `cause` is followed a few links down. An SDK's error object is
+ * external data like any other, and parsed rather than probed; a link that
+ * does not fit is no status rather than an exception.
+ */
+const providerFailureSchema = z.object({
+  statusCode: z.number().int().optional().catch(undefined),
+  cause: z.instanceof(Error).optional().catch(undefined),
+});
+
+function httpStatusOf(err: Error, depth = 0): number | undefined {
+  const parsed = providerFailureSchema.safeParse(err);
+  if (!parsed.success) return undefined;
+  if (parsed.data.statusCode !== undefined) return parsed.data.statusCode;
+  return parsed.data.cause && depth < 3 ? httpStatusOf(parsed.data.cause, depth + 1) : undefined;
+}
+
+/** A failed call, named for the retry policy and worded for whoever reads the trace. */
+interface DescribedFailure {
+  message: string;
+  kind: TurnFailureKind;
+}
+
+/**
+ * Classify a failed call by what the provider actually answered.
+ *
+ * The status is read off the error object rather than out of its text: the
+ * message is whatever the provider chose to say - "Unauthorized" from one, a
+ * sentence about keys from another - and a pattern for `404` in free text is
+ * one bad error message away from refusing to retry a timeout. A refusal is
+ * reworded to say what to check, because the provider's own words name the
+ * symptom and an operator needs the setting.
+ */
+function describeFailure(err: Error, model: string): DescribedFailure {
+  const status = httpStatusOf(err);
+  const kind = classifyTurnError(err.message, status);
+  if (kind !== 'provider-rejected') return { message: err.message, kind };
+  const answered = status === undefined ? '' : ` with HTTP ${status}`;
+  return {
+    kind,
+    message:
+      `the provider refused ${model}${answered}: ${err.message}. Check NEBIUS_API_KEY and ` +
+      'the model configured for this role (DOCXY_MODEL_*); asking again would be refused ' +
+      'the same way',
+  };
+}
+
+/**
+ * One Mastra store per database per process, shared by every runtime.
+ *
+ * A runtime is built per run, because it is bound to that run's checkout and
+ * configuration - but its store was being built per run too, and a store is a
+ * connection pool plus `init()`, which issues Mastra's whole schema setup over
+ * the network before the first role can start. Nothing in the server ever
+ * closed one, so each run also left its pool behind. The store depends on
+ * nothing but where it points, so it is opened once and handed to whichever
+ * runtime asks.
+ *
+ * A failed open is forgotten rather than cached, so the next run tries again
+ * instead of inheriting the failure.
+ */
+const sharedStores = new Map<string, Promise<MastraStorage>>();
+
+function sharedStorage(key: string, open: () => Promise<MastraStorage>): Promise<MastraStorage> {
+  const existing = sharedStores.get(key);
+  if (existing) return existing;
+  const opened = open();
+  sharedStores.set(key, opened);
+  opened.catch(() => {
+    if (sharedStores.get(key) === opened) sharedStores.delete(key);
+  });
+  return opened;
+}
+
 export class MastraRuntime implements AgentRuntime {
   readonly name = 'mastra' as const;
 
   private readonly agents = new Map<RoleName, Agent>();
   private store: MastraStorage | null = null;
+  private storeKey: string | null = null;
   private instance: Mastra | null = null;
   private memory: Memory | null = null;
   private closed = false;
@@ -138,22 +303,23 @@ export class MastraRuntime implements AgentRuntime {
   async storage(): Promise<MastraStorage> {
     if (this.store) return this.store;
 
-    if (databaseConfigured()) {
-      const { PostgresStore } = await import('@mastra/pg');
-      this.store = new PostgresStore({
-        id: 'docxy',
-        // SAFETY: `databaseConfigured()` is exactly the check that this is set.
-        connectionString: process.env.DATABASE_URL as string,
-      });
-    } else {
-      const { LibSQLStore } = await import('@mastra/libsql');
-      this.store = new LibSQLStore({
-        id: 'docxy',
-        url: `file:${join(this.config.stateDir, 'mastra.db')}`,
-      });
-    }
+    const connectionString = databaseConfigured() ? process.env.DATABASE_URL : undefined;
+    const file = join(this.config.stateDir, 'mastra.db');
+    const key = connectionString ? `pg:${connectionString}` : `libsql:${file}`;
 
-    await this.store.init();
+    this.store = await sharedStorage(key, async () => {
+      let store: MastraStorage;
+      if (connectionString) {
+        const { PostgresStore } = await import('@mastra/pg');
+        store = new PostgresStore({ id: 'docxy', connectionString });
+      } else {
+        const { LibSQLStore } = await import('@mastra/libsql');
+        store = new LibSQLStore({ id: 'docxy', url: `file:${file}` });
+      }
+      await store.init();
+      return store;
+    });
+    this.storeKey = key;
     return this.store;
   }
 
@@ -305,7 +471,11 @@ export class MastraRuntime implements AgentRuntime {
 
   private async memoryHandle(): Promise<Memory> {
     if (!this.memory) {
-      this.memory = new Memory({ storage: await this.storage() });
+      this.memory = new Memory({
+        storage: await this.storage(),
+        // See `agent.memoryLastMessages`: the default re-sends old diffs.
+        options: { lastMessages: this.config.agent.memoryLastMessages },
+      });
     }
     return this.memory;
   }
@@ -429,6 +599,31 @@ export class MastraRuntime implements AgentRuntime {
       options.onEvent?.(event);
     };
 
+    // Watched only when asked to be, because watching means streaming, and a
+    // stream through Mastra's model router comes back without its token
+    // counts; see `agent.idleTimeoutMs`. Started after the agent is built, so a
+    // cold store opening for the first time is not mistaken for a quiet model.
+    const idleMs = this.config.agent.idleTimeoutMs;
+    const watch = idleMs > 0 ? new IdleWatch(idleMs) : undefined;
+
+    /** The turn went quiet and was abandoned: reported, not thrown, like any other failure. */
+    const stalled = (usage: TurnUsage): TurnResult<T> => {
+      const error =
+        `the model went quiet: nothing arrived for ${idleMs / 1000}s, so the turn ` +
+        'was abandoned rather than left to run out the attempt deadline';
+      emit('error', error);
+      return {
+        text: '',
+        events,
+        subthreads: [],
+        status: 'stalled',
+        usage,
+        error,
+        errorKind: 'stalled',
+        truncated: false,
+      };
+    };
+
     try {
       /**
        * A turn with tools does not ask for structured output at all.
@@ -482,22 +677,28 @@ export class MastraRuntime implements AgentRuntime {
        */
       const shared: SharedTurnOptions = { modelSettings };
       if (memory) shared.memory = memory;
-      if (options.signal) shared.abortSignal = options.signal;
+      // The caller's deadline and the idle watch abort the same call. Which of
+      // them fired is read back afterwards, because the two mean different
+      // things to whoever decides whether to try again.
+      const abortSignal =
+        watch && options.signal
+          ? AbortSignal.any([options.signal, watch.signal])
+          : (watch?.signal ?? options.signal);
+      if (abortSignal) shared.abortSignal = abortSignal;
 
-      const result = options.toolset
-        ? await agent.generate(prompt, {
-            ...shared,
-            toolsets: { docxy: options.toolset.tools },
-            maxSteps: options.toolset.maxSteps,
-            instructions: `${role.instructions(this.config)}\n\n${options.toolset.instructions}`,
-          })
-        : await agent.generate(prompt, {
-            ...shared,
-            structuredOutput: { schema: role.schema },
-          });
+      const result = await this.ask(agent, role, prompt, shared, options.toolset, watch);
 
       const usage = readUsage(result.usage);
       const truncated = result.finishReason === 'length';
+
+      // Mastra does not throw when a call is aborted. It finishes the turn
+      // early, as a tripwire with no processor behind it - which the check
+      // below would read as a guardrail refusing the diff - so the signals are
+      // read before anything takes the result at its word. The caller's abort
+      // is theirs to interpret, as it is in the catch below; the watch's is a
+      // stall, and is reported as one.
+      if (options.signal?.aborted) throw abortOf(options.signal);
+      if (watch?.expired) return stalled(usage);
 
       // A guardrail refused the input, so no model was ever asked. Reported
       // before the ordinary error paths because it is not a fault to retry
@@ -536,10 +737,13 @@ export class MastraRuntime implements AgentRuntime {
       // Errors are reported rather than thrown: the partial trace is the
       // evidence a failed run is debugged from, and throwing discards it.
       if (result.error) {
-        const message = result.error instanceof Error ? result.error.message : String(result.error);
-        turn.error = message;
-        turn.errorKind = classifyTurnError(message);
-        emit('error', message);
+        const failure =
+          result.error instanceof Error
+            ? describeFailure(result.error, this.modelFor(role))
+            : { message: String(result.error), kind: classifyTurnError(String(result.error)) };
+        turn.error = failure.message;
+        turn.errorKind = failure.kind;
+        emit('error', failure.message);
         return turn;
       }
 
@@ -590,29 +794,100 @@ export class MastraRuntime implements AgentRuntime {
       );
       return turn;
     } catch (err) {
+      // The watch fired, and whatever broke after it is its consequence rather
+      // than a fault of its own - unless the caller gave up as well, whose
+      // reason outranks it.
+      if (watch?.expired && !options.signal?.aborted) return stalled(emptyUsage());
       // An abort is the caller's decision and is theirs to interpret; every
       // other failure becomes a reported error carrying whatever was collected.
       if (err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError')) {
         throw err;
       }
-      const message = err instanceof Error ? err.message : String(err);
-      emit('error', `the turn failed: ${message}`);
+      const failure =
+        err instanceof Error
+          ? describeFailure(err, this.modelFor(role))
+          : { message: String(err), kind: classifyTurnError(String(err)) };
+      emit('error', `the turn failed: ${failure.message}`);
       return {
         text: '',
         events,
         subthreads: [],
         status: 'error',
         usage: emptyUsage(),
-        error: message,
-        errorKind: classifyTurnError(message),
+        error: failure.message,
+        errorKind: failure.kind,
         truncated: false,
       };
+    } finally {
+      watch?.stop();
     }
   }
 
+  /**
+   * Put one turn to the model, streamed when it is being watched.
+   *
+   * `generate` and `stream` run the same agent loop - the same memory, input
+   * processors, structured output, tool steps and tripwires - and hand back the
+   * same `FullOutput`; what differs is the provider call underneath. `generate`
+   * makes one request and hears nothing until the answer is complete, so a
+   * provider that has gone silent and one writing a long answer look identical
+   * from here. `stream` hears every chunk as it arrives, which is the only thing
+   * an idle watch can be fed.
+   *
+   * It is not the default because of what it costs. Mastra's model router
+   * builds the Nebius client without asking for usage on a stream, the provider
+   * only sends token counts in a stream when asked, and so a streamed turn
+   * reports zero tokens and no cost. `generate` is kept, unchanged, until that
+   * is a trade someone chooses.
+   *
+   * The two shapes of turn are still two call sites each, for the reason given
+   * in `runTurn`: `structuredOutput` selects an overload, so the options are
+   * built where the call is made rather than as one union that fits neither.
+   */
+  private async ask<T>(
+    agent: Agent,
+    role: RoleDefinition<T>,
+    prompt: string,
+    shared: SharedTurnOptions,
+    toolset: RunTurnOptions['toolset'],
+    watch: IdleWatch | undefined,
+  ) {
+    if (toolset) {
+      const call = {
+        ...shared,
+        toolsets: { docxy: toolset.tools },
+        maxSteps: toolset.maxSteps,
+        instructions: `${role.instructions(this.config)}\n\n${toolset.instructions}`,
+      };
+      if (!watch) return agent.generate(prompt, call);
+      const output = await agent.stream(prompt, {
+        ...call,
+        onChunk: (chunk) => watch.saw(chunk.type),
+      });
+      return output.getFullOutput();
+    }
+
+    const call = { ...shared, structuredOutput: { schema: role.schema } };
+    if (!watch) return agent.generate(prompt, call);
+    const output = await agent.stream(prompt, {
+      ...call,
+      onChunk: (chunk) => watch.saw(chunk.type),
+    });
+    return output.getFullOutput();
+  }
+
+  /**
+   * Release the shared store, for a process that is finished with it.
+   *
+   * Only the CLI calls this, once, at the end of a command - so closing the
+   * store every runtime shares is the point rather than a hazard: an open pool
+   * is what would keep the command from exiting. The server never closes a
+   * runtime, so its runs keep reusing one store.
+   */
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    if (this.storeKey) sharedStores.delete(this.storeKey);
     // SAFETY: `close` is optional on the storage interface - a LibSQL file has
     // nothing to release - so it is probed rather than assumed.
     const store = this.store as { close?: () => Promise<void> } | null;

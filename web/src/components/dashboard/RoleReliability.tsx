@@ -15,6 +15,7 @@ const FAILURE_LABELS = {
   "parse-error": "parse",
   timeout: "timeout",
   aborted: "aborted",
+  "provider-rejected": "rejected",
 } satisfies Record<string, string>;
 
 function usd(value: number | undefined): string {

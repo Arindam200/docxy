@@ -74,8 +74,29 @@ export interface RunStorage {
    * Omitting it means "this deployment's own repository". Passing an empty
    * array means "nothing", and the two must not be collapsed - see `visible` in
    * pipeline/store.ts for what collapsing them cost.
+   *
+   * A listing, not a set of whole runs: a backend may leave out the role
+   * events, the prompts and raw outputs, and the proposed files, which are the
+   * bulk of a run and which nothing that lists runs renders. Read a run with
+   * `load` when you need those.
    */
   list(limit?: number, repoPaths?: string[]): Promise<RunRecord[]>;
+  /**
+   * The newest `limitEach` runs of each repository, keyed by repository path.
+   *
+   * Every path asked about is a key, with an empty list when it has no runs.
+   * The same partial records as `list`; one call however many repositories.
+   */
+  listByRepo(limitEach: number, repoPaths: string[]): Promise<Map<string, RunRecord[]>>;
+  /**
+   * The newest run of one commit in one repository that did not fail.
+   *
+   * The already-documented guard asks this before every run. It used to list
+   * the repository's two hundred newest runs to find one SHA among them, which
+   * hydrated every role and output those runs owned - and still missed a
+   * commit documented more than two hundred runs ago.
+   */
+  forCommit(sha: string, repoPath: string): Promise<RunRecord | null>;
   pending(): Promise<RunRecord[]>;
   /**
    * Role events across runs, newest first.

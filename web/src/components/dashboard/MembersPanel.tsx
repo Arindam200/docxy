@@ -35,8 +35,9 @@ const ROLE_TONE = {
 type InvitableRole = "member" | "admin";
 
 const INVITABLE = [
-  { value: "member", label: "Member - can see everything, changes nothing" },
-  { value: "admin", label: "Admin - can also invite and remove people" },
+  // Matches what the proxy enforces - see lib/proxy-access.ts.
+  { value: "member", label: "Member - can see everything, start runs and publish them" },
+  { value: "admin", label: "Admin - can also connect repositories, edit instructions, and invite or remove people" },
 ] as const satisfies ReadonlyArray<{ value: InvitableRole; label: string }>;
 
 /** `Select` hands back a plain string; narrowed rather than asserted. */
@@ -48,6 +49,7 @@ const FIELD =
   "focus-ring w-full border border-rule bg-surface px-3 py-2 text-sm text-foreground placeholder:text-muted/60";
 
 export function MembersPanel({
+  organizationId,
   members,
   invitations,
   viewerId,
@@ -55,6 +57,16 @@ export function MembersPanel({
   canManage,
   canSendEmail,
 }: {
+  /**
+   * The organization this page was rendered for, sent with every change.
+   *
+   * Left out, Better Auth acts on the session's active organization instead,
+   * and the session is shared by every tab: switch organizations in one and an
+   * invitation typed into a page still showing the first goes to the second.
+   * Naming it is a request, not a grant - the plugin still checks that the
+   * caller belongs to it and may do this there.
+   */
+  organizationId: string;
   members: TeamMember[];
   invitations: PendingInvitation[];
   viewerId: string;
@@ -99,7 +111,7 @@ export function MembersPanel({
     }
 
     try {
-      const result = await organization.inviteMember({ email: address, role });
+      const result = await organization.inviteMember({ email: address, role, organizationId });
       if (result.error) {
         reportError(result.error.message ?? "The invitation could not be sent.");
         return;
@@ -139,9 +151,11 @@ export function MembersPanel({
     setError(null);
     setSent(null);
     try {
-      // Addressed by user id: `removeMember` takes the member's user, and the
-      // server re-checks the caller's rank before doing anything.
-      const result = await organization.removeMember({ memberIdOrEmail: entry.userId });
+      // Addressed by the member row's id, which is what the plugin looks
+      // `memberIdOrEmail` up by (`findMemberById`) when it is not an address. A
+      // user id matches no member row, so every removal used to fail as "member
+      // not found". The server re-checks the caller's rank before doing anything.
+      const result = await organization.removeMember({ memberIdOrEmail: entry.id, organizationId });
       if (result.error) {
         reportError(result.error.message ?? `Could not remove ${entry.name}.`);
         return;

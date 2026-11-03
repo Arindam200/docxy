@@ -1,19 +1,121 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { prBaseBranch, type Config } from '../config.js';
+import { containedPath } from '../git/repo.js';
 import { resolveBaseRef } from '../git/worktree.js';
-import type { RunRecord } from '../types.js';
+import type { ChangelogProposal, RunRecord } from '../types.js';
 import type { ProposedFile } from '../types.js';
-import { githubFetch, installationToken, readAppCredentials, scrubToken } from './app.js';
+import { insertChangelogEntry } from '../pipeline/apply.js';
+import {
+  githubFetch,
+  githubRepoFromUrl,
+  installationToken,
+  readAppCredentials,
+  scrubToken,
+} from './app.js';
+import { networkGit } from './checkout.js';
 
 const exec = promisify(execFile);
 
+/**
+ * Every local git command here runs with hooks switched off.
+ *
+ * Publishing checks out a branch and commits model-written text into a
+ * repository Docxy does not own. A repository that points `core.hooksPath` at
+ * a tracked directory - husky up to v8 does exactly that - would otherwise run
+ * its own `pre-commit` and `post-checkout` scripts on this host, scripts any
+ * contributor to that repository can edit, with the server's credentials in
+ * reach. A bot has no use for hooks, so none run.
+ */
 async function git(cwd: string, args: string[]): Promise<string> {
-  const { stdout } = await exec('git', args, { cwd, maxBuffer: 32 * 1024 * 1024 });
+  const { stdout } = await exec('git', ['-c', 'core.hooksPath=/dev/null', ...args], {
+    cwd,
+    maxBuffer: 32 * 1024 * 1024,
+  });
   return stdout.trim();
+}
+
+/**
+ * The changelog, carried onto whatever the base branch says now.
+ *
+ * Not merged line by line like other files: every entry goes in at the top of
+ * the Unreleased block, so two entries added since the run read the file sit
+ * on exactly the lines this one wants, and a three-way merge calls that a
+ * conflict every time. The entry itself is what the run decided, so it is put
+ * into the current text the same way it was put into the old one - unless it
+ * is already there, as it is after a republish.
+ */
+export function carryChangelog(
+  current: string | null,
+  file: ProposedFile,
+  changelog: ChangelogProposal,
+) {
+  if (current === file.before) return { text: file.after };
+  // Deleted on the base branch since: start a new one rather than restoring
+  // the old one, the same way a run that finds no changelog does.
+  if (current === null) return { text: insertChangelogEntry('# Changelog\n', changelog) };
+  const entry = changelog.entry.replace(/^[-*]\s*/, '').trim();
+  if (current.split('\n').some((line) => line.replace(/^[-*]\s*/, '').trim() === entry)) {
+    return { text: current };
+  }
+  return { text: insertChangelogEntry(current, changelog) };
+}
+
+/**
+ * Raised when the docs moved under a proposal in a way it cannot be merged
+ * into. Distinct from a push failure: retrying cannot help, redrafting can.
+ */
+export class StaleProposalError extends Error {}
+
+/**
+ * The text to commit for one file: the proposal, carried onto whatever the
+ * base branch says now.
+ *
+ * A proposal is a whole file - `before` as it was read, `after` as drafted -
+ * and writing `after` over the base tip reverted anything merged into that
+ * file since the run read it: a docs fix merged during a slow run, or anything
+ * at all before a republish days later. A three-way merge keeps both: the
+ * run's change and theirs, as long as they do not touch the same lines. When
+ * they do, the proposal is stale, and saying so is better than choosing.
+ */
+export async function carryOnto(
+  scratch: string,
+  current: string | null,
+  file: ProposedFile,
+): Promise<{ text: string } | { conflict: string }> {
+  // Untouched since the run read it: the common case, and no merge needed.
+  if (current === file.before) return { text: file.after };
+  if (current === null) {
+    return file.before === ''
+      ? { text: file.after }
+      : { conflict: 'it was deleted on the base branch after the run read it' };
+  }
+  // Somebody else already made the same change.
+  if (current === file.after) return { text: current };
+
+  const currentPath = join(scratch, 'current');
+  const beforePath = join(scratch, 'before');
+  const afterPath = join(scratch, 'after');
+  await writeFile(currentPath, current, 'utf8');
+  await writeFile(beforePath, file.before, 'utf8');
+  await writeFile(afterPath, file.after, 'utf8');
+  try {
+    // `-p` prints the result; the exit status is the number of conflicts.
+    const { stdout } = await exec('git', ['merge-file', '-p', currentPath, beforePath, afterPath], {
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    return { text: stdout };
+  } catch (err) {
+    // The exit status, or NaN for a failure to run at all (`ENOENT` and the like).
+    const status = err instanceof Error && 'code' in err ? Number(err.code) : Number.NaN;
+    if (Number.isInteger(status) && status > 0) {
+      return { conflict: 'it changed on the base branch since the run read it, in the same lines the proposal edits' };
+    }
+    throw err;
+  }
 }
 
 /**
@@ -42,16 +144,16 @@ async function republish(
   run: RunRecord,
   botEmail: string,
 ): Promise<void> {
-  const listed = await git(worktree, ['ls-remote', remote, `refs/heads/${branch}`]).catch(() => '');
+  const listed = await networkGit(worktree, 'ls-remote', [remote, `refs/heads/${branch}`]).catch(() => '');
   const remoteSha = listed.split(/\s+/)[0] ?? '';
   if (!remoteSha) {
     // The branch is gone, or was never the reason for the rejection. Retry
     // plainly; whatever fails now fails with its own message.
-    await git(worktree, ['push', remote, `HEAD:refs/heads/${branch}`]);
+    await networkGit(worktree, 'push', [remote, `HEAD:refs/heads/${branch}`]);
     return;
   }
 
-  await git(worktree, ['fetch', '--no-tags', '--force', remote, `refs/heads/${branch}`]);
+  await networkGit(worktree, 'fetch', ['--no-tags', '--force', remote, `refs/heads/${branch}`]);
   const [committer = '', ...body] = (
     await git(worktree, ['log', '-1', '--format=%ce%n%B', remoteSha])
   ).split('\n');
@@ -69,8 +171,7 @@ async function republish(
     );
   }
 
-  await git(worktree, [
-    'push',
+  await networkGit(worktree, 'push', [
     `--force-with-lease=refs/heads/${branch}:${remoteSha}`,
     remote,
     `HEAD:refs/heads/${branch}`,
@@ -256,7 +357,6 @@ export async function openPullRequest(
   const baseRef = await resolveBaseRef(repoPath, base);
 
   const branch = `docxy/${run.commit.shortSha}-${run.id.slice(0, 8)}`;
-  const worktree = await mkdtemp(join(tmpdir(), 'docxy-wt-'));
 
   /**
    * Inferred from the checkout being published for the same reason.
@@ -269,10 +369,16 @@ export async function openPullRequest(
   const repo = separateDocsRepo
     ? await inferRepo(repoPath)
     : (config.github.repo ?? (await inferRepo(repoPath)));
-  // Minted here, at the moment it is used. An installation token lives an hour
-  // and the approval gate can wait days, so one stored on the run record would
-  // be long dead by the time a reviewer signs off.
+  // Asked for here, at the moment it is used. An installation token lives an
+  // hour and the approval gate can wait days, so one stored on the run record
+  // would be long dead by the time a reviewer signs off.
   const appToken = await installationToken(app, [repoName(repo)]);
+
+  // Made only once nothing that can fail without cleaning up stands between
+  // it and the `finally` that removes it: a failed token request used to
+  // leave one behind per attempt.
+  const worktree = await mkdtemp(join(tmpdir(), 'docxy-wt-'));
+  const scratch = await mkdtemp(join(tmpdir(), 'docxy-merge-'));
 
   try {
     // A worktree left behind by a killed run holds a lock that blocks this one.
@@ -285,10 +391,29 @@ export async function openPullRequest(
     // is already taken locally.
     await git(worktree, ['checkout', '-B', branch]);
 
+    const conflicts: string[] = [];
     for (const file of changed) {
-      const target = join(worktree, file.path);
+      const target = await containedPath(worktree, file.path);
+      if (!target) throw new Error(`Refusing to write ${JSON.stringify(file.path)}: it is outside the docs repository.`);
+      const current = await readFile(target, 'utf8').catch(() => null);
+      const carried =
+        file.path === config.docs.changelogPath && run.changelog?.entry
+          ? carryChangelog(current, file, run.changelog)
+          : await carryOnto(scratch, current, file);
+      if ('conflict' in carried) {
+        conflicts.push(`${file.path}: ${carried.conflict}`);
+        continue;
+      }
       await mkdir(dirname(target), { recursive: true });
-      await writeFile(target, file.after, 'utf8');
+      await writeFile(target, carried.text, 'utf8');
+    }
+    if (conflicts.length > 0) {
+      throw new StaleProposalError(
+        `The documentation changed on \`${base}\` after this run drafted its proposal, and the ` +
+          'changes overlap, so publishing it would undo them:\n' +
+          conflicts.map((line) => `- ${line}`).join('\n') +
+          '\nRe-run the commit to draft against the current docs.',
+      );
     }
 
     await git(worktree, ['add', '--', ...changed.map((f) => f.path)]);
@@ -311,6 +436,8 @@ export async function openPullRequest(
       '-c',
       `user.email=${app.botEmail}`,
       'commit',
+      // Belt and braces with the hooks path above: no hook decides what lands.
+      '--no-verify',
       '-m',
       subject,
       '-m',
@@ -324,7 +451,7 @@ export async function openPullRequest(
     const remote = `https://x-access-token:${appToken}@github.com/${repo}.git`;
     try {
       try {
-        await git(worktree, ['push', remote, `HEAD:refs/heads/${branch}`]);
+        await networkGit(worktree, 'push', [remote, `HEAD:refs/heads/${branch}`]);
       } catch (first) {
         // The branch already exists with different content, which usually means
         // this run was published before and is being republished. The name
@@ -366,6 +493,7 @@ export async function openPullRequest(
   } finally {
     await git(repoPath, ['worktree', 'remove', '--force', worktree]).catch(() => {});
     await rm(worktree, { recursive: true, force: true }).catch(() => {});
+    await rm(scratch, { recursive: true, force: true }).catch(() => {});
   }
 }
 
@@ -479,7 +607,7 @@ function repoName(repo: string): string {
 
 async function inferRepo(repoPath: string): Promise<string> {
   const url = await git(repoPath, ['remote', 'get-url', 'origin']);
-  const m = /github\.com[:/]([^/]+\/[^/.]+)/.exec(url);
-  if (!m?.[1]) throw new Error(`Cannot infer the GitHub repository from origin: ${url}`);
-  return m[1];
+  const repo = githubRepoFromUrl(url);
+  if (!repo) throw new Error(`Cannot infer the GitHub repository from origin: ${url}`);
+  return repo;
 }
