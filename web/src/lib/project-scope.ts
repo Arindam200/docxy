@@ -13,6 +13,17 @@
  * confirming an id: an id that names somebody else's project has to come back
  * as absent, not as a project.
  *
+ * Reads beside the lookup. A page used to wait for this before starting its own
+ * reads, which put the project list and then the page's data end to end - two
+ * round trips where one would do, on every move between a project's sections.
+ * The pages now start theirs at the same time, with the URL's id, and that
+ * gives nothing away: the organization is the session's, confirmed against the
+ * member table; the API narrows a `projectId` within that organization, so an
+ * id from anywhere else reads as nothing rather than as somebody's runs; and
+ * nothing a page fetched is rendered until this has found the project in the
+ * organization's own list. A missing project still 404s, and the reads made
+ * alongside it are dropped unread.
+ *
  * Server-only, because `activeOrganizationId` reads request headers. The link
  * builders live in `lib/projects.ts` so client components can import them.
  */
@@ -36,10 +47,12 @@ export type ProjectScope =
 /**
  * Cached for the render, not across renders.
  *
- * The reads underneath use `cache: "no-store"`, so nothing dedupes them on its
- * own; React's `cache` is what makes the layout and the page it wraps share one
- * lookup. It lasts exactly one request, so a page never shows a project list
- * from an earlier one.
+ * The reads underneath carry a timeout signal, which opts them out of Next's
+ * fetch memoisation, so nothing dedupes them on its own; React's `cache` is
+ * what makes the layout and the page it wraps share one lookup. It lasts
+ * exactly one request, so a page never shows a project list from an earlier
+ * one. `fetchProjects` and `activeOrganizationId` are cached the same way, so a
+ * page that asks for either directly as well shares this one's answer.
  */
 export const currentProject = cache(async (id: string): Promise<ProjectScope> => {
   const organizationId = await activeOrganizationId();

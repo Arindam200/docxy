@@ -274,8 +274,9 @@ export function renderProjectMemory(
     lines.push(
       '',
       `On earlier commits the Docs Updater proposed ${memory.outOfScopeEdits} edit(s) to ` +
-        'files this map had not flagged. If a file is genuinely affected, flag it - an ' +
-        'edit to an unflagged file is rejected downstream.',
+        'files this map had not flagged. If a file is genuinely affected, flag it - the ' +
+        'Docs Updater is only shown the text of flagged files, so an unflagged one is ' +
+        'edited without its current text in view and its edits often fail to apply.',
     );
   }
 

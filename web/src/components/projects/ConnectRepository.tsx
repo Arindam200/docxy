@@ -7,6 +7,7 @@ import { LuArrowRight, LuBookText, LuCode } from "react-icons/lu";
 
 import { useToast } from "@/components/dashboard/Toast";
 import { Select } from "@/components/dashboard/Select";
+import { ORGANIZATION_HEADER } from "@/lib/organization-guard";
 // `import type` only - erased at build, so the server-side module it lives in
 // is never pulled into this client bundle.
 import type { NewProjectInput } from "@/lib/docxy";
@@ -27,10 +28,13 @@ const FIELD =
   "focus-ring w-full border border-rule bg-surface px-3 py-2 text-sm text-foreground placeholder:text-muted";
 
 export function ConnectRepository({
+  organizationId,
   repositories,
   connected,
   initialSource = "",
 }: {
+  /** The organization this form was rendered for. A check, not the tenant. */
+  organizationId: string;
   /** Everything the installation can reach. */
   repositories: string[];
   /** Already connected, so they cannot be chosen as a source twice. */
@@ -79,10 +83,13 @@ export function ConnectRepository({
     // No organization in this payload, deliberately. The proxy writes the
     // session's one into the query string and the API reads it only from
     // there, so a value sent from the browser could not have counted anyway.
+    // The header is a different thing: it says which organization this form
+    // listed repositories for, and the proxy refuses the write when the
+    // session has since moved somewhere else.
     try {
       const response = await fetch("/api/docxy/projects", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", [ORGANIZATION_HEADER]: organizationId },
         body: JSON.stringify(payload),
       });
       // SAFETY: the app endpoint returns an optional error and project id.

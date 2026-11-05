@@ -287,3 +287,82 @@ export interface Instructions {
   instructions: string;
   updatedAt: string | null;
 }
+
+/**
+ * `GET /api/projects/rollups` - each project's own figures.
+ *
+ * Computed by the API over each project's own newest runs, because the
+ * dashboard used to derive them from one organization-wide window of fifty: a
+ * quiet project vanished from that window as soon as a busy one filled it, and
+ * its card said "never run" beside an Insights page that disagreed. The
+ * definitions are `buildReport`'s, so a card and its project's Insights page
+ * cannot disagree either.
+ */
+export interface ProjectRollup {
+  projectId: string;
+  /** Runs counted, newest first, up to the window. */
+  runs: number;
+  /** Newest run, absent when the project has never run. */
+  latest?: RunSummary;
+  /** Absent when nothing has finished yet, which is not the same as zero. */
+  successRate?: number;
+  /** Absent when no run carried a price, rather than summing to a false zero. */
+  costUsd?: number;
+  /** Failures, and proposals that never became a pull request. */
+  needsAttention: number;
+}
+
+export interface ProjectRollupsPage {
+  rollups: ProjectRollup[];
+}
+
+/**
+ * Why a push was not documented.
+ *
+ *   `triage`          Jev was confident the commit needed no documentation.
+ *   `allowance`       the organization's runs for this period are used up.
+ *   `automatic-runs`  the plan does not include runs on push.
+ *   `access`          billing has suspended new runs or put them under review.
+ */
+export type SkipKind = 'triage' | 'allowance' | 'automatic-runs' | 'access';
+
+/** `GET /api/projects/:id/skips` - pushes docxy chose not to document. */
+export interface SkippedCommit {
+  id: string;
+  projectId: string;
+  commit: { sha: string; shortSha: string; subject: string };
+  kind: SkipKind;
+  /** One sentence, shown as it is. */
+  reason: string;
+  /** Present for `triage` skips: what Jev answered. */
+  triage?: { needsDocs: number; surface: string; surfaceConfidence: number; model: string };
+  at: string;
+}
+
+export interface SkippedCommitsPage {
+  skipped: SkippedCommit[];
+}
+
+/**
+ * `POST /api/projects/:id/runs` - document one commit of a project now.
+ *
+ * A run somebody asked for: never triaged, and run even if the commit was
+ * documented before. Still subject to the organization's allowance where
+ * allowances are enforced, which a refusal reports as 409 with `code`.
+ */
+export interface StartProjectRun {
+  /** A full or abbreviated commit SHA in the project's source repository. */
+  commit: string;
+}
+
+export interface StartProjectRunResult {
+  started: true;
+  commit: string;
+  queued: boolean;
+  depth: number;
+}
+
+export interface StartProjectRunRefusal {
+  error: string;
+  code?: SkipKind | 'not-found' | 'queue-full';
+}

@@ -1,8 +1,15 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 
-/** Minimal .env loader - avoids a dependency for one job. */
+/**
+ * Minimal .env loader - avoids a dependency for one job.
+ *
+ * `DOCXY_NO_DOTENV=1` turns it off. The self-test sets it: a developer's `.env`
+ * holds real credentials, a production database URL among them, and a test
+ * that calls `loadConfig()` would otherwise run against whatever it names.
+ */
 function loadDotEnv(dir: string): void {
+  if (process.env.DOCXY_NO_DOTENV === '1') return;
   const file = join(dir, '.env');
   if (!existsSync(file)) return;
   for (const raw of readFileSync(file, 'utf8').split('\n')) {
@@ -105,6 +112,15 @@ export interface Config {
     /** Shell command that runs the test suite; skipped when empty. */
     testCommand: string;
     checkLinks: boolean;
+    /**
+     * Environment variables a host-run validation command may see, beyond the
+     * locale, `PATH`, home and temp directories it always gets.
+     *
+     * Empty by default: the commands are a repository's own scripts, and the
+     * server's environment holds its credentials. The server's own keys are
+     * withheld even when listed. See `validate/host-command.ts`.
+     */
+    passEnv: string[];
   };
   sandbox: {
     /**
@@ -211,6 +227,24 @@ export interface Config {
     /** Wall-clock ceiling for a single attempt. */
     attemptTimeoutMs: number;
     /**
+     * How long a turn may go without a single streamed chunk before it is
+     * abandoned as `stalled`. Zero, the default, turns the watch off.
+     *
+     * The attempt ceiling has to be long enough for a reasoning model to write
+     * its whole answer, so a provider that accepts a request and then goes
+     * silent costs that ceiling on every attempt. Silence on a stream is
+     * visible in seconds - but only on a stream, and a turn is streamed only
+     * while this is on.
+     *
+     * Off by default because of what streaming costs today: Mastra's model
+     * router builds the Nebius client without requesting usage on a stream,
+     * Nebius sends token counts in a stream only when asked, and so every
+     * streamed turn reports zero tokens and no cost. Turning this on trades the
+     * cost columns for catching a hung call in seconds. Time spent inside one
+     * of the turn's own tools does not count as silence.
+     */
+    idleTimeoutMs: number;
+    /**
      * Wall-clock ceiling for a whole run.
      *
      * Per-attempt timeouts bound each role but not their sum: five roles, three
@@ -218,6 +252,19 @@ export interface Config {
      * never ends and blocks every push behind it. This is the outer bound.
      */
     runTimeoutMs: number;
+    /**
+     * Earlier messages a role with memory is sent again on each turn.
+     *
+     * Mastra's default is ten, and a role's earlier messages are mostly its
+     * earlier prompts - each one carrying a whole diff of up to 180k characters.
+     * Four roles carry memory, so a run late in a session re-sent several old
+     * diffs per role for nothing: what earlier commits taught a role travels in
+     * the symbol map and project memory, which every prompt already includes.
+     * Two keeps the previous exchange, which is what "a convention established
+     * earlier in this session" in the Change Analyst's persona leans on. Zero
+     * turns conversational recall off entirely.
+     */
+    memoryLastMessages: number;
     /**
      * Turns a session may carry before it is retired and rebuilt.
      *
@@ -310,6 +357,22 @@ export interface Config {
     allowedRepos: string[];
   };
   github: { token?: string; repo?: string; baseBranch: string };
+  /**
+   * Triage of automatic runs by TypeSafe's Jev, before any agent is asked.
+   *
+   * Off unless a key is set. See `src/triage.ts` for what it decides and why a
+   * failure here always means "run as before".
+   */
+  triage: {
+    /** `TYPESAFE_API_KEY`. Empty turns triage off. */
+    apiKey: string;
+    baseUrl: string;
+    model: string;
+    /** `DOCXY_TRIAGE=0` keeps the key but stops skipping runs. */
+    enabled: boolean;
+    /** Past this, the commit is run rather than waited on. */
+    timeoutMs: number;
+  };
 }
 
 function env(key: string, fallback?: string): string {
@@ -422,6 +485,10 @@ export function loadConfig(overrides: Partial<{ repoPath: string }> = {}): Confi
       docsBuildCommand: env('DOCXY_DOCS_BUILD_COMMAND', ''),
       testCommand: env('DOCXY_TEST_COMMAND', ''),
       checkLinks: envBool('DOCXY_CHECK_LINKS', true),
+      passEnv: env('DOCXY_VALIDATION_ENV', '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
     },
     sandbox: {
       enabled: envBool('DOCXY_SANDBOX', true),
@@ -446,8 +513,10 @@ export function loadConfig(overrides: Partial<{ repoPath: string }> = {}): Confi
     agent: {
       maxAttempts: Math.max(1, envInt('DOCXY_ROLE_MAX_ATTEMPTS', 3)),
       attemptTimeoutMs: Math.max(30, envInt('DOCXY_ROLE_TIMEOUT_SECONDS', 420)) * 1000,
+      idleTimeoutMs: Math.max(0, envInt('DOCXY_ROLE_IDLE_SECONDS', 0)) * 1000,
       runTimeoutMs: Math.max(60, envInt('DOCXY_RUN_TIMEOUT_SECONDS', 2700)) * 1000,
       sessionMaxTurns: Math.max(0, envInt('DOCXY_SESSION_MAX_TURNS', 12)),
+      memoryLastMessages: Math.max(0, envInt('DOCXY_MEMORY_LAST_MESSAGES', 2)),
       repairAnchors: envBool('DOCXY_REPAIR_ANCHORS', true),
       codeMode: envBool('DOCXY_CODE_MODE', false),
       // Anything other than an explicit `local` means Daytona, so a typo lands
@@ -468,6 +537,13 @@ export function loadConfig(overrides: Partial<{ repoPath: string }> = {}): Confi
       token: env('GITHUB_TOKEN') || env('GH_TOKEN') || undefined,
       repo: env('GITHUB_REPOSITORY') || undefined,
       baseBranch: env('DOCXY_BASE_BRANCH', 'main'),
+    },
+    triage: {
+      apiKey: env('TYPESAFE_API_KEY').trim(),
+      baseUrl: env('TYPESAFE_API_BASE', 'https://api.typesafe.ai'),
+      model: env('DOCXY_TRIAGE_MODEL', 'jev-latest'),
+      enabled: envBool('DOCXY_TRIAGE', true),
+      timeoutMs: envInt('DOCXY_TRIAGE_TIMEOUT_MS', 5_000),
     },
   };
 }

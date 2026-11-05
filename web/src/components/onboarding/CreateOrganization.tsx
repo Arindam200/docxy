@@ -48,8 +48,10 @@ function slugify(name: string): string {
   return `${base || "org"}-${suffix}`;
 }
 
-export function CreateOrganization({ connectGithub = true, onCreated, onPendingChange }: {
+export function CreateOrganization({ connectGithub = true, installationId, onCreated, onPendingChange }: {
   connectGithub?: boolean;
+  /** An installation made before this organization existed, to bind next. */
+  installationId?: string;
   onCreated?: () => void;
   onPendingChange?: (pending: boolean) => void;
 }) {
@@ -100,9 +102,9 @@ export function CreateOrganization({ connectGithub = true, onCreated, onPendingC
 
       // Reload the dashboard shell so the new membership and active name are
       // reflected immediately. Additional organizations need no GitHub setup.
-      window.location.href = connectGithub
-        ? `/api/github/install?organizationId=${encodeURIComponent(organizationId)}`
-        : "/dashboard";
+      const install = new URLSearchParams({ organizationId });
+      if (installationId) install.set("installation_id", installationId);
+      window.location.href = connectGithub ? `/api/github/install?${install.toString()}` : "/dashboard";
     } catch {
       reportError("Could not finish setting up your organization. Please try again.");
     } finally {

@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { LuGithub, LuPlus } from "react-icons/lu";
 
-import { fetchProjects, fetchRepositories, fetchRuns } from "@/lib/docxy";
+import { fetchProjects, fetchRepositories } from "@/lib/docxy";
 import { activeOrganizationId } from "@/lib/organization";
 import { ApiOffline } from "@/components/dashboard/ApiOffline";
 import { Page, PageHead } from "@/components/dashboard/Page";
@@ -30,12 +30,15 @@ export default async function RepositoriesPage({ searchParams }: {
 }) {
   const notice = await searchParams;
   const organizationId = await activeOrganizationId();
-  const [runs, repositories, projects] = await Promise.all([
-    fetchRuns(organizationId),
+  const [repositories, projects] = await Promise.all([
     fetchRepositories(organizationId),
     fetchProjects(organizationId),
   ]);
-  const online = runs !== null;
+  // Whether the pipeline answered at all. This used to fetch the organization's
+  // fifty newest runs just to see if they came back, and threw them away. The
+  // project list answers the same question, and the layout has already asked
+  // for it during this render, so it costs nothing.
+  const online = projects !== null;
 
   return (
     <Page>

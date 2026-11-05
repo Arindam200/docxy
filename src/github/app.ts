@@ -82,6 +82,10 @@ async function githubFetch(
         ...init,
         signal: caller ? AbortSignal.any([caller, timeout]) : timeout,
       });
+      // A 401 is GitHub saying the credential is dead. When that credential is
+      // a cached installation token, the cache is wrong about it, and the next
+      // caller should get a fresh one rather than the same refusal.
+      if (response.status === 401) forgetBearer(new Headers(init.headers).get('authorization'));
       // 5xx and 429 are GitHub having a moment; anything else is an answer.
       if (response.status < 500 && response.status !== 429) return response;
       if (attempt === attempts) return response;
@@ -152,6 +156,20 @@ function readPrivateKey(): string | null {
   }
 }
 
+/**
+ * `owner/name` from a GitHub remote URL, or null when it is not one.
+ *
+ * Shared because three copies of the same regex each stopped the name at its
+ * first dot - `vercel/next.js` read as `vercel/next`, `alice/alice.github.io`
+ * as `alice/alice` - so a repository with a dot in its name minted a token for
+ * a different repository, or none, and could not be published. Only a trailing
+ * `.git` is a suffix; every other dot is part of the name.
+ */
+export function githubRepoFromUrl(url: string): string | null {
+  const match = /github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?\/?$/.exec(url.trim());
+  return match?.[1] ?? null;
+}
+
 /** Null when the App is not configured, which is the signal to fall back. */
 export function readAppCredentials(): AppCredentials | null {
   const appId = process.env.GITHUB_APP_ID?.trim();
@@ -173,17 +191,86 @@ export function readAppCredentials(): AppCredentials | null {
 }
 
 /**
+ * How long before GitHub's own expiry a cached token stops being handed out.
+ *
+ * A token is checked when each request *starts*, so the margin has to cover
+ * the longest stretch between asking for one and starting the last request
+ * made with it - a push, a pull request and its retries. Five minutes of an
+ * hour-long token is cheap insurance against a request that starts with
+ * seconds to spare and is refused halfway through publishing.
+ */
+const TOKEN_REUSE_MARGIN_MS = 5 * 60 * 1000;
+
+/**
+ * Tokens already minted, by installation and repository set.
+ *
+ * Memory only, and only for this process: never written to a run record, a
+ * log line or the disk, so a restart forgets every one of them and nothing
+ * outlives the hour GitHub gives it. The cost it removes is real - a single
+ * webhook run asked for a fresh token to sync the code, again for the docs
+ * checkout, again for each docs-branch fetch and again to publish, each one a
+ * signed JWT and a round trip to GitHub for a credential it already had.
+ */
+const tokenCache = new Map<string, { token: string; reusableUntil: number }>();
+
+/**
+ * Until when a token GitHub says expires at `expiresAt` may be handed out again.
+ *
+ * `now` - reuse never - when the answer carries no expiry or one that does not
+ * parse: a token whose lifetime is unknown is used once by the caller that
+ * minted it, rather than cached on a guess about when it dies.
+ */
+export function tokenReusableUntil(expiresAt: string | undefined, now: number): number {
+  const expiry = expiresAt ? Date.parse(expiresAt) : Number.NaN;
+  if (!Number.isFinite(expiry)) return now;
+  return Math.max(now, expiry - TOKEN_REUSE_MARGIN_MS);
+}
+
+/**
+ * Drop a token GitHub has refused, so the next caller mints a fresh one.
+ *
+ * Keyed by the token itself because that is all a refusal carries: a 401 from
+ * the API or "Authentication failed" from git names no installation. A token
+ * that was never cached matches nothing, which is the right answer for the
+ * App JWT and for anything else that reaches here.
+ */
+export function forgetInstallationToken(token: string): void {
+  for (const [key, cached] of tokenCache) {
+    if (cached.token === token) tokenCache.delete(key);
+  }
+}
+
+/** The token half of an `authorization` header, forgotten if it was cached. */
+function forgetBearer(header: string | null): void {
+  const token = header?.replace(/^(?:bearer|token)\s+/i, '').trim();
+  if (token) forgetInstallationToken(token);
+}
+
+/**
  * An installation token: one hour, attenuated to the repositories this run
  * touches and to the two permissions it needs.
  *
- * Minted at the moment it is used and never stored on a run record. The
+ * Asked for at the moment it is used and never stored on a run record. The
  * approval gate can wait days, and a token recorded when the run started would
- * be long dead by the time someone signs off.
+ * be long dead by the time someone signs off. Reused from memory while it has
+ * more than `TOKEN_REUSE_MARGIN_MS` to live, so asking is cheap and every
+ * caller can keep asking at the point of use rather than holding one.
  */
 export async function installationToken(
   credentials: AppCredentials,
   repositories: string[],
 ): Promise<string> {
+  // Repository names are case-insensitive on GitHub, and the order a caller
+  // listed them in says nothing about which token it needs.
+  const key = [
+    credentials.appId,
+    credentials.installationId,
+    ...repositories.map((name) => name.toLowerCase()).sort(),
+  ].join('\n');
+  const cached = tokenCache.get(key);
+  if (cached && Date.now() < cached.reusableUntil) return cached.token;
+  tokenCache.delete(key);
+
   const response = await githubFetch(
     `https://api.github.com/app/installations/${credentials.installationId}/access_tokens`,
     {
@@ -206,9 +293,13 @@ export async function installationToken(
     );
   }
 
-  // SAFETY: a 2xx from GitHub's token endpoint is its published shape, and `token` is checked for presence before use.
-  const body = (await response.json()) as { token?: string };
+  // SAFETY: a 2xx from GitHub's token endpoint is its published shape, and `token` is checked for presence before use; `expires_at` is optional and parsed by `tokenReusableUntil`.
+  const body = (await response.json()) as { token?: string; expires_at?: string };
   if (!body.token) throw new Error('GitHub returned an installation token response with no token.');
+
+  const now = Date.now();
+  const reusableUntil = tokenReusableUntil(body.expires_at, now);
+  if (reusableUntil > now) tokenCache.set(key, { token: body.token, reusableUntil });
   return body.token;
 }
 

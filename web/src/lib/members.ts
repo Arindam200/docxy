@@ -7,11 +7,16 @@
  * "may an admin remove an owner" is a predicate nobody can test. The reads live
  * beside this in `members-store.ts`.
  *
- * None of this is the security boundary, and it must not be mistaken for one:
- * Better Auth's organization plugin enforces the same rules server-side on
- * every call, and a button hidden here is still refused if somebody calls the
- * endpoint directly. What these buy is a page that does not offer an action it
- * already knows will fail.
+ * Most of this is not the security boundary, and must not be mistaken for one.
+ * What the page offers is a courtesy: a button hidden here is still refused if
+ * somebody calls the endpoint directly. The exception is `rankRefusal`, which
+ * *is* enforced, and it exists because Better Auth's organization plugin does
+ * not enforce rank between admins. As of 1.7.1 its remove-member and
+ * update-member-role endpoints protect the owner and check that the caller
+ * holds the `member` permission, and nothing else - so any admin could remove
+ * or demote any other admin. The `hooks.before` in `auth.ts` runs this function
+ * on both endpoints and refuses what it refuses, which makes it one rule for the
+ * page and the server rather than two that drift apart.
  */
 
 /** The three roles the organization plugin ships with. */
@@ -33,6 +38,64 @@ const RANK = { owner: 0, admin: 1, member: 2 } satisfies Record<OrganizationRole
  */
 export function asRole(value: string | null | undefined): OrganizationRole {
   return value === "owner" || value === "admin" ? value : "member";
+}
+
+/**
+ * The most privileged role a stored role string holds.
+ *
+ * Better Auth keeps several roles in one comma-separated column and grants a
+ * permission when any of them carries it, so `admin,member` is an admin.
+ * `asRole` reads that whole string as a plain member, which is the safe
+ * direction for deciding what to offer somebody and the dangerous one for
+ * deciding who is protected from them: an admin stored that way would look
+ * like a member anybody may remove. The rank check reads both sides this way.
+ */
+export function strongestRole(value: string | null | undefined): OrganizationRole {
+  const roles = (value ?? "").split(",").map((role) => asRole(role.trim()));
+  return roles.reduce<OrganizationRole>(
+    (best, role) => (RANK[role] < RANK[best] ? role : best),
+    "member",
+  );
+}
+
+/** What somebody is trying to do to a member row. */
+export type MembershipChange =
+  | { kind: "remove" }
+  | { kind: "role"; roles: readonly string[] };
+
+/**
+ * Why `actor` may not make `change` to `target`, or null when rank allows it.
+ *
+ * The rule is that an admin manages members and nobody above them. An owner
+ * may act on anybody, and Better Auth itself still stops the last owner being
+ * removed or demoted. An admin may remove a member or change a member's role,
+ * but may not touch another admin or an owner: otherwise two admins can race
+ * to eject each other, and whoever clicks first owns the organization's
+ * repositories. Only an owner may make somebody an owner, whoever that is.
+ *
+ * Acting on yourself is left to Better Auth, apart from promoting yourself to
+ * owner. An admin stepping down to member gives nothing away.
+ *
+ * Null means "rank does not object", not "allowed": Better Auth's own checks
+ * run afterwards, and a plain member is refused there by permission whatever
+ * this says.
+ */
+export function rankRefusal(
+  actor: OrganizationRole,
+  target: OrganizationRole,
+  isSelf: boolean,
+  change: MembershipChange,
+): string | null {
+  if (actor === "owner") return null;
+  if (change.kind === "role" && change.roles.includes("owner")) {
+    return "Only an owner can make somebody an owner.";
+  }
+  if (isSelf) return null;
+  if (actor !== "admin") return "Only owners and admins can change who is in this organization.";
+  if (target === "member") return null;
+  return change.kind === "remove"
+    ? "Only an owner can remove an admin or an owner."
+    : "Only an owner can change the role of an admin or an owner.";
 }
 
 /**
@@ -65,8 +128,9 @@ export function canRemoveMember(
   if (isSelf) return false;
   if (target === "owner") return false;
   if (!canManageMembers(actor)) return false;
-  // An admin may remove members but not peers; an owner outranks both.
-  return RANK[actor] < RANK[target];
+  // An admin may remove members but not peers; an owner outranks both. Asked
+  // of the same rule the server enforces, so the button and the refusal agree.
+  return rankRefusal(actor, target, false, { kind: "remove" }) === null;
 }
 
 /** Members, owners first, then by name. Ordering the table is not a query's job. */

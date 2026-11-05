@@ -260,6 +260,28 @@ And one that is easy to miss entirely:
   `DATABASE_URL` is unset, every run record too. Left at its default, all of it
   is discarded on each deploy.
 
+### Deploys and runs in flight
+
+Every push to `main` replaces this container, and a run in flight used to be
+marked failed each time. Now:
+
+- **On SIGTERM** the server stops starting runs, writes everything still queued
+  to `$DOCXY_STATE_DIR/queue-handoff.json` at once, gives the runs already going
+  `DOCXY_SHUTDOWN_GRACE_SECONDS` (25 by default) to finish, then writes the file
+  again without the ones that did. Pushes arriving meanwhile are still accepted
+  and carried over: GitHub does not retry a refused delivery.
+- **On boot** a run still marked running is resumed from its last finished step
+  - at most twice per run, and only within six hours of its start (counted in
+  `resumed-runs.json`) - and the handed-over queue is taken up behind it.
+
+**Set Railway's draining time to at least the grace period**
+(`RAILWAY_DEPLOYMENT_DRAINING_SECONDS`, or the service's Settings → Deploy pane).
+Railway sends SIGTERM and then SIGKILLs once draining ends, and the default may
+be zero. With no draining time the queue is still written (that happens first),
+and interrupted runs are still resumed on boot - they are only resumed instead
+of finished. Both files live under the state directory, so they need the volume
+above.
+
 ### Environment
 
 ```bash
@@ -525,6 +547,8 @@ are the ones a deployment turns on.
 | `DAYTONA_API_KEY` | none | The sandbox. Must be create-capable. |
 | `DOCXY_SANDBOX_FALLBACK` | `skip` | `local` permits a host-run docs build. Leave it alone unless you mean it. |
 | `DOCXY_DOCS_BUILD_COMMAND` | empty | Without it the docs build is skipped and the sandbox never appears in the validation report. |
+| `DOCXY_TEST_COMMAND` | empty | **Ignored here.** With `DATABASE_URL` set the test suite is a connected organization's code, so it is reported skipped rather than run on the host. |
+| `DOCXY_VALIDATION_ENV` | empty | Extra variable names a host-run command may see. Host commands otherwise get only `PATH`, `HOME`, locale and temp variables; the server's own keys are withheld even if listed. |
 | `DOCXY_REPO_PATH` | the working directory | **Leave unset when webhook-driven.** Setting it pins every run to one checkout. |
 | `DOCXY_CODE_MODE` | `false` | Off until measured. On, it requires a Daytona key. |
 | `DOCXY_DOCS_BRANCH` | none | Only if docs live on their own branch. |

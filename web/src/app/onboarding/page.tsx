@@ -6,6 +6,7 @@ import { AuthShell } from "@/components/auth/AuthShell";
 import { CreateOrganization } from "@/components/onboarding/CreateOrganization";
 import { getActiveOrganizationId, getSessionUser, getUserOrganizations } from "@/lib/auth";
 import { authReady } from "@/lib/env";
+import { installationIdParam } from "@/lib/github-installation";
 import { resolveOrganization } from "@/lib/onboarding";
 
 export const metadata: Metadata = {
@@ -36,11 +37,17 @@ export const dynamic = "force-dynamic";
 export default async function OnboardingPage({
   searchParams,
 }: {
-  searchParams: Promise<{ error?: string }>;
+  searchParams: Promise<{ error?: string; installation_id?: string }>;
 }) {
   if (!authReady()) redirect("/login?next=/onboarding");
 
-  const { error } = await searchParams;
+  const { error, installation_id } = await searchParams;
+  // An installation made from GitHub before this account had an organization.
+  // Wherever this page sends them next, the install step resumes with it.
+  const installationId = installationIdParam(installation_id);
+  const afterwards = installationId
+    ? `/api/github/install?installation_id=${installationId}`
+    : "/dashboard";
   const requestHeaders = await headers();
   const user = await getSessionUser(requestHeaders);
   if (!user) redirect("/login?next=/onboarding");
@@ -52,11 +59,13 @@ export default async function OnboardingPage({
   );
 
   // Already settled: on to the product, and this page is not shown at all.
-  if (route.kind === "ready") redirect("/dashboard");
+  if (route.kind === "ready") redirect(afterwards);
   // The session needs writing, which a Server Component cannot do - see
   // /api/organization/activate. `error` means that route has already tried and
   // failed, so the form below is a better answer than another round trip.
-  if (route.kind === "activate" && !error) redirect("/api/organization/activate?next=/dashboard");
+  if (route.kind === "activate" && !error) {
+    redirect(`/api/organization/activate?next=${encodeURIComponent(afterwards)}`);
+  }
 
   const firstName = user.name.trim().split(/\s+/)[0];
   const returning = route.kind !== "create";
@@ -77,7 +86,7 @@ export default async function OnboardingPage({
         </>
       }
     >
-      <CreateOrganization />
+      <CreateOrganization installationId={installationId} />
     </AuthShell>
   );
 }

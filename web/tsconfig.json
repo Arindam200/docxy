@@ -22,6 +22,7 @@
       "@/*": ["./src/*"],
       "@contract": ["../src/api/contract.ts"],
       "@billing": ["../src/billing/catalog.ts"],
+      "@billing/lifecycle": ["../src/billing/lifecycle.ts"],
       "@billing/periods": ["../src/billing/periods.ts"],
       "@billing/schema": ["../src/db/billing-schema.ts"],
       "drizzle-orm": ["./node_modules/drizzle-orm"],

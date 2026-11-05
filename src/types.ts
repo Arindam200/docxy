@@ -12,6 +12,11 @@ export interface DiffFile {
   deletions: number;
   patch: string;
   truncated: boolean;
+  /**
+   * The patch was not kept at all: one of the largest files in a commit too
+   * big to hold every patch of. `patch` is empty. See `git/diff.ts`.
+   */
+  omitted?: true;
 }
 
 export interface CommitDiff {
@@ -170,7 +175,10 @@ export type RoleFailure =
   | 'context'
   | 'rate-limit'
   | 'cancelled'
-  | 'stalled';
+  /** The model went quiet mid-turn past `DOCXY_ROLE_IDLE_SECONDS`, on every attempt. */
+  | 'stalled'
+  /** The provider refused the call outright: a bad key, no access, or an unknown model. */
+  | 'provider-rejected';
 
 export interface RoleUsage {
   inputTokens: number;

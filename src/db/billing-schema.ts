@@ -36,6 +36,7 @@ import {
 } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 import type { BillingEnvironment, PlanKey } from '../billing/catalog.js';
+import type { AccessState } from '../billing/lifecycle.js';
 
 export const billing = pgSchema('billing');
 
@@ -47,17 +48,12 @@ const timestamps = {
 /**
  * Whether this deployment will start new work for an account, and why.
  *
- * Derived from provider state and written down, so admission asks one column
- * instead of re-deriving a policy from a status string at the moment a run
- * wants to begin.
- *
- *   `active`     - a Free grant or a confirmed paid period. Runs may start.
- *   `suspended`  - on hold, failed payment, expired. Existing results stay
- *                  readable; new runs do not start.
- *   `review`     - disputed, refunded, or a state nobody has taught this
- *                  deployment yet. A person decides; nothing is granted.
+ * Defined next to the judgement that produces it, in `src/billing/lifecycle.ts`,
+ * and re-exported here because this is where it is stored. Admission asks one
+ * column instead of re-deriving a policy from a provider status string at the
+ * moment a run wants to begin.
  */
-export type AccessState = 'active' | 'suspended' | 'review';
+export type { AccessState } from '../billing/lifecycle.js';
 
 /** Where a checkout attempt got to. Only one `open` attempt exists per account. */
 export type CheckoutState = 'open' | 'completed' | 'expired' | 'abandoned' | 'failed';
@@ -194,6 +190,14 @@ export const checkoutAttempts = billing.table(
     requestKey: text('request_key').notNull(),
     /** Dodo's checkout session id, once the provider has answered. */
     providerSessionId: text('provider_session_id'),
+    /**
+     * The hosted page this attempt opened.
+     *
+     * Stored so a second tab, a refresh, or a retried request is sent back to
+     * the checkout that already exists instead of creating another one beside
+     * it. Not a secret: it is a one-time URL the customer was already handed.
+     */
+    checkoutUrl: text('checkout_url'),
     state: text('state').$type<CheckoutState>().default('open').notNull(),
     /** Why it ended, when it ended badly. Never a provider payload. */
     failureReason: text('failure_reason'),
@@ -365,6 +369,9 @@ export const runReservations = billing.table(
     uniqueIndex('run_reservations_invocation').on(t.accountId, t.invocationKey),
     index('run_reservations_period').on(t.usagePeriodId, t.state),
     index('run_reservations_run').on(t.runId),
+    // How a resumed run finds the slot it already holds (`openReservation`).
+    // Without it that lookup read every reservation ever made.
+    index('run_reservations_project_commit').on(t.projectId, t.commitSha),
   ],
 );
 

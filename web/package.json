@@ -16,7 +16,7 @@
     "db:studio": "drizzle-kit studio",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/*.test.ts",
-    "test:billing": "tsx test/billing-integration.ts"
+    "test:billing": "tsx test/billing-integration.mts"
   },
   "dependencies": {
     "@composio/core": "^0.18.1",

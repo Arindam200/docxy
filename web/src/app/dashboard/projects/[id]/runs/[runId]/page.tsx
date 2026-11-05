@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { fetchRun, type RoleOutputs } from "@/lib/docxy";
 import { dateTime, duration } from "@/lib/format";
 import { PageHead } from "@/components/dashboard/Page";
+import { activeOrganizationId } from "@/lib/organization";
 import { currentProject } from "@/lib/project-scope";
 import { projectHref } from "@/lib/projects";
 import { StatusChip } from "@/components/dashboard/RunTimeline";
@@ -20,12 +21,14 @@ export default async function RunPage({
   params: Promise<{ id: string; runId: string }>;
 }) {
   const { id, runId } = await params;
-  const scope = await currentProject(id);
+  // Started beside the project lookup rather than after it - see "Reads beside
+  // the lookup" in lib/project-scope.ts for why that leaves nothing exposed.
+  const organizationId = await activeOrganizationId();
+  const [scope, run] = await Promise.all([currentProject(id), fetchRun(runId, organizationId)]);
   if (scope.kind === "offline") return null;
   if (scope.kind === "missing") notFound();
 
-  const { project, organizationId } = scope;
-  const run = await fetchRun(runId, organizationId);
+  const { project } = scope;
   if (!run) notFound();
 
   // The run has to belong to the project in the path, not merely to the same
@@ -63,7 +66,12 @@ export default async function RunPage({
       >
         <div className="flex items-center gap-4">
           {/* Scoped to this run: another repository finishing changes nothing here. */}
-          <LiveUpdates runId={run.id} />
+          <LiveUpdates
+            runId={run.id}
+            repoPath={project.key}
+            repository={project.sourceRepo ?? undefined}
+            running={run.status === "running"}
+          />
           <StatusChip status={run.status} />
           {run.pullRequestUrl && (
             <a

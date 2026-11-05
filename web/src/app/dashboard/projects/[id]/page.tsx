@@ -7,6 +7,7 @@ import { ApiOffline } from "@/components/dashboard/ApiOffline";
 import { StatCard } from "@/components/dashboard/StatCard";
 import { RunTimeline } from "@/components/dashboard/RunTimeline";
 import { LiveUpdates } from "@/components/dashboard/LiveUpdates";
+import { activeOrganizationId } from "@/lib/organization";
 import { currentProject } from "@/lib/project-scope";
 import { projectHref, projectRunHref } from "@/lib/projects";
 
@@ -27,18 +28,21 @@ export default async function ProjectOverviewPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const scope = await currentProject(id);
+  // Started beside the project lookup rather than after it - see "Reads beside
+  // the lookup" in lib/project-scope.ts for why that leaves nothing exposed.
+  const organizationId = await activeOrganizationId();
+  const [scope, runs, report, repositories] = await Promise.all([
+    currentProject(id),
+    fetchRuns(organizationId, id),
+    fetchObservability(organizationId, { projectId: id }),
+    fetchRepositories(organizationId),
+  ]);
   // The layout already rendered the offline state above these children, so
   // there is nothing left to say here.
   if (scope.kind === "offline") return null;
   if (scope.kind === "missing") notFound();
 
-  const { project, organizationId } = scope;
-  const [runs, report, repositories] = await Promise.all([
-    fetchRuns(organizationId, project.id),
-    fetchObservability(organizationId, { projectId: project.id }),
-    fetchRepositories(organizationId),
-  ]);
+  const { project } = scope;
 
   const history = runs ?? [];
   const latest = history[0];
@@ -61,7 +65,12 @@ export default async function ProjectOverviewPage({
           <h2 id="project-health" className="text-lg font-semibold tracking-tight">
             Health
           </h2>
-          <LiveUpdates />
+          {/* Scoped to this project: another repository's run changes nothing here. */}
+          <LiveUpdates
+            repoPath={project.key}
+            repository={project.sourceRepo ?? undefined}
+            running={history.some((run) => run.status === "running")}
+          />
         </div>
         <div className="grid grid-cols-2 divide-x divide-y divide-rule border border-rule bg-surface md:grid-cols-4 md:divide-y-0">
           <StatCard

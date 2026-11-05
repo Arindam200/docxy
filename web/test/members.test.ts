@@ -6,8 +6,11 @@ import {
   canManageMembers,
   canRemoveMember,
   invitationProblem,
+  rankRefusal,
+  strongestRole,
   viewable,
   type InvitationDetail,
+  type MembershipChange,
 } from "../src/lib/members";
 
 test("an unrecognised role reads as the least privileged one", () => {
@@ -40,6 +43,61 @@ test("removal follows rank, and never reaches an owner", () => {
   assert.equal(canRemoveMember("owner", "owner", false), false);
   // A plain member manages nobody.
   assert.equal(canRemoveMember("member", "member", false), false);
+});
+
+const REMOVE: MembershipChange = { kind: "remove" };
+const role = (...roles: string[]): MembershipChange => ({ kind: "role", roles });
+
+test("an admin manages members, and nobody at or above their own rank", () => {
+  // The rule Better Auth 1.7.1 does not enforce: it protects the owner and
+  // nothing else, so any admin could remove or demote any other admin.
+  assert.notEqual(rankRefusal("admin", "admin", false, REMOVE), null);
+  assert.notEqual(rankRefusal("admin", "admin", false, role("member")), null);
+  assert.notEqual(rankRefusal("admin", "owner", false, REMOVE), null);
+  assert.notEqual(rankRefusal("admin", "owner", false, role("admin")), null);
+
+  // Members are theirs to manage, including raising one to admin.
+  assert.equal(rankRefusal("admin", "member", false, REMOVE), null);
+  assert.equal(rankRefusal("admin", "member", false, role("admin")), null);
+  assert.equal(rankRefusal("admin", "member", false, role("member")), null);
+});
+
+test("only an owner makes an owner, however the role is spelled", () => {
+  assert.notEqual(rankRefusal("admin", "member", false, role("owner")), null);
+  assert.notEqual(rankRefusal("admin", "member", false, role("member", "owner")), null);
+  // Promoting yourself is still promoting somebody.
+  assert.notEqual(rankRefusal("admin", "admin", true, role("owner")), null);
+  assert.equal(rankRefusal("owner", "member", false, role("owner")), null);
+});
+
+test("an owner acts on anybody, and Better Auth keeps the last owner", () => {
+  for (const target of ["owner", "admin", "member"] as const) {
+    assert.equal(rankRefusal("owner", target, false, REMOVE), null, target);
+    assert.equal(rankRefusal("owner", target, false, role("member")), null, target);
+  }
+});
+
+test("acting on yourself is left to Better Auth, apart from becoming owner", () => {
+  // An admin stepping down gives nothing away.
+  assert.equal(rankRefusal("admin", "admin", true, role("member")), null);
+  assert.equal(rankRefusal("admin", "admin", true, REMOVE), null);
+});
+
+test("a plain member changes nobody else", () => {
+  assert.notEqual(rankRefusal("member", "member", false, REMOVE), null);
+  assert.notEqual(rankRefusal("member", "member", false, role("admin")), null);
+});
+
+test("a stored role list reads as its most privileged role", () => {
+  // Better Auth grants a permission when any listed role carries it, so a row
+  // holding "admin,member" is an admin and has to be protected as one.
+  assert.equal(strongestRole("admin,member"), "admin");
+  assert.equal(strongestRole("member, owner"), "owner");
+  assert.equal(strongestRole("member"), "member");
+  assert.equal(strongestRole("superuser"), "member");
+  assert.equal(strongestRole(""), "member");
+  assert.equal(strongestRole(null), "member");
+  assert.notEqual(rankRefusal("admin", strongestRole("admin,member"), false, REMOVE), null);
 });
 
 test("removing yourself is never offered, whatever your rank", () => {

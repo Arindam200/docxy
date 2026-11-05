@@ -447,7 +447,7 @@ async function main(): Promise<void> {
       const ref = positional[0] ?? 'HEAD';
 
       console.log(`${c.dim('Running the pipeline on')} ${ref}\n`);
-      const { run, skipped } = await runPipeline(config, ref, {
+      const result = await runPipeline(config, ref, {
         runtime,
         force: Boolean(flags.force),
         onRoleEvent: (role, event) => {
@@ -462,13 +462,19 @@ async function main(): Promise<void> {
         },
       });
 
-      if (skipped) {
-        console.log(`${c.yellow('▌')} ${skipped.reason}`);
-        if (skipped.pullRequestUrl) console.log(`  ${skipped.pullRequestUrl}`);
+      // A run from here is never triaged, so `run` is only null alongside a
+      // skip - but the result type cannot know which options were passed.
+      if (result.skipped || result.run === null) {
+        const { skipped } = result;
+        if (skipped) console.log(`${c.yellow('▌')} ${skipped.reason}`);
+        if (skipped && 'pullRequestUrl' in skipped && skipped.pullRequestUrl) {
+          console.log(`  ${skipped.pullRequestUrl}`);
+        }
         console.log(`\n  ${c.dim(`Run it again anyway with:  docxy run ${ref} --force`)}`);
         return;
       }
 
+      const { run } = result;
       summarizeRun(run, config);
 
       if (run.degraded && run.degraded.length > 0) {

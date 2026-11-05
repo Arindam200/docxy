@@ -27,7 +27,7 @@ process.on('unhandledRejection', (reason) => {
 });
 
 const config = loadConfig();
-const { app } = createServer(config);
+const { app, shutdown } = createServer(config);
 
 /**
  * Platform health check.
@@ -79,6 +79,37 @@ serve({ fetch: app.fetch, port, hostname: '0.0.0.0' }, (info) => {
   console.log(`docxy listening on 0.0.0.0:${info.port}`);
   console.log(`repo      ${config.repoPath}`);
 });
+
+/**
+ * Stopping without dropping work.
+ *
+ * Railway sends SIGTERM before it replaces this container, which happens on
+ * every push to `main`. Exiting at once used to throw away the run in flight
+ * and everything queued behind it. Now new runs stop starting, the ones going
+ * get the grace period, and what is left is either resumed or requeued by the
+ * next process (`shutdown` in ./index.ts). The HTTP server stays up meanwhile,
+ * so a push arriving during the handover is still accepted and carried over.
+ *
+ * Railway's own draining time has to be at least this long, or the container
+ * is killed before the grace period ends - which is still safe, only slower:
+ * an interrupted run is resumed rather than finished here.
+ */
+const graceSeconds = Math.max(0, Number(process.env.DOCXY_SHUTDOWN_GRACE_SECONDS ?? 25) || 0);
+let stopping = false;
+const stop = async (signal: string): Promise<void> => {
+  if (stopping) return;
+  stopping = true;
+  console.log(`${signal}: stopping`);
+  try {
+    await shutdown(graceSeconds * 1000);
+  } catch (err) {
+    console.error(`shutdown did not finish cleanly: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    process.exit(0);
+  }
+};
+process.on('SIGTERM', () => void stop('SIGTERM'));
+process.on('SIGINT', () => void stop('SIGINT'));
 
 if (!config.nebius.apiKey) {
   // Not fatal - this entry point comes up and reports a status rather than

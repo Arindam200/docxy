@@ -1,45 +1,86 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
+import { containedPath } from '../git/repo.js';
 import type { Config } from '../config.js';
 import type { Classification, ChangelogProposal, ValidationCheck, ValidationReport } from '../types.js';
 import type { ApplyResult, ProposedFile } from '../pipeline/apply.js';
 import type { TraceEvent } from '../runtime/types.js';
 import { checkLinks } from './links.js';
+import { databaseConfigured } from '../db/index.js';
+import { runHostCommand } from './host-command.js';
 import {
   runCommandInWorkspace,
   workspaceConfigured,
   type WorkspaceRunInput,
 } from './workspace.js';
 
-const exec = promisify(execFile);
+const COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
 
+/**
+ * Run a repository's command on this machine. See `host-command.ts` for what
+ * it is and is not given.
+ */
 async function runCommand(
   name: string,
   command: string,
   cwd: string,
+  config: Config,
+  signal?: AbortSignal,
 ): Promise<ValidationCheck> {
   if (!command.trim()) {
     return { name, status: 'skipped', detail: 'no command configured' };
   }
   try {
-    // SAFETY: `shell: true` is a valid option this overload's types omit; the call is otherwise an ordinary exec.
-    const { stdout, stderr } = await exec(command, {
+    const options: Parameters<typeof runHostCommand>[1] = {
       cwd,
-      shell: true,
-      timeout: 10 * 60 * 1000,
-      maxBuffer: 32 * 1024 * 1024,
-    } as never);
-    const tail = `${stdout}${stderr}`.trim().split('\n').slice(-8).join('\n');
-    return { name, status: 'pass', where: 'local', detail: tail || 'exited 0' };
+      timeoutMs: COMMAND_TIMEOUT_MS,
+      passEnv: config.validation.passEnv,
+    };
+    if (signal) options.signal = signal;
+    const result = await runHostCommand(command, options);
+    const output = result.output.trim();
+    if (result.code === 0) {
+      return { name, status: 'pass', where: 'local', detail: tailLines(output, 8) || 'exited 0' };
+    }
+    const why = result.timedOut
+      ? `timed out after ${COMMAND_TIMEOUT_MS / 60_000} minutes; the command and everything it started were stopped`
+      : result.aborted
+        ? 'stopped: the run was cancelled or ran out of time'
+        : `exited ${result.code ?? 'on a signal'}`;
+    return { name, status: 'fail', where: 'local', detail: [tailLines(output, 15), why].filter(Boolean).join('\n\n') };
   } catch (err) {
-    // SAFETY: a rejection from `exec` carries these three fields, and each is read as optional below.
-    const e = err as { stdout?: string; stderr?: string; message?: string };
-    const output = `${e.stdout ?? ''}${e.stderr ?? ''}`.trim();
-    const tail = (output || e.message || 'command failed').split('\n').slice(-15).join('\n');
-    return { name, status: 'fail', where: 'local', detail: tail };
+    return { name, status: 'fail', where: 'local', detail: err instanceof Error ? err.message : String(err) };
   }
+}
+
+function tailLines(text: string, count: number): string {
+  return text.split('\n').slice(-count).join('\n');
+}
+
+/**
+ * The repository's test suite, where running it is safe.
+ *
+ * On a deployment with a database, repositories belong to whichever
+ * organizations connected them, and their test scripts are their code - not
+ * the operator's, which is what running them on the host assumed. Even with a
+ * stripped environment, a process running as the server's user can read the
+ * server's own environment from `/proc`, so the host is no place for it. The
+ * check reports itself skipped and says why; a single-tenant `docxy serve` or
+ * the CLI, where the repository is the operator's own, runs it as before.
+ */
+async function runTests(config: Config, signal?: AbortSignal): Promise<ValidationCheck> {
+  const command = config.validation.testCommand;
+  if (command.trim() && databaseConfigured()) {
+    return {
+      name: 'tests',
+      status: 'skipped',
+      detail:
+        'not run: on a multi-tenant deployment the test suite is a connected ' +
+        "organization's code, and this host holds every organization's credentials. " +
+        'DOCXY_TEST_COMMAND only runs for single-tenant use (the CLI or docxy serve without DATABASE_URL).',
+    };
+  }
+  return runCommand('tests', command, config.repoPath, config, signal);
 }
 
 export interface ValidateInput {
@@ -69,7 +110,8 @@ export interface ValidateInput {
 /** Write the proposal into the docs worktree so the build sees the proposed text. */
 async function stageProposal(docsPath: string, files: ProposedFile[]): Promise<void> {
   for (const file of files) {
-    const target = join(docsPath, file.path);
+    const target = await containedPath(docsPath, file.path);
+    if (!target) throw new Error(`Refusing to stage ${JSON.stringify(file.path)}: it is outside the docs tree.`);
     await mkdir(dirname(target), { recursive: true });
     await writeFile(target, file.after, 'utf8');
   }
@@ -85,9 +127,9 @@ async function stageProposal(docsPath: string, files: ProposedFile[]): Promise<v
  * available and the operator has allowed it, saying which one it used either way.
  *
  * The test command stays local on purpose. It belongs to the repository, not to
- * the proposal: it is the operator's own code, already trusted enough to be
- * checked out, and it needs the whole working tree rather than the handful of
- * doc files a sandbox carries.
+ * the proposal, and it needs the whole working tree rather than the handful of
+ * doc files a sandbox carries. That is only safe where the repository is the
+ * operator's own, so a multi-tenant deployment skips it - see `runTests`.
  */
 export async function validateProposal(input: ValidateInput): Promise<ValidationReport> {
   const { config, applied, changelogFile, classification, changelog, docsPath, stageable } = input;
@@ -190,7 +232,7 @@ export async function validateProposal(input: ValidateInput): Promise<Validation
     checks.push(await runDocsBuild(buildInput));
   }
 
-  checks.push(await runCommand('tests', config.validation.testCommand, config.repoPath));
+  checks.push(await runTests(config, input.signal));
 
   const report: ValidationReport = { ok: checks.every((c) => c.status !== 'fail'), checks };
   if (executionEvents.length > 0) report.events = executionEvents;
@@ -270,7 +312,7 @@ async function runDocsBuild(input: DocsBuildInput): Promise<ValidationCheck> {
       };
     }
     await stageProposal(docsPath, files);
-    const local = await runCommand('docs-build', command, docsPath);
+    const local = await runCommand('docs-build', command, docsPath, config, input.signal);
     return { ...local, detail: `ran on the host - ${outcome.unavailable}\n\n${local.detail}` };
   }
 
@@ -288,5 +330,5 @@ async function runDocsBuild(input: DocsBuildInput): Promise<ValidationCheck> {
     };
   }
   await stageProposal(docsPath, files);
-  return runCommand('docs-build', command, docsPath);
+  return runCommand('docs-build', command, docsPath, config, input.signal);
 }

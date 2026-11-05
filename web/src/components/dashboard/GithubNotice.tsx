@@ -18,6 +18,14 @@ const MESSAGES = {
     tone: "danger",
     text: "GitHub did not confirm that your account administers that installation, so it was not connected. Install the App from the account that owns the repositories.",
   },
+  install_membership_hidden: {
+    tone: "danger",
+    text: "GitHub would not say whether you own that organization, so it was not connected. If the organization uses SAML single sign-on, authorize your session for it on GitHub and try again; otherwise this deployment's GitHub App needs read access to organization members.",
+  },
+  install_role: {
+    tone: "danger",
+    text: "Only owners and admins of this organization can connect a GitHub installation. Ask one of them to install the App.",
+  },
   install_owned: {
     tone: "danger",
     text: "That installation already belongs to another organization here. Whoever owns it has to disconnect it before it can be moved.",

@@ -43,7 +43,7 @@ export default async function SettingsPage() {
           </p>
         </div>
         {instructions ? (
-          <InstructionsEditor key={organizationId} initial={instructions.instructions} updatedAt={instructions.updatedAt ?? null} />
+          <InstructionsEditor key={organizationId} organizationId={organizationId} initial={instructions.instructions} updatedAt={instructions.updatedAt ?? null} />
         ) : (
           <p role="status" className="border border-rule bg-surface p-5 text-sm text-muted">
             Custom instructions could not be loaded. Refresh the page to try again.

@@ -70,6 +70,8 @@ function asRoleFailure(kind: AttemptFailure): RoleFailure {
       return 'cancelled';
     case 'stalled':
       return 'stalled';
+    case 'provider-rejected':
+      return 'provider-rejected';
     default:
       return 'harness-error';
   }
@@ -415,7 +417,7 @@ export class RunContext {
           // caller-side abort is a decision, not a fault.
           if (this.deadline.aborted) {
             lastError = new Error(
-              `[${role.title}] the this.run exceeded its ${Math.round(this.config.agent.runTimeoutMs / 1000)}s budget`,
+              `[${role.title}] the run exceeded its ${Math.round(this.config.agent.runTimeoutMs / 1000)}s budget`,
             );
             finish('failed', 'timeout');
             trace.error = lastError.message;
@@ -423,7 +425,7 @@ export class RunContext {
             throw lastError;
           }
           if (!timeout.aborted) {
-            lastError = new Error(`[${role.title}] the this.run was cancelled`);
+            lastError = new Error(`[${role.title}] the run was cancelled`);
             finish('failed', 'aborted');
             trace.error = lastError.message;
             await this.persist();
@@ -465,7 +467,7 @@ export class RunContext {
           await sleep(plan.delayMs, this.deadline);
         } catch {
           lastError = new Error(
-            `[${role.title}] the this.run exceeded its ` +
+            `[${role.title}] the run exceeded its ` +
               `${Math.round(this.config.agent.runTimeoutMs / 1000)}s budget while backing off`,
           );
           finish('failed', 'timeout');

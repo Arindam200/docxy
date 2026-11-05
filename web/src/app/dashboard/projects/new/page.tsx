@@ -1,12 +1,10 @@
 import Link from "next/link";
 import { LuArrowLeft } from "react-icons/lu";
-import { headers } from "next/headers";
-import { redirect } from "next/navigation";
 
 import { Page, PageHead } from "@/components/dashboard/Page";
 import { ConnectRepository } from "@/components/projects/ConnectRepository";
-import { getActiveOrganizationId } from "@/lib/auth";
 import { fetchProjects, fetchRepositories } from "@/lib/docxy";
+import { activeOrganizationId } from "@/lib/organization";
 
 export const dynamic = "force-dynamic";
 
@@ -19,8 +17,9 @@ export const dynamic = "force-dynamic";
  */
 export default async function NewProjectPage({ searchParams }: { searchParams: Promise<{ repo?: string }> }) {
   const { repo } = await searchParams;
-  const organizationId = await getActiveOrganizationId(await headers());
-  if (!organizationId) redirect("/onboarding");
+  // Membership-checked, and a redirect to onboarding when there is none - the
+  // same answer this page used to reach by hand from the session alone.
+  const organizationId = await activeOrganizationId();
 
   const [repositories, projects] = await Promise.all([
     fetchRepositories(organizationId),
@@ -41,10 +40,17 @@ export default async function NewProjectPage({ searchParams }: { searchParams: P
         title="Connect a repository"
         lede="One project documents one repository. Choose which, and say where its documentation lives."
       />
-      {/* No organization passed down: the proxy establishes it from the
-          session on every organization-scoped call, so a component prop would
-          be a second source of truth that cannot be trusted anyway. */}
-      <ConnectRepository repositories={available} connected={connected} initialSource={repo} />
+      {/* The organization passed down is not the tenant - the proxy still takes
+          that from the session on every organization-scoped call. It is what
+          this page was rendered for, sent back so that a tab left open across
+          an organization switch is refused instead of connecting the
+          repository somewhere it was never listed. */}
+      <ConnectRepository
+        organizationId={organizationId}
+        repositories={available}
+        connected={connected}
+        initialSource={repo}
+      />
     </Page>
   );
 }

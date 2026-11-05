@@ -5,7 +5,7 @@ export type { ProposedFile };
 
 export interface ApplyProblem {
   path: string;
-  kind: 'missing-file' | 'anchor-not-found' | 'anchor-ambiguous' | 'no-op';
+  kind: 'missing-file' | 'anchor-not-found' | 'anchor-ambiguous' | 'no-op' | 'out-of-scope';
   detail: string;
 }
 
@@ -29,10 +29,20 @@ function occurrences(haystack: string, needle: string): number {
  * Apply the proposed edits in memory. Nothing is written to disk here - the
  * result feeds validation, the diff shown to the reviewer, and (only after
  * approval) the branch that becomes a pull request.
+ *
+ * `editable` is the set of paths an edit may touch: the documentation outline,
+ * read off the filesystem rather than out of any model's answer. Every path
+ * here was chosen by a model that had just read a diff somebody else wrote, and
+ * `containedPath` only keeps it inside the checkout - which still left
+ * `package.json`, a test fixture or a build script one confident edit away from
+ * a pull request whose branch CI would run. An edit outside the set is refused
+ * and reported like any other edit that did not apply. Callers in the pipeline
+ * always pass it; omitting it applies no scope, which only tests do.
  */
 export async function applyDocEdits(
   docsPath: string,
   proposal: DocsProposal,
+  editable?: ReadonlySet<string>,
 ): Promise<ApplyResult> {
   const byPath = new Map<string, DocEdit[]>();
   for (const edit of proposal.edits ?? []) {
@@ -44,6 +54,17 @@ export async function applyDocEdits(
   const problems: ApplyProblem[] = [];
 
   for (const [path, edits] of byPath) {
+    if (editable && !editable.has(path)) {
+      problems.push({
+        path,
+        kind: 'out-of-scope',
+        detail:
+          'The proposed edit targets a file outside the documentation roots, so it was refused. ' +
+          'Only files in the documentation outline may be edited.',
+      });
+      continue;
+    }
+
     const before = await readRepoFile(docsPath, path);
     if (before === null) {
       problems.push({
@@ -125,6 +146,22 @@ export async function applyChangelogEntry(
   proposal: ChangelogProposal,
 ): Promise<ProposedFile> {
   const existing = (await readRepoFile(docsPath, changelogPath)) ?? '# Changelog\n';
+  return {
+    path: changelogPath,
+    before: existing,
+    after: insertChangelogEntry(existing, proposal),
+    appliedEdits: 1,
+  };
+}
+
+/**
+ * The changelog text with `proposal`'s entry in it.
+ *
+ * Pure, so publishing can put the same entry into whatever the changelog says
+ * by then: a changelog is the file most likely to have moved while a run waited
+ * for approval, and its entries all go in at the same place.
+ */
+export function insertChangelogEntry(existing: string, proposal: ChangelogProposal): string {
   const line = `- ${proposal.entry.replace(/^[-*]\s*/, '')}`;
   const lines = existing.split('\n');
 
@@ -136,12 +173,7 @@ export async function applyChangelogEntry(
     const insertAt = titleIndex === -1 ? 0 : titleIndex + 1;
     const block = ['', '## [Unreleased]', '', `### ${proposal.section}`, '', line];
     lines.splice(insertAt, 0, ...block);
-    return {
-      path: changelogPath,
-      before: existing,
-      after: `${lines.join('\n').replace(/\n{3,}/g, '\n\n')}\n`.replace(/\n+$/, '\n'),
-      appliedEdits: 1,
-    };
+    return `${lines.join('\n').replace(/\n{3,}/g, '\n\n')}\n`.replace(/\n+$/, '\n');
   }
 
   // Find the matching `### Section` inside the Unreleased block, if present.
@@ -164,10 +196,5 @@ export async function applyChangelogEntry(
     lines.splice(insertAt, 0, line);
   }
 
-  return {
-    path: changelogPath,
-    before: existing,
-    after: `${lines.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\n+$/, '')}\n`,
-    appliedEdits: 1,
-  };
+  return `${lines.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\n+$/, '')}\n`;
 }

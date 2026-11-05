@@ -32,9 +32,11 @@ import {
 } from "@billing/schema";
 import {
   ensureBillingAccount,
+  findBillingAccount,
   isBillingOwner,
   resolveEntitlement,
 } from "@/lib/billing/accounts";
+import { applyEvent, processDelivery, recordDelivery, type ProviderEvent } from "@/lib/billing/sync";
 import { billingEnvironment } from "@/lib/billing/config";
 import { getBillingDb } from "@/lib/billing/db";
 import { ensureUsagePeriod, remainingRuns } from "@/lib/billing/periods";
@@ -98,6 +100,7 @@ const db = getBillingDb();
 const environment = billingEnvironment();
 const organizationId = `test-org-${randomUUID()}`;
 const otherOrganizationId = `test-org-${randomUUID()}`;
+const webhookOrganizationId = `test-org-${randomUUID()}`;
 const ownerUserId = `test-user-${randomUUID()}`;
 
 console.log(`billing integration · environment ${environment} · org ${organizationId}\n`);
@@ -409,9 +412,166 @@ try {
     deletedTooSoon === "23001" || deletedTooSoon === "23503",
     `got ${deletedTooSoon}`,
   );
+  // --- what a webhook does to an account ------------------------------------
+  //
+  // The state machine, against the real database and without a network: the
+  // events are built here, exactly as Dodo's verified payloads are shaped, and
+  // the product ids are whatever this process says they are.
+  process.env.DODO_PRODUCT_PRO_MONTHLY = "pdt_integration_pro";
+
+  const webhookAccount = await ensureBillingAccount(webhookOrganizationId, ownerUserId);
+  const providerSubscription = `sub_${randomUUID()}`;
+
+  type SubscriptionEvent = Extract<ProviderEvent, { type: `subscription.${string}` }>;
+
+  /**
+   * A subscription payload, built from the SDK's own type.
+   *
+   * Not a cast: every field the provider sends is present and checked, so a
+   * field this deployment stops reading - or one the SDK renames - fails the
+   * typecheck here rather than at three in the morning.
+   */
+  const subscriptionData = (options: {
+    status: SubscriptionEvent["data"]["status"];
+    productId?: string;
+    cancelAtPeriodEnd?: boolean;
+  }): SubscriptionEvent["data"] => ({
+    addons: [],
+    billing: { city: "Kolkata", country: "IN", state: "WB", street: "1 Test Road", zipcode: "700001" },
+    brand_id: "brand_integration",
+    cancel_at_next_billing_date: options.cancelAtPeriodEnd ?? false,
+    created_at: "2026-09-01T00:00:00.000Z",
+    credit_entitlement_cart: [],
+    currency: "USD",
+    customer: {
+      customer_id: `cus_${randomUUID()}`,
+      email: "nobody@example.com",
+      name: "Integration Test",
+    },
+    has_payment_method: true,
+    metadata: { organization_id: webhookOrganizationId },
+    meter_credit_entitlement_cart: [],
+    meters: [],
+    next_billing_date: "2026-10-01T00:00:00.000Z",
+    on_demand: false,
+    payment_frequency_count: 1,
+    payment_frequency_interval: "Month",
+    previous_billing_date: "2026-09-01T00:00:00.000Z",
+    product_id: options.productId ?? "pdt_integration_pro",
+    quantity: 1,
+    recurring_pre_tax_amount: 1_900,
+    status: options.status,
+    subscription_id: providerSubscription,
+    subscription_period_count: 1,
+    subscription_period_interval: "Month",
+    tax_inclusive: false,
+    trial_period_days: 0,
+  });
+
+  const event = (
+    type: SubscriptionEvent["type"],
+    at: string,
+    data: SubscriptionEvent["data"],
+  ): SubscriptionEvent => ({ business_id: "biz_integration", type, timestamp: at, data });
+
+  const activated = await applyEvent(
+    event("subscription.active", "2026-09-01T10:00:00.000Z", subscriptionData({ status: "active" })),
+  );
+  check("an activation is applied", activated.state === "processed", activated.note);
+
+  const activePlan = await resolveEntitlement(webhookOrganizationId, ownerUserId);
+  check("the account is on the plan it bought", activePlan.plan === "pro");
+  check("with the plan's allowance", activePlan.period.runsAllowed === 15);
+  check("and may start work", activePlan.canStartRuns);
+  check(
+    "on the provider's period",
+    activePlan.period.periodStart.toISOString() === "2026-09-01T00:00:00.000Z",
+  );
+
+  // Out of order: a cancellation stamped *before* the activation is evidence
+  // about the past. Applying it would cancel a subscription that is running.
+  const stale = await applyEvent(
+    event(
+      "subscription.cancelled",
+      "2026-09-01T09:00:00.000Z",
+      subscriptionData({ status: "cancelled" }),
+    ),
+  );
+  check("an older event is refused", stale.state === "ignored", stale.note);
+  const unchanged = await resolveEntitlement(webhookOrganizationId, ownerUserId);
+  check("and the plan is untouched", unchanged.plan === "pro");
+
+  // A product this deployment does not sell is not a free upgrade.
+  const foreign = await applyEvent(
+    event(
+      "subscription.active",
+      "2026-09-02T10:00:00.000Z",
+      subscriptionData({ status: "active", productId: "pdt_somebody_elses" }),
+    ),
+  );
+  check("an unknown product is queued for review", foreign.state === "failed", foreign.note);
+
+  // A state nobody taught it suspends nothing and grants nothing: review.
+  const strange = await applyEvent(
+    // SAFETY: deliberately a status outside the union the SDK declares, because
+    // that is the case this asserts on - a provider adding a state nobody here
+    // has seen. The code under test reads it as an opaque string and answers
+    // with review, which is the behaviour being checked.
+    event("subscription.updated", "2026-09-03T10:00:00.000Z", {
+      ...subscriptionData({ status: "active" }),
+      status: "hibernating" as SubscriptionEvent["data"]["status"],
+    }),
+  );
+  check("an unrecognised status is applied as review", strange.state === "processed", strange.note);
+  const reviewed = await findBillingAccount(webhookOrganizationId);
+  check("the account waits for a person", reviewed?.accessState === "review");
+  check("and keeps the plan it paid for", reviewed?.entitledPlan === "pro");
+
+  // The real cancellation, later than everything above.
+  const cancelled = await applyEvent(
+    event(
+      "subscription.cancelled",
+      "2026-09-04T10:00:00.000Z",
+      subscriptionData({ status: "cancelled" }),
+    ),
+  );
+  check("a newer cancellation lands", cancelled.state === "processed", cancelled.note);
+  const afterCancel = await resolveEntitlement(webhookOrganizationId, ownerUserId);
+  check("and returns the account to free", afterCancel.plan === "free");
+  check("with the free allowance", afterCancel.period.runsAllowed === 3);
+  check("and free runs still allowed", afterCancel.canStartRuns);
+
+  // One delivery id, one application, however many times Dodo sends it.
+  const replayDeliveryId = `whd_${randomUUID()}`;
+  const replayEvent = event(
+    "subscription.active",
+    "2026-09-05T10:00:00.000Z",
+    subscriptionData({ status: "active" }),
+  );
+  const first = await recordDelivery(replayDeliveryId, replayEvent);
+  check("a delivery is recorded once", Boolean(first?.id));
+
+  // Not yet applied - the attempt that recorded it could have thrown. Dodo's
+  // retry must get it back for processing, not a "duplicate" that drops it.
+  const retried = await recordDelivery(replayDeliveryId, replayEvent);
+  check("a redelivery of a pending delivery is handed back", retried?.id === first?.id);
+
+  // Two copies processing at once: the row lock lets exactly one apply it.
+  const [one, two] = await Promise.all([
+    processDelivery(first!.id, replayEvent),
+    processDelivery(first!.id, replayEvent),
+  ]);
+  check("two racing copies apply it once", [one, two].filter(Boolean).length === 1);
+  check("and the one that applied it processed it", (one ?? two)?.state === "processed");
+
+  const settled = await recordDelivery(replayDeliveryId, replayEvent);
+  check("and a redelivery after that is refused before it is applied", settled === null);
+
+  check("the webhook account exists throughout", Boolean(webhookAccount.id));
+
 } finally {
   // Cleanup, in dependency order, whatever happened above.
-  const ids = sql`(select id from ${billingAccounts} where ${billingAccounts.organizationId} in (${organizationId}, ${otherOrganizationId}))`;
+  const ids = sql`(select id from ${billingAccounts} where ${billingAccounts.organizationId} in (${organizationId}, ${otherOrganizationId}, ${webhookOrganizationId}))`;
   await db.delete(runReservations).where(sql`${runReservations.accountId} in ${ids}`);
   await db.delete(payments).where(sql`${payments.accountId} in ${ids}`);
   await db.delete(usagePeriods).where(sql`${usagePeriods.accountId} in ${ids}`);
@@ -421,8 +581,13 @@ try {
     .delete(webhookDeliveries)
     .where(sql`${webhookDeliveries.payload}->>'note' = 'billing integration test'`);
   await db
+    .delete(webhookDeliveries)
+    .where(sql`${webhookDeliveries.payload}->'data'->'metadata'->>'organization_id' = ${webhookOrganizationId}`);
+  await db
     .delete(billingAccounts)
-    .where(sql`${billingAccounts.organizationId} in (${organizationId}, ${otherOrganizationId})`);
+    .where(
+      sql`${billingAccounts.organizationId} in (${organizationId}, ${otherOrganizationId}, ${webhookOrganizationId})`,
+    );
 
   const left = await db
     .select({ n: sql<number>`count(*)::int` })

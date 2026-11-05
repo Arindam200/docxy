@@ -43,6 +43,34 @@
       "when": 1789064680007,
       "tag": "0005_billing",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1789103409361,
+      "tag": "0006_billing_checkout_url",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1791928742305,
+      "tag": "0007_run_events_unique",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1791979198291,
+      "tag": "0008_skipped_commits",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1793652219972,
+      "tag": "0009_lookup_indexes",
+      "breakpoints": true
     }
   ]
 }

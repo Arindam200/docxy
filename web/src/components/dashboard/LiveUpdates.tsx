@@ -1,7 +1,8 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { concernsPage, refreshOnOpen } from "@/lib/live-updates";
 
 /**
  * Keeps a server-rendered page current while a run is in flight.
@@ -29,8 +30,16 @@ const EVENTS = ["run", "queue", "skipped", "webhook"] as const;
  * subscribing to both would double the refresh rate to render the same thing.
  */
 
-/** At most one server round trip per second, however chatty a run gets. */
-const REFRESH_MS = 1000;
+/**
+ * At most one server round trip every three seconds, however chatty a run gets.
+ *
+ * It was one a second. A refresh re-renders the whole page on the server - the
+ * session, the membership check and every pipeline read - and a run publishes
+ * on every turn of every role, so a busy run held each open tab at a render a
+ * second. Nobody reads a status flip faster than this, and the trailing call
+ * below still guarantees the last one lands.
+ */
+const REFRESH_MS = 3000;
 
 /**
  * How long a gap has to last before it is worth reporting.
@@ -68,11 +77,48 @@ const TITLE = {
   offline: "The live feed is closed. Reload to see new activity.",
 } satisfies Record<Connection, string>;
 
-export function LiveUpdates({ runId }: { runId?: string }) {
+/**
+ * What survives a stream being torn down and opened again, which is what
+ * `refreshOnOpen` needs to know.
+ *
+ * Held in a ref rather than in the effect because the effect itself is torn
+ * down and rebuilt by a Retry, and a Retry after the badge went offline is the
+ * one reconnect that most needs to know how long the page went without a feed.
+ */
+interface FeedMemory {
+  /** The last moment the page was known current: when it was drawn, or when its stream dropped. */
+  coveredUntil: number;
+  /** When an event that concerned this page last arrived, if one ever has. */
+  heardAt?: number;
+}
+
+export function LiveUpdates({
+  runId,
+  repoPath,
+  repository,
+  running = false,
+}: {
+  /** On a run's page: only that run's updates are worth a re-render. */
+  runId?: string;
+  /** Inside a project: its checkout key, so other projects' runs are ignored. */
+  repoPath?: string;
+  /** Inside a project: its `owner/name`, so other repositories' pushes are ignored. */
+  repository?: string;
+  /**
+   * Whether the page was drawn with a run still in flight. Such a page is busy
+   * before its first event arrives, so the gap between rendering and the stream
+   * opening is treated like any other gap in a busy feed.
+   */
+  running?: boolean;
+}) {
   const router = useRouter();
   const [status, setStatus] = useState<Connection>("connecting");
   // Bumped to force the effect to run again after somebody asks for a retry.
   const [attempt, setAttempt] = useState(0);
+  const memory = useRef<FeedMemory | null>(null);
+  // Read once, when the feed is first set up. Later renders change what the
+  // page shows, not what the feed has already heard.
+  const drawnRunning = useRef(running);
 
   const retry = useCallback(() => {
     setStatus("connecting");
@@ -80,8 +126,16 @@ export function LiveUpdates({ runId }: { runId?: string }) {
   }, []);
 
   useEffect(() => {
+    const now = Date.now();
+    const feed = (memory.current ??= {
+      coveredUntil: now,
+      heardAt: drawnRunning.current ? now : undefined,
+    });
+    const scope = { runId, repoPath, repository };
+
     let stopped = false;
     let source: EventSource | null = null;
+    let open = false;
     let failures = 0;
 
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
@@ -114,6 +168,10 @@ export function LiveUpdates({ runId }: { runId?: string }) {
     };
 
     const disconnect = (): void => {
+      // Coverage ends when a stream that was delivering stops, not when an
+      // attempt that never opened is abandoned.
+      if (open) feed.coveredUntil = Date.now();
+      open = false;
       source?.close();
       source = null;
       clearTimeout(reconnectTimer);
@@ -124,38 +182,42 @@ export function LiveUpdates({ runId }: { runId?: string }) {
       if (stopped || document.visibilityState === "hidden") return;
       disconnect();
 
-      const feed = new EventSource("/api/docxy/events");
-      source = feed;
+      const stream = new EventSource("/api/docxy/events");
+      source = stream;
 
-      feed.onopen = () => {
+      stream.onopen = () => {
+        open = true;
         failures = 0;
         clearTimeout(graceTimer);
         graceTimer = undefined;
         setStatus("live");
-        // Whatever happened while this page had no stream is not replayed, so
-        // the reconnect itself is the cue to go and look.
-        refresh();
+        // Whatever happened while this page had no stream is not replayed. It
+        // used to refresh on every open regardless, which with the proxy
+        // closing streams on a schedule meant every tab re-rendered at least
+        // once a minute. Now only when something could have been missed.
+        const opened = Date.now();
+        const since = feed.heardAt === undefined ? undefined : opened - feed.heardAt;
+        if (refreshOnOpen(opened - feed.coveredUntil, since)) refresh();
       };
 
       const onEvent = (event: MessageEvent<string>): void => {
-        // On a run's own page, only that run is worth a re-render: another
-        // repository finishing a run changes nothing on screen.
-        if (runId && event.type === "run") {
-          // SAFETY: only `id` is read, as an optional string; a body that is
-          // not JSON falls through to refreshing, which is the safe direction.
-          const summary = parse<{ id?: string }>(event.data);
-          if (summary && summary.id !== runId) return;
-        }
+        // Another project's run, or a push to another repository, changes
+        // nothing on a page scoped to this one.
+        if (!concernsPage(event.type, event.data, scope)) return;
+        feed.heardAt = Date.now();
         refresh();
       };
 
-      for (const name of EVENTS) feed.addEventListener(name, onEvent);
+      for (const name of EVENTS) stream.addEventListener(name, onEvent);
 
-      feed.onerror = (event) => {
+      stream.onerror = (event) => {
         // Two different things arrive here. The pipeline publishes an `error`
         // event for a run that failed before it had a record to attach to, and
         // that is a message with a body. A connection failure is a bare Event.
+        // The message names a commit and no project, so it counts as this
+        // page's - see `concernsPage`.
         if ("data" in event) {
+          feed.heardAt = Date.now();
           refresh();
           return;
         }
@@ -184,8 +246,9 @@ export function LiveUpdates({ runId }: { runId?: string }) {
 
     /**
      * A hidden tab holds a serverless invocation open to watch a page nobody is
-     * looking at. Dropping the stream and picking it up on return costs one
-     * refresh and saves the rest.
+     * looking at. Dropping the stream and picking it up on return costs at most
+     * one refresh and saves the rest - and none at all for a glance at another
+     * tab that comes back inside `GAP_MS` to a quiet feed.
      */
     const onVisibility = (): void => {
       if (document.visibilityState === "hidden") {
@@ -209,7 +272,7 @@ export function LiveUpdates({ runId }: { runId?: string }) {
       clearTimeout(graceTimer);
       clearTimeout(refreshTimer);
     };
-  }, [router, runId, attempt]);
+  }, [router, runId, repoPath, repository, attempt]);
 
   return (
     <span
@@ -230,15 +293,4 @@ export function LiveUpdates({ runId }: { runId?: string }) {
       )}
     </span>
   );
-}
-
-/** JSON or nothing. An event body that will not parse is not worth throwing over. */
-function parse<T>(data: string): T | null {
-  try {
-    // SAFETY: the caller names the shape it expects and reads one optional
-    // field from it; anything else returns null through the catch below.
-    return JSON.parse(data) as T;
-  } catch {
-    return null;
-  }
 }

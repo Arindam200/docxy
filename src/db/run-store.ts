@@ -1,10 +1,10 @@
 import { createHash } from 'node:crypto';
-import { and, asc, desc, eq, inArray, notInArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNull, lte, ne, notInArray, sql } from 'drizzle-orm';
 import type { Config, RoleName } from '../config.js';
 import type { LogPage, LogQuery, RunStorage } from '../pipeline/stores.js';
 import type { ApprovalRequest, ProposedFile, RoleTrace, RunRecord } from '../types.js';
 import { getDb, type Database } from './index.js';
-import { projectId, type Executor } from './executor.js';
+import { existingProjectIds, projectId, type Executor } from './executor.js';
 import {
   approvals,
   approvalSignoffs,
@@ -39,6 +39,16 @@ export class PgRunStore implements RunStorage {
    */
   private readonly eventMark = new Map<string, number>();
 
+  /**
+   * A digest of each role's prompt and raw output as last written.
+   *
+   * Same scope and same reasoning as `eventMark`. A body is set once, when its
+   * role finishes, and then re-sent unchanged on every later save - up to
+   * 100k characters a field, five roles, nineteen saves. Unchanged bodies are
+   * skipped; an instance that did not write them simply writes them once.
+   */
+  private readonly bodyMark = new Map<string, string>();
+
   async save(run: RunRecord): Promise<void> {
     const db = getDb();
 
@@ -49,6 +59,7 @@ export class PgRunStore implements RunStorage {
       // stored that are not. Dropping them costs one full re-send on the next
       // save and is the only way back to a state that is certainly correct.
       this.eventMark.clear();
+      this.bodyMark.clear();
       throw err;
     }
   }
@@ -130,40 +141,69 @@ export class PgRunStore implements RunStorage {
       ordinal,
     }));
 
-    for (const { id, trace, ordinal } of rows) {
-      const row = {
-        id,
-        runId: run.id,
-        ordinal,
-        role: trace.role,
-        status: trace.status,
-        sessionId: trace.sessionId,
-        turnId: trace.turnId ?? null,
-        reusedSession: trace.reusedSession,
-        model: trace.model ?? null,
-        error: trace.error ?? null,
-        failure: trace.failure ?? null,
-        attempts: trace.attempts ?? 1,
-        durationMs: trace.durationMs ?? null,
-        usage: trace.usage ?? null,
-        startedAt: new Date(trace.startedAt),
-        finishedAt: trace.finishedAt ? new Date(trace.finishedAt) : null,
-      };
-      await tx.insert(runRoles).values(row).onConflictDoUpdate({ target: runRoles.id, set: row });
-    }
+    // One statement for every role rather than one per role: this runs inside
+    // each of a run's saves, and each statement is a round trip to Neon.
+    await tx
+      .insert(runRoles)
+      .values(
+        rows.map(({ id, trace, ordinal }) => ({
+          id,
+          runId: run.id,
+          ordinal,
+          role: trace.role,
+          status: trace.status,
+          sessionId: trace.sessionId,
+          turnId: trace.turnId ?? null,
+          reusedSession: trace.reusedSession,
+          model: trace.model ?? null,
+          error: trace.error ?? null,
+          failure: trace.failure ?? null,
+          attempts: trace.attempts ?? 1,
+          durationMs: trace.durationMs ?? null,
+          usage: trace.usage ?? null,
+          startedAt: new Date(trace.startedAt),
+          finishedAt: trace.finishedAt ? new Date(trace.finishedAt) : null,
+        })),
+      )
+      .onConflictDoUpdate({
+        target: runRoles.id,
+        set: {
+          role: sql`excluded.role`,
+          status: sql`excluded.status`,
+          sessionId: sql`excluded.session_id`,
+          turnId: sql`excluded.turn_id`,
+          reusedSession: sql`excluded.reused_session`,
+          model: sql`excluded.model`,
+          error: sql`excluded.error`,
+          failure: sql`excluded.failure`,
+          attempts: sql`excluded.attempts`,
+          durationMs: sql`excluded.duration_ms`,
+          usage: sql`excluded.usage`,
+          startedAt: sql`excluded.started_at`,
+          finishedAt: sql`excluded.finished_at`,
+        },
+      });
 
-    // Bodies go in their own table; only roles that actually have one get a row.
-    for (const { id, trace } of rows) {
-      if (trace.prompt === undefined && trace.rawOutput === undefined) continue;
-      const body = {
-        roleId: id,
-        prompt: trace.prompt ?? null,
-        rawOutput: trace.rawOutput ?? null,
-      };
+    // Bodies go in their own table; only roles that actually have one get a
+    // row, and only a body that changed since this instance last wrote it.
+    const bodies = rows.flatMap(({ id, trace }) => {
+      if (trace.prompt === undefined && trace.rawOutput === undefined) return [];
+      const body = { roleId: id, prompt: trace.prompt ?? null, rawOutput: trace.rawOutput ?? null };
+      const digest = createHash('sha256')
+        .update(JSON.stringify([body.prompt, body.rawOutput]))
+        .digest('hex');
+      return this.bodyMark.get(id) === digest ? [] : [{ body, digest }];
+    });
+    if (bodies.length > 0) {
       await tx
         .insert(runRoleBodies)
-        .values(body)
-        .onConflictDoUpdate({ target: runRoleBodies.roleId, set: body });
+        .values(bodies.map(({ body }) => body))
+        .onConflictDoUpdate({
+          target: runRoleBodies.roleId,
+          set: { prompt: sql`excluded.prompt`, rawOutput: sql`excluded.raw_output` },
+        });
+      // Advanced before commit, as `eventMark` is; a rollback clears both.
+      for (const { body, digest } of bodies) this.bodyMark.set(body.roleId, digest);
     }
 
     const events = rows.flatMap(({ id, trace }) => {
@@ -180,7 +220,9 @@ export class PgRunStore implements RunStorage {
     });
 
     if (events.length > 0) {
-      await tx.insert(runEvents).values(events);
+      // The marks are per instance, so a store that did not write this run
+      // re-sends everything; the unique (role, ordinal) index drops the copies.
+      await tx.insert(runEvents).values(events).onConflictDoNothing();
       // Advanced only once the insert has gone through. The transaction may
       // still roll back, which `save` handles by dropping the marks entirely.
       for (const { id, trace } of rows) this.eventMark.set(id, trace.events.length);
@@ -205,9 +247,19 @@ export class PgRunStore implements RunStorage {
       );
   }
 
+  /**
+   * Write the proposed files, when this record carries them.
+   *
+   * A record with no `proposedFiles` leaves the stored ones alone rather than
+   * clearing them. The pipeline only ever sets the field, never unsets it, so
+   * absence here means "not loaded" - a record from `list`, which leaves the
+   * files out - and replacing on absence meant that saving such a record, as
+   * closing out an interrupted run did, silently deleted the proposal.
+   */
   private async replaceFiles(tx: Executor, run: RunRecord): Promise<void> {
+    if (run.proposedFiles === undefined) return;
     await tx.delete(runFiles).where(eq(runFiles.runId, run.id));
-    const files = run.proposedFiles ?? [];
+    const files = run.proposedFiles;
     if (files.length === 0) return;
 
     await tx.insert(runFiles).values(
@@ -269,7 +321,7 @@ export class PgRunStore implements RunStorage {
         .innerJoin(projects, eq(projects.id, runs.projectId))
         .where(eq(runs.id, id))
         .limit(1),
-      { bodies: true },
+      { bodies: true, events: true },
     );
     return record ?? null;
   }
@@ -277,30 +329,68 @@ export class PgRunStore implements RunStorage {
   async list(limit = 50, repoPaths?: string[]): Promise<RunRecord[]> {
     const db = getDb();
 
-    // Resolving each path creates the project row if it is new, which is
-    // correct: a repository the App is installed on is one docxy is synced to
-    // whether or not it has run yet, and an empty listing is the honest answer
-    // rather than a missing one.
-    //
     // An *empty* array and an *absent* one mean opposite things and are kept
     // apart deliberately. Absent is a caller that named no scope - the CLI, the
     // reaper - and defaults to this deployment's own repository. Empty is a
     // caller that computed its scope and found nothing in it, which is what an
     // organization owning no projects looks like. Collapsing the two handed
     // that organization the host's own runs.
+    //
+    // Paths are looked up, not minted: a path with no project row has no runs,
+    // and a read that inserted one per path turned every page load into writes.
     if (repoPaths?.length === 0) return [];
-    const paths = repoPaths?.length ? repoPaths : [this.config.repoPath];
-    const ids = await Promise.all(paths.map((path) => projectId(db, path)));
+    const ids = await existingProjectIds(db, repoPaths?.length ? repoPaths : [this.config.repoPath]);
+    if (ids.length === 0) return [];
 
     return this.hydrate(
       await db
         .select({ run: runs, repoPath: projects.key })
         .from(runs)
         .innerJoin(projects, eq(projects.id, runs.projectId))
-        .where(inArray(runs.projectId, [...new Set(ids)]))
+        .where(inArray(runs.projectId, ids))
         .orderBy(desc(runs.startedAt))
         .limit(limit),
     );
+  }
+
+  /**
+   * The newest `limitEach` runs of every repository, in one query.
+   *
+   * The project grid wants each card's own window, so that a busy project
+   * cannot push a quiet one's history out of view. Asking `list` once per
+   * project got that right at the cost of a listing - a run query and its
+   * hydration - per card; a window function ranks every project's runs at once
+   * and the hydration is shared.
+   */
+  async listByRepo(limitEach: number, repoPaths: string[]): Promise<Map<string, RunRecord[]>> {
+    const out = new Map<string, RunRecord[]>(repoPaths.map((path) => [path, []]));
+    if (repoPaths.length === 0 || limitEach <= 0) return out;
+
+    const db = getDb();
+    const ids = await existingProjectIds(db, repoPaths);
+    if (ids.length === 0) return out;
+
+    const ranked = db
+      .select({
+        id: runs.id,
+        rank: sql<number>`row_number() over (partition by ${runs.projectId} order by ${runs.startedAt} desc)`.as(
+          'rank',
+        ),
+      })
+      .from(runs)
+      .where(inArray(runs.projectId, ids))
+      .as('ranked');
+
+    const rows = await db
+      .select({ run: runs, repoPath: projects.key })
+      .from(runs)
+      .innerJoin(ranked, eq(ranked.id, runs.id))
+      .innerJoin(projects, eq(projects.id, runs.projectId))
+      .where(lte(ranked.rank, limitEach))
+      .orderBy(desc(runs.startedAt));
+
+    for (const record of await this.hydrate(rows)) out.get(record.repoPath)?.push(record);
+    return out;
   }
 
   /**
@@ -311,8 +401,39 @@ export class PgRunStore implements RunStorage {
    * cost five model calls, and has nothing to show for it because publishing
    * failed.
    */
+  async forCommit(sha: string, repoPath: string): Promise<RunRecord | null> {
+    const db = getDb();
+    const [id] = await existingProjectIds(db, [repoPath]);
+    // No row means no run of anything here yet, let alone this commit.
+    if (!id) return null;
+    const [record] = await this.hydrate(
+      await db
+        .select({ run: runs, repoPath: projects.key })
+        .from(runs)
+        .innerJoin(projects, eq(projects.id, runs.projectId))
+        .where(and(eq(runs.projectId, id), eq(runs.commitSha, sha), ne(runs.status, 'failed')))
+        .orderBy(desc(runs.startedAt))
+        .limit(1),
+    );
+    return record ?? null;
+  }
+
   async pending(): Promise<RunRecord[]> {
-    return (await this.list(200)).filter((run) => run.status === 'approved' && !run.pullRequestUrl);
+    // Filtered in the database, on the status index, rather than by hydrating
+    // the newest two hundred runs and keeping the few that match.
+    const [id] = await existingProjectIds(getDb(), [this.config.repoPath]);
+    if (!id) return [];
+    return this.hydrate(
+      await getDb()
+        .select({ run: runs, repoPath: projects.key })
+        .from(runs)
+        .innerJoin(projects, eq(projects.id, runs.projectId))
+        .where(
+          and(eq(runs.projectId, id), eq(runs.status, 'approved'), isNull(runs.pullRequestUrl)),
+        )
+        .orderBy(desc(runs.startedAt))
+        .limit(200),
+    );
   }
 
   /**
@@ -334,15 +455,11 @@ export class PgRunStore implements RunStorage {
     // not it has run yet - and an empty scope is a real answer, not a missing
     // one. See the note there.
     if (query.repoPaths?.length === 0) return { entries: [], total: 0, kinds: [] };
-    const visibleProjects = [
-      ...new Set(
-        await Promise.all(
-          (query.repoPaths?.length ? query.repoPaths : [this.config.repoPath]).map((path) =>
-            projectId(db, path),
-          ),
-        ),
-      ),
-    ];
+    const visibleProjects = await existingProjectIds(
+      db,
+      query.repoPaths?.length ? query.repoPaths : [this.config.repoPath],
+    );
+    if (visibleProjects.length === 0) return { entries: [], total: 0, kinds: [] };
 
     // A named run narrows within those projects rather than replacing them. Run
     // ids are visible in every dashboard URL, so a query that named one was a
@@ -424,10 +541,15 @@ export class PgRunStore implements RunStorage {
    * runs of those crossed the wire so that a dashboard could count how many
    * runs a repository had. Only the detail view - and the publish path behind
    * it, which reads `run.proposedFiles` to know what was approved - needs them.
+   *
+   * And the role events, which are the one child set that grows with how much
+   * a role did rather than with how many roles ran: every tool call and every
+   * retry is a row. No listing renders them - the timeline reads `/api/logs`,
+   * which pages them in the database - so a listing leaves them out too.
    */
   private async hydrate(
     rows: Array<{ run: typeof runs.$inferSelect; repoPath: string }>,
-    options: { bodies: boolean } = { bodies: false },
+    options: { bodies: boolean; events: boolean } = { bodies: false, events: false },
   ): Promise<RunRecord[]> {
     if (rows.length === 0) return [];
 
@@ -451,7 +573,7 @@ export class PgRunStore implements RunStorage {
     const approvalIds = approvalRows.map((approval) => approval.id);
 
     const [eventRows, signoffRows, bodyRows] = await Promise.all([
-      roleIds.length > 0
+      options.events && roleIds.length > 0
         ? db
             .select()
             .from(runEvents)

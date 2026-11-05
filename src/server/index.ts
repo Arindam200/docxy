@@ -1,17 +1,41 @@
-import { timingSafeEqual } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { z } from 'zod';
 import { dirname, join } from 'node:path';
 import { Hono } from 'hono';
+import { bodyLimit } from 'hono/body-limit';
 import { serve } from '@hono/node-server';
 import type { Config, RoleName } from '../config.js';
 import type { RunRecord } from '../types.js';
+import type { KnowledgeMap } from '../pipeline/state.js';
 import { PACKAGE_ROOT } from '../paths.js';
 import { createStores, storageBackend, type LogQuery } from '../pipeline/stores.js';
 import { workspaceConfigured } from '../validate/workspace.js';
-import type { DocxyConfig, IntegrationsPage, RunSummary } from '../api/contract.js';
+import type {
+  DocxyConfig,
+  IntegrationsPage,
+  ProjectRollupsPage,
+  RunSummary,
+  SkipKind,
+  SkippedCommit,
+  SkippedCommitsPage,
+  StartProjectRunRefusal,
+  StartProjectRunResult,
+  Tracking,
+} from '../api/contract.js';
+import { clearSkip, recordSkip, skipsForProject, type SkippedCommitRef } from '../db/skip-store.js';
+import {
+  admitRun,
+  allowancesEnforced,
+  openReservation,
+  settleReservation,
+  type Admission,
+  type Settlement,
+  type SettlementDetails,
+} from '../billing/admission.js';
 import { appStatus, verifyWebhook } from '../github/app.js';
 import { stat } from 'node:fs/promises';
-import { buildReport } from './observability.js';
+import { buildReport, rollUpProject } from './observability.js';
 import { rebuildProposedFiles, runPipeline } from '../pipeline/index.js';
 import {
   checkoutPathFor,
@@ -21,7 +45,7 @@ import {
 } from '../github/checkout.js';
 import { readAppCredentials } from '../github/app.js';
 import { staleness } from '../approval/gate.js';
-import { openPullRequest } from '../github/pr.js';
+import { BranchConflictError, openPullRequest, StaleProposalError } from '../github/pr.js';
 import { resolveCommit } from '../git/diff.js';
 import { deliveryAllowed } from './allowlist.js';
 import { databaseConfigured } from '../db/index.js';
@@ -36,6 +60,7 @@ import {
   connectedSourceRepos,
   createProject,
   deleteProject,
+  projectForCheckoutPath,
   projectForSourceRepo,
   projectsForOrganization,
   SourceRepoTakenError,
@@ -181,6 +206,38 @@ export function tokenMatches(expected: string, offered: string | undefined): boo
   return timingSafeEqual(a, b);
 }
 
+/**
+ * What a failed request may tell its caller about why.
+ *
+ * Drizzle reports a failed statement as `Failed query: <the SQL>` followed by
+ * `params: <every bound value>`, with the driver's own error as its cause. The
+ * route error handler returned that message verbatim, and the dashboard proxy
+ * forwards it to the browser - so any query that failed showed a signed-in
+ * user the schema and whatever values were bound into it, which can be
+ * another tenant's ids or a commit message. The cause is the part worth
+ * showing ("Connection terminated unexpectedly"); the statement is for the
+ * server log, which still gets all of it.
+ */
+export function publicErrorMessage(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  if (err.message.startsWith('Failed query:')) {
+    const cause = err.cause instanceof Error ? err.cause.message.split('\n')[0]?.trim() : '';
+    return cause ? `Database error: ${cause}` : 'A database query failed.';
+  }
+  return err.message;
+}
+
+/**
+ * The largest request bodies the server will read.
+ *
+ * Nothing bounded them, and the webhook reads its whole body into memory
+ * *before* it can check the signature - so anyone who could reach the port
+ * could make the process buffer as much as they cared to send. GitHub caps a
+ * delivery at 25 MB; nothing the dashboard sends comes near a megabyte (the
+ * largest field, standing instructions, is capped at 20,000 characters).
+ */
+export const BODY_LIMITS = { webhook: 25 * 1024 * 1024, api: 1024 * 1024 } as const;
+
 // Which repositories a delivery may start a run for is decided by the projects
 // somebody connected - not by what the App happens to be installed on - and may
 // be narrowed further by `DOCXY_ALLOWED_REPOS`. `deliveryAllowed` in
@@ -204,10 +261,66 @@ export function isLoopbackHost(hostname: string): boolean {
   return host === 'localhost' || host === '::1' || host.startsWith('127.');
 }
 
+/**
+ * The repository a queued run syncs and documents.
+ *
+ * Plain data, because it is written to disk when the process stops with runs
+ * still waiting and read back by the next one.
+ */
+export interface RunOrigin {
+  /** `owner/name`, as GitHub spells it. */
+  repository: string;
+  defaultBranch: string;
+  /** A working tree the operator pinned with DOCXY_REPO_PATH, used as-is. */
+  pinned?: string;
+}
+
+/** How a queued run is to be run. */
+export interface RunOptions {
+  /** Run even if this commit has already been documented. */
+  force?: boolean;
+  /** Ask Jev first. Pushes only; see `src/triage.ts`. */
+  triage?: boolean;
+  /** Finish this interrupted run rather than starting a new one. */
+  resume?: string;
+  /**
+   * The allowance slot this run was admitted on (`src/billing/admission.ts`),
+   * settled when the run ends: consumed when it produced a run, released when
+   * it was skipped or failed. Absent where allowances are not enforced.
+   */
+  reservation?: string;
+}
+
+/**
+ * Whether a run found in flight at boot may be resumed.
+ *
+ * Two limits, so a run that keeps taking the process down cannot keep doing
+ * it: at most two resumes, and only within six hours of starting - past that
+ * the commit has likely been superseded, and the run's sessions with it.
+ */
+export function resumeVerdict(
+  startedAt: string,
+  attempts: number,
+  now: number,
+): { resume: true } | { resume: false; why: string } {
+  if (attempts >= 2) return { resume: false, why: `it had already been resumed ${attempts} times` };
+  const started = Date.parse(startedAt);
+  if (Number.isNaN(started) || now - started > 6 * 60 * 60 * 1000) {
+    return { resume: false, why: 'it had started too long ago to resume' };
+  }
+  return { resume: true };
+}
+
 /** The app to serve, and the bus the pipeline publishes run events onto. */
 export interface ServerParts {
   app: Hono;
   bus: Broadcaster;
+  /**
+   * Stop starting runs, give the ones in flight `graceMs` to finish, and write
+   * down whatever is still waiting for the next process. Resolves when it is
+   * safe to exit; anything still running then is resumed on the next boot.
+   */
+  shutdown: (graceMs: number) => Promise<void>;
 }
 
 export function createServer(config: Config): ServerParts {
@@ -216,39 +329,40 @@ export function createServer(config: Config): ServerParts {
   const bus = new Broadcaster();
 
   /**
-   * Close out runs abandoned by a previous process.
+   * Close out a run a previous process left in flight and nobody will finish.
    *
-   * The lanes below live in memory, so any run still marked `running` when this
-   * server starts belongs to a process that is gone - killed, crashed, or
-   * redeployed mid-pipeline. Left alone it sits in the dashboard spinning
-   * forever, which reads as "still working" when the truth is "nobody is
-   * working on this". Marked failed, with the reason, it reads as what it is.
+   * Left alone it sits in the dashboard spinning forever, which reads as
+   * "still working" when the truth is "nobody is working on this". Marked
+   * failed, with the reason, it reads as what it is. Most interrupted runs are
+   * resumed instead - see `recoverInterruptedRuns` - and this is for the ones
+   * that cannot be.
    */
-  const reapAbandonedRuns = async (): Promise<void> => {
+  /** The allowance slot an interrupted run was admitted on, if it holds one. */
+  const reservationOf = async (run: RunRecord): Promise<string | null> => {
+    if (!databaseConfigured()) return null;
     try {
-      const paths = await syncedPaths();
-      for (const run of await runs.list(200, paths)) {
-        if (run.status !== 'running') continue;
-        run.status = 'failed';
-        run.error =
-          'The server restarted while this run was in flight, so it was abandoned. ' +
-          'Nothing was published. Start it again from Activity.';
-        run.finishedAt = new Date().toISOString();
-        for (const trace of run.traces) {
-          if (trace.status !== 'running') continue;
-          trace.status = 'failed';
-          trace.failure = 'aborted';
-          trace.finishedAt = run.finishedAt;
-        }
-        await runs.save(run);
-        bus.publish('run', summarize(run), { repoPath: run.repoPath });
-      }
-    } catch (err) {
-      // Housekeeping. A storage hiccup here must not stop the server booting.
-      console.error(
-        `could not reap abandoned runs: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      const project = await projectForCheckoutPath(run.repoPath);
+      return project ? await openReservation(project.id, run.commit.sha) : null;
+    } catch {
+      return null;
     }
+  };
+
+  const abandonRun = async (run: RunRecord, why: string): Promise<void> => {
+    // Nobody will finish it, so nothing is charged for it.
+    const reservation = await reservationOf(run);
+    if (reservation) await settleReservation(reservation, 'released', { runId: run.id, reason: `abandoned: ${why}` }).catch(() => false);
+    run.status = 'failed';
+    run.error = `The server restarted while this run was in flight, and ${why}. Nothing was published. Start it again from Activity.`;
+    run.finishedAt = new Date().toISOString();
+    for (const trace of run.traces) {
+      if (trace.status !== 'running') continue;
+      trace.status = 'failed';
+      trace.failure = 'aborted';
+      trace.finishedAt = run.finishedAt;
+    }
+    await runs.save(run);
+    bus.publish('run', summarize(run), { repoPath: run.repoPath });
   };
 
   /**
@@ -263,8 +377,15 @@ export function createServer(config: Config): ServerParts {
   app.onError((err, c) => {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`${c.req.method} ${c.req.path} failed: ${message}`);
-    return c.json({ error: message }, 500);
+    return c.json({ error: publicErrorMessage(err) }, 500);
   });
+
+  // Before anything reads a body, including the signature check, which has to
+  // read all of it. See BODY_LIMITS.
+  const tooLarge = (limit: number) => (c: { json: (body: unknown, status: 413) => Response }) =>
+    c.json({ error: `Request body exceeds ${Math.round(limit / 1024)} KiB.` }, 413);
+  app.use('/webhook', bodyLimit({ maxSize: BODY_LIMITS.webhook, onError: tooLarge(BODY_LIMITS.webhook) }));
+  app.use('/api/*', bodyLimit({ maxSize: BODY_LIMITS.api, onError: tooLarge(BODY_LIMITS.api) }));
 
   /**
    * The API's own front door.
@@ -280,6 +401,23 @@ export function createServer(config: Config): ServerParts {
    * token. `/` and `/health` are exempt because they are the landing page and
    * the platform's liveness probe, and neither reads a run.
    */
+  /**
+   * No percent-encoding in an API path.
+   *
+   * Hono routes on the decoded path, but whoever forwarded the request decided
+   * what it was allowed to reach by reading the encoded one. The dashboard
+   * proxy scopes `/api/runs` to the caller's organization; `/api/%72uns` read
+   * as an unscoped path there and as `/api/runs` here, with whatever
+   * `organizationId` the caller wrote. No route here takes an id that needs
+   * escaping, so an encoded path is refused rather than interpreted.
+   */
+  app.use('/api/*', async (c, next) => {
+    if (new URL(c.req.url).pathname.includes('%')) {
+      return c.json({ error: 'Encoded characters are not accepted in API paths.' }, 400);
+    }
+    return next();
+  });
+
   app.use('/api/*', async (c, next) => {
     const expected = config.server.apiToken;
     if (!expected) return next();
@@ -396,23 +534,57 @@ export function createServer(config: Config): ServerParts {
     return c.json({ instructions: body.instructions, updatedAt });
   });
 
-  /** What the pipeline is watching for this repository. */
+  /**
+   * What the pipeline is watching for a repository.
+   *
+   * Single-tenant, that is the server's own checkout. On a database-backed
+   * deployment it is one project's, named by `projectId` and checked against
+   * the caller's organization like every other scoped read. It used to answer
+   * with the host's own map to anyone signed in, and - because the knowledge
+   * store resolves its project by upserting one - left an ownerless project
+   * row behind for the host's checkout path on the way.
+   */
   app.get('/api/tracking', async (c) => {
-    const knowledge = await knowledgeStore.load();
+    let knowledge: KnowledgeMap;
+    let tracking: Pick<Tracking, 'repoPath' | 'docsBranch' | 'docsRoots' | 'changelogPath'>;
+    if (databaseConfigured()) {
+      const organizationId = c.req.query('organizationId')?.trim();
+      const projectId = c.req.query('projectId')?.trim();
+      if (!organizationId || !projectId) {
+        return c.json({ error: 'Name the project: organizationId and projectId are required.' }, 400);
+      }
+      const project = (await projectsForOrganization(organizationId)).find((p) => p.id === projectId);
+      if (!project) return c.json({ error: 'No such project.' }, 404);
+      knowledge = await createStores({ ...config, repoPath: project.key }).knowledge.load();
+      tracking = {
+        repoPath: project.sourceRepo ?? project.name ?? '',
+        docsBranch: config.docs.branch,
+        docsRoots: project.docsRoots
+          ? project.docsRoots.split(',').map((entry) => entry.trim()).filter(Boolean)
+          : config.docs.roots,
+        changelogPath: config.docs.changelogPath,
+      };
+    } else {
+      knowledge = await knowledgeStore.load();
+      tracking = {
+        repoPath: config.repoPath,
+        docsBranch: config.docs.branch,
+        docsRoots: config.docs.roots,
+        changelogPath: config.docs.changelogPath,
+      };
+    }
     // Doc paths are derived from the symbol map: every section the Impact
     // Mapper has ever linked a symbol to is, by definition, tracked.
     const trackedDocs = [...new Set(Object.values(knowledge.symbols).flat())].sort();
-    return c.json({
-      repoPath: config.repoPath,
-      docsBranch: config.docs.branch,
-      docsRoots: config.docs.roots,
-      changelogPath: config.docs.changelogPath,
+    const body: Tracking = {
+      ...tracking,
       trackedDocs,
       symbolCount: Object.keys(knowledge.symbols).length,
       symbols: knowledge.symbols,
       processedCommits: knowledge.processedCommits.length,
       knowledgeUpdatedAt: knowledge.updatedAt,
-    });
+    };
+    return c.json(body);
   });
 
   /**
@@ -429,14 +601,42 @@ export function createServer(config: Config): ServerParts {
    * somebody clicks something on github.com, and the API has a rate limit.
    */
   let repoCache: { at: number; value: InstalledRepo[] } | null = null;
+  /**
+   * The listing in flight, shared by everyone who asks while it is.
+   *
+   * The cache only helps once a listing has landed. When it expired, every
+   * request that arrived before the next one finished - a dashboard page asks
+   * from several components at once, and pushes arrive in bursts - started its
+   * own paginated walk of the installation, spending the App's rate limit on
+   * the same answer several times over.
+   */
+  let repoFetch: Promise<InstalledRepo[]> | null = null;
 
   const installedRepos = async (): Promise<InstalledRepo[]> => {
     const credentials = readAppCredentials();
     if (!credentials) return [];
     if (repoCache && Date.now() - repoCache.at < 60_000) return repoCache.value;
-    const value = await installationRepositories(credentials);
-    repoCache = { at: Date.now(), value };
-    return value;
+    repoFetch ??= installationRepositories(credentials)
+      .then((value) => {
+        repoCache = { at: Date.now(), value };
+        return value;
+      })
+      .finally(() => {
+        repoFetch = null;
+      });
+    return repoFetch;
+  };
+
+  /**
+   * One repository the App is installed on, by full name, or null.
+   *
+   * A lookup failure is "nothing known" rather than an error: every caller
+   * refuses on null, which is the right answer to "is it installed?" when the
+   * question could not be asked.
+   */
+  const installedRepo = async (fullName: string): Promise<InstalledRepo | null> => {
+    const installed = await installedRepos().catch((): InstalledRepo[] => []);
+    return installed.find((repo) => repo.fullName.toLowerCase() === fullName.toLowerCase()) ?? null;
   };
 
   /**
@@ -560,13 +760,15 @@ export function createServer(config: Config): ServerParts {
     organizationId: string | undefined,
     projectId: string | undefined,
   ): Promise<string[] | null> => {
-    const paths = await requestPaths(organizationId);
-    const id = projectId?.trim();
-    if (!paths || !id || !databaseConfigured()) return paths;
+    if (!databaseConfigured()) return syncedPaths();
+    const organization = organizationId?.trim();
+    if (!organization) return null;
 
-    // SAFETY: `organizationId` is present whenever `requestPaths` returned a
-    // list on a database deployment - it returns null without one.
-    const owned = await projectsForOrganization(organizationId!);
+    // One read of the organization's projects serves both the scope and the
+    // narrowing; this used to ask for the same rows twice per request.
+    const owned = await projectsForOrganization(organization);
+    const id = projectId?.trim();
+    if (!id) return [...new Set(owned.map((project) => project.key).filter(Boolean))];
     const project = owned.find((candidate) => candidate.id === id);
     return project?.key ? [project.key] : [];
   };
@@ -674,6 +876,23 @@ export function createServer(config: Config): ServerParts {
   });
 
   /**
+   * The GitHub accounts an organization has claimed an installation on,
+   * lowercased - the owners whose repositories it may see and connect.
+   *
+   * The join is on owner login because that is the one identifier both sides
+   * hold; see the note in `/api/repositories`.
+   */
+  const claimedAccounts = (installations: Installation[]): Set<string> =>
+    new Set(
+      installations
+        .map((entry) => entry.accountLogin?.toLowerCase())
+        .filter((login): login is string => Boolean(login)),
+    );
+
+  /** `owner/name` -> `owner`, lowercased. */
+  const ownerOf = (fullName: string): string => fullName.split('/')[0]?.toLowerCase() ?? '';
+
+  /**
    * Connect one repository as a project, and say where its documentation lives.
    *
    * Both repositories are checked against the installation before anything is
@@ -739,13 +958,31 @@ export function createServer(config: Config): ServerParts {
       );
     }
 
-    const reachable = new Set(installed.map((repo) => repo.fullName.toLowerCase()));
+    /*
+     * Reachable *by this organization*, not merely by the App.
+     *
+     * The App's installation spans every account it was installed on, and the
+     * check below used to stop there - so an organization that had claimed no
+     * installation at all could connect any repository the deployment's App
+     * could read, as long as nobody had connected it yet, and then start runs
+     * on it and read its diffs and drafted documentation. The repository list
+     * already hid those repositories; this is the same rule, on the write.
+     */
+    const claimed = claimedAccounts(await installationsForOrganization(organizationId));
+    const reachable = new Set(
+      installed
+        .filter((repo) => claimed.has(ownerOf(repo.fullName)))
+        .map((repo) => repo.fullName.toLowerCase()),
+    );
     if (!reachable.has(sourceRepo.toLowerCase())) {
       return c.json(
         {
           error:
-            `The GitHub App is not installed on ${sourceRepo}, so docxy cannot read it. ` +
-            'Install it there first, then connect the repository.',
+            // One answer whether the App is absent or installed for somebody
+            // else: which repositories other organizations hold is not this
+            // caller's to learn.
+            `The GitHub App is not installed on ${sourceRepo} for this organization, so docxy ` +
+            'cannot read it. Install it from the dashboard first, then connect the repository.',
         },
         403,
       );
@@ -754,8 +991,8 @@ export function createServer(config: Config): ServerParts {
       return c.json(
         {
           error:
-            `The GitHub App is not installed on ${docsRepo}, so docxy cannot open a ` +
-            'pull request against it. Install it there first.',
+            `The GitHub App is not installed on ${docsRepo} for this organization, so docxy ` +
+            'cannot open a pull request against it. Install it from the dashboard first.',
         },
         403,
       );
@@ -802,6 +1039,160 @@ export function createServer(config: Config): ServerParts {
     const removed = await deleteProject(c.req.param('id'), organizationId);
     if (!removed) return c.json({ error: 'No such project in that organization.' }, 404);
     return c.json({ deleted: true });
+  });
+
+  /**
+   * The allowance's answer for one commit of a project, or null when there is
+   * nothing to ask: allowances are not enforced here, or the project belongs to
+   * no organization (a deployment's own repository). Throws when the answer
+   * could not be read, which callers treat as "do not run".
+   */
+  const admitFor = async (
+    project: { id: string; organizationId: string | null } | null,
+    commit: string,
+    trigger: 'push' | 'manual',
+    invocationKey: string,
+  ): Promise<Admission | null> => {
+    if (!allowancesEnforced() || !project?.organizationId) return null;
+    return admitRun({
+      organizationId: project.organizationId,
+      projectId: project.id,
+      commitSha: commit,
+      trigger,
+      invocationKey,
+    });
+  };
+
+  /** One of an organization's projects, or null - never another organization's. */
+  const ownedProject = async (organizationId: string | undefined, id: string) => {
+    if (!organizationId || !databaseConfigured()) return null;
+    const owned = await projectsForOrganization(organizationId);
+    return owned.find((project) => project.id === id) ?? null;
+  };
+
+  /**
+   * Every project's own card figures, each over that project's newest runs.
+   *
+   * One request for the grid rather than one per card, and each project's
+   * window its own: deriving them from the organization's newest fifty runs let
+   * a busy project push a quiet one's history out of view.
+   */
+  app.get('/api/projects/rollups', async (c) => {
+    const organizationId = c.req.query('organizationId')?.trim();
+    if (!organizationId) return c.json(noOrganization, 400);
+    if (!databaseConfigured()) {
+      const page: ProjectRollupsPage = { rollups: [] };
+      return c.json(page);
+    }
+
+    const owned = await projectsForOrganization(organizationId);
+    // One query for every card rather than a listing per project.
+    const byRepo = await runs.listByRepo(
+      50,
+      owned.map((project) => project.key),
+    );
+    const rollups = owned.map((project) =>
+      rollUpProject(project.id, (byRepo.get(project.key) ?? []).map(summarize)),
+    );
+    const page: ProjectRollupsPage = { rollups };
+    return c.json(page);
+  });
+
+  /** Pushes this project passed over, newest first. */
+  app.get('/api/projects/:id/skips', async (c) => {
+    const project = await ownedProject(c.req.query('organizationId')?.trim(), c.req.param('id'));
+    if (!project) {
+      const page: SkippedCommitsPage = { skipped: [] };
+      return c.json(page, databaseConfigured() ? 404 : 200);
+    }
+    const page: SkippedCommitsPage = { skipped: await skipsForProject(project.id) };
+    return c.json(page);
+  });
+
+  /**
+   * Document one commit of a project now, because somebody asked.
+   *
+   * Never triaged, and forced: whether the commit was skipped, already
+   * documented or never seen, a person asking for it is the whole decision. It
+   * runs in the same lane as the project's pushes, so it waits its turn behind
+   * them rather than racing them for the checkout.
+   */
+  app.post('/api/projects/:id/runs', async (c) => {
+    const project = await ownedProject(c.req.query('organizationId')?.trim(), c.req.param('id'));
+    if (!project?.sourceRepo) {
+      const refusal: StartProjectRunRefusal = { error: 'No such project in that organization.', code: 'not-found' };
+      return c.json(refusal, 404);
+    }
+
+    const parsed = z
+      .object({ commit: z.string().trim().regex(/^[0-9a-fA-F]{7,40}$/) })
+      .safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      return c.json({ error: 'Name the commit to document, as a SHA.' }, 400);
+    }
+
+    const repo = await installedRepo(project.sourceRepo);
+    if (!repo) {
+      return c.json(
+        { error: `The GitHub App is no longer installed on ${project.sourceRepo}, so docxy cannot read it.` },
+        409,
+      );
+    }
+
+    // The queue deduplicates on the exact string, so an abbreviation is
+    // resolved first - against the checkout, which is the only place that can.
+    let commit = parsed.data.commit.toLowerCase();
+    if (!isCommitSha(commit)) {
+      try {
+        commit = await resolveCommit(checkoutPathFor(repo.fullName), commit);
+      } catch {
+        return c.json({ error: `Give the full SHA: ${commit} could not be resolved here.` }, 400);
+      }
+    }
+
+    // A run somebody asked for still spends the organization's allowance. Each
+    // request is its own invocation: clicking again is asking again.
+    let admission: Admission | null;
+    try {
+      admission = await admitFor(project, commit, 'manual', `manual:${randomUUID()}`);
+    } catch (err) {
+      return c.json(
+        { error: `The allowance could not be checked: ${err instanceof Error ? err.message : String(err)}` },
+        503,
+      );
+    }
+    if (admission && !admission.admitted) {
+      const refusal: StartProjectRunRefusal = { error: admission.reason, code: admission.code };
+      return c.json(refusal, 409);
+    }
+
+    const options: RunOptions = { force: true };
+    if (admission?.reservationId) options.reservation = admission.reservationId;
+    const result = enqueueRun(
+      { key: repo.fullName, path: checkoutPathFor(repo.fullName) },
+      commit,
+      'dashboard',
+      { repository: repo.fullName, defaultBranch: repo.defaultBranch },
+      options,
+    );
+    if (!result.accepted || result.duplicate) {
+      await settle(options.reservation, 'released', {
+        reason: result.accepted ? 'already queued' : result.reason,
+      });
+    }
+    if (!result.accepted) {
+      const refusal: StartProjectRunRefusal = { error: result.reason, code: 'queue-full' };
+      return c.json(refusal, 503);
+    }
+
+    await clearSkip(project.id, commit).catch(() => {});
+    const started: StartProjectRunResult = {
+      started: true,
+      commit,
+      queued: result.queued,
+      depth: result.depth,
+    };
+    return c.json(started);
   });
 
   app.get('/api/repositories', async (c) => {
@@ -861,21 +1252,31 @@ export function createServer(config: Config): ServerParts {
      * tokens, which is a larger change than this one.
      */
     const organizationId = c.req.query('organizationId')?.trim();
-    if (databaseConfigured()) {
-      if (!organizationId) return c.json(noOrganization, 400);
-      const claimed = new Set(
-        (await installationsForOrganization(organizationId))
-          .map((entry) => entry.accountLogin?.toLowerCase())
-          .filter((login): login is string => Boolean(login)),
-      );
-      installed = installed.filter((repo) =>
-        claimed.has(repo.fullName.split('/')[0]?.toLowerCase() ?? ''),
-      );
+    if (databaseConfigured() && !organizationId) return c.json(noOrganization, 400);
+
+    // Three reads that do not depend on one another, so they are made at once
+    // rather than one round trip after another. The connected list's failure
+    // is carried rather than thrown; see below for why it is reported.
+    const [claimedInstallations, scoped, connected] = await Promise.all([
+      databaseConfigured() && organizationId
+        ? installationsForOrganization(organizationId)
+        : Promise.resolve(null),
+      requestPaths(organizationId).then(async (scope) =>
+        scope ? { recent: await runs.list(200, scope) } : null,
+      ),
+      connectedRepos().then(
+        (names) => ({ ok: true as const, names }),
+        (err: unknown) => ({ ok: false as const, err }),
+      ),
+    ]);
+
+    if (claimedInstallations) {
+      const claimed = claimedAccounts(claimedInstallations);
+      installed = installed.filter((repo) => claimed.has(ownerOf(repo.fullName)));
     }
 
-    const scope = await requestPaths(organizationId);
-    if (!scope) return c.json(noOrganization, 400);
-    const recent = await runs.list(200, scope);
+    if (!scoped) return c.json(noOrganization, 400);
+    const { recent } = scoped;
     const installedNames = installed.map((repo) => repo.fullName.toLowerCase());
     // The same list the webhook decides on, so this page cannot claim a
     // repository is watched when a push to it would be ignored.
@@ -885,10 +1286,8 @@ export function createServer(config: Config): ServerParts {
     // installation is the answer" - and a database outage silently borrowing
     // that meaning would paint every installed repository as monitored at
     // exactly the moment none of them are.
-    let connectedNames: string[] | null;
-    try {
-      connectedNames = await connectedRepos();
-    } catch (err) {
+    if (!connected.ok) {
+      const { err } = connected;
       return c.json({
         configured: true,
         repositories: [],
@@ -896,9 +1295,10 @@ export function createServer(config: Config): ServerParts {
         pinned,
         error:
           'Could not read the connected projects, so this page cannot say which ' +
-          `repositories are watched: ${err instanceof Error ? err.message : String(err)}`,
+          `repositories are watched: ${publicErrorMessage(err)}`,
       });
     }
+    const connectedNames = connected.names;
 
     const repositories = await Promise.all(
       installed.map(async (repo) => {
@@ -1065,13 +1465,19 @@ export function createServer(config: Config): ServerParts {
    * long-lived harness sessions concurrently, and the symbol map cannot absorb
    * that. Returns false when a run is already in flight.
    */
-  interface QueuedRun {
+  interface QueuedRun extends RunOptions {
     commit: string;
-    prepare?: () => Promise<Config>;
+    /**
+     * Which repository to sync and document, for a run in a managed checkout.
+     *
+     * Data rather than a closure, so a queue can outlive the process that took
+     * it: what is waiting when the server is told to stop is written to the
+     * state volume and taken up again by the next one (see `shutdown`). Absent
+     * for a run in the deployment's own checkout, which needs no preparing.
+     */
+    origin?: RunOrigin;
     /** Where it came from, for the log line when it finally starts. */
     source: string;
-    /** Run even if this commit has already been documented. */
-    force?: boolean;
   }
 
   /**
@@ -1113,43 +1519,189 @@ export function createServer(config: Config): ServerParts {
     active: Promise<unknown> | null;
     /** The commit running in this lane, for deduplicating a redelivery. */
     running: string | null;
+    /**
+     * The entry being worked on, and the run record it produced once there is
+     * one. An entry with no record yet - still cloning, still in triage - has
+     * nothing a restart could resume, so a shutdown hands it on like a queued
+     * one instead of losing it.
+     */
+    current: { item: QueuedRun; runId: string | null } | null;
   }
 
   const lanes = new Map<string, Lane>();
+
+  /**
+   * One `ensureCheckout` at a time per repository.
+   *
+   * Lanes serialise runs per *code* repository, but a docs repository can be
+   * shared by several projects, and its managed checkout is a single working
+   * tree. Two lanes syncing it at once - a fetch and a forced checkout each -
+   * fail on git's own lock files at best, and at worst leave one run reading
+   * the docs at the other's commit. Keyed case-insensitively, as GitHub names
+   * are.
+   */
+  const checkoutQueues = new Map<string, Promise<unknown>>();
+  const oneCheckoutAtATime = <T>(repository: string, work: () => Promise<T>): Promise<T> => {
+    const key = repository.toLowerCase();
+    const next = (checkoutQueues.get(key) ?? Promise.resolve()).then(work, work);
+    const settled = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    checkoutQueues.set(key, settled);
+    void settled.then(() => {
+      if (checkoutQueues.get(key) === settled) checkoutQueues.delete(key);
+    });
+    return next;
+  };
+
+  /**
+   * The configuration a run in a managed checkout runs with.
+   *
+   * Syncs the repository to the commit, then applies what the project connected
+   * for it says about its docs - their paths, and their own repository when they
+   * live apart from the code. Every way a run reaches a managed checkout comes
+   * through here: a push, a run somebody asked for from the dashboard, and a run
+   * resumed after a restart.
+   */
+  const preparedConfig = async (origin: RunOrigin, commit: string): Promise<Config> => {
+    const { repository, defaultBranch, pinned } = origin;
+    const repoPath = await oneCheckoutAtATime(repository, () =>
+      ensureCheckout(repository, defaultBranch, commit, pinned),
+    );
+
+    /*
+     * What the project connected for this repository said about its docs.
+     *
+     * The webhook's verdict already refused a repository with no project row on
+     * a database-backed deployment, so absent here means a file-backed one -
+     * which leaves the environment's own settings in charge, and is what a
+     * single-repository install and every CLI run rely on.
+     */
+    const project = databaseConfigured()
+      ? await projectForSourceRepo(repository).catch(() => null)
+      : null;
+    if (!project) return { ...config, repoPath };
+
+    const docs = { ...config.docs };
+    if (project.docsRoots) {
+      docs.roots = project.docsRoots.split(',').map((entry) => entry.trim()).filter(Boolean);
+    }
+
+    // Documentation in its own repository needs its own checkout, and its own
+    // default branch: the code repository's says nothing about it.
+    if (project.docsRepo && project.docsRepo !== repository) {
+      const target = await installedRepo(project.docsRepo);
+      if (!target) {
+        throw new Error(
+          `This project documents ${repository} into ${project.docsRepo}, but the ` +
+            'GitHub App is not installed on that repository, so there is nowhere to ' +
+            'read the documentation from or open a pull request against.',
+        );
+      }
+      docs.repo = target.fullName;
+      docs.baseBranch = target.defaultBranch;
+      docs.repoPath = await oneCheckoutAtATime(target.fullName, () =>
+        ensureCheckout(target.fullName, target.defaultBranch),
+      );
+    }
+
+    return { ...config, repoPath, docs };
+  };
+
   /** Bounded so a burst of pushes cannot grow a lane without limit. */
   const QUEUE_LIMIT = 20;
+
+  /**
+   * Set once the process has been told to stop.
+   *
+   * Lanes stop *starting* runs - the ones already going are given the grace
+   * period to finish - but they keep *accepting* them: GitHub does not retry a
+   * refused delivery, so a push turned away during a deploy would never be
+   * documented. What is still waiting is written down for the next process.
+   */
+  let draining = false;
 
   const laneFor = (key: string, repoPath: string): Lane => {
     const existing = lanes.get(key);
     if (existing) return existing;
-    const lane: Lane = { key, repoPath, queue: [], active: null, running: null };
+    const lane: Lane = { key, repoPath, queue: [], active: null, running: null, current: null };
     lanes.set(key, lane);
     return lane;
   };
 
-  /** Total depth across lanes, which is what the dashboard shows. */
-  const totalDepth = (): number =>
-    [...lanes.values()].reduce((sum, lane) => sum + lane.queue.length, 0);
+  /**
+   * Record a skipped commit against the project checked out at `repoPath`.
+   *
+   * Best effort: a skip that cannot be written is logged, not thrown, because
+   * the decision it describes has already been made and acted on.
+   */
+  const rememberSkip = async (
+    repoPath: string,
+    commit: SkippedCommitRef,
+    kind: SkipKind,
+    reason: string,
+    triage?: SkippedCommit['triage'],
+  ): Promise<void> => {
+    if (!databaseConfigured()) return;
+    try {
+      const project = await projectForCheckoutPath(repoPath);
+      if (project) await recordSkip(project.id, commit, kind, reason, triage);
+    } catch (err) {
+      console.error(
+        `could not record that ${commit.shortSha} was skipped: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  };
+
+  /**
+   * Settle an allowance slot, once. Best effort: a settlement that fails is
+   * logged, and the reservation stays held until somebody settles it, which
+   * errs toward the customer's allowance rather than toward free work.
+   */
+  const settle = async (
+    reservation: string | undefined,
+    outcome: Settlement,
+    details: SettlementDetails,
+  ): Promise<void> => {
+    if (!reservation) return;
+    try {
+      await settleReservation(reservation, outcome, details);
+    } catch (err) {
+      console.error(
+        `could not settle reservation ${reservation} as ${outcome}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  };
 
   const drainLane = (lane: Lane): void => {
-    if (lane.active || lane.queue.length === 0) return;
+    if (draining || lane.active || lane.queue.length === 0) return;
     const next = lane.queue.shift();
     if (!next) return;
     lane.running = next.commit;
+    const current: NonNullable<Lane['current']> = { item: next, runId: next.resume ?? null };
+    lane.current = current;
 
-    // `prepare` runs inside the same promise as the pipeline rather than before
+    // Preparing runs inside the same promise as the pipeline rather than before
     // it, because the caller has already answered GitHub and cannot await
     // anything: cloning a repository plus a five-role run is far past the ten
     // seconds a delivery is given. It also decides which checkout the run uses,
     // so a webhook can document the repository it names rather than whichever
     // directory the server happened to start in.
     lane.active = (async () => {
-      const runConfig = next.prepare ? await next.prepare() : config;
+      const runConfig = next.origin ? await preparedConfig(next.origin, next.commit) : config;
       const result = await runPipeline(runConfig, next.commit, {
         force: next.force ?? false,
+        // Pushes only. A run started from the dashboard or the API is somebody
+        // asking for it, and triage does not get to overrule them.
+        triage: next.triage ?? false,
+        resume: next.resume,
         // Scoped by the checkout the run is actually in, which `prepare` has
         // just decided and which is not always this lane's key.
-        onRunUpdate: (run) => bus.publish('run', summarize(run), { repoPath: run.repoPath }),
+        onRunUpdate: (run) => {
+          current.runId ??= run.id;
+          bus.publish('run', summarize(run), { repoPath: run.repoPath });
+        },
         onRoleEvent: (role, event) =>
           bus.publish('role', { role, event }, { repoPath: runConfig.repoPath }),
       });
@@ -1163,22 +1715,46 @@ export function createServer(config: Config): ServerParts {
           { repoPath: runConfig.repoPath },
         );
       }
+      // A run that did work spends the slot it was admitted on. One that was
+      // skipped - triaged out, or already documented - hands it back.
+      if (result.run && !result.skipped) {
+        await settle(next.reservation, 'consumed', { runId: result.run.id });
+      } else {
+        await settle(next.reservation, 'released', { reason: result.skipped?.reason ?? 'skipped' });
+      }
+
+      // Triage passed over this push, so no run will ever say so. The Activity
+      // page reads it from here, and can offer to document it anyway.
+      if (result.run === null) {
+        const { commit, reason, triage } = result.skipped;
+        await rememberSkip(runConfig.repoPath, commit, 'triage', reason, {
+          needsDocs: triage.needsDocs,
+          surface: triage.surface,
+          surfaceConfidence: triage.surfaceConfidence,
+          model: triage.model,
+        });
+      }
       return result;
     })()
-      .catch((err: unknown) => {
+      .catch(async (err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
+        // A run that failed is not charged for: platform and provider failures
+        // give the slot back (guides/ABUSE-PREVENTION-PLAN.md). A stop during
+        // shutdown never reaches here - that slot goes with the resumed run.
+        await settle(next.reservation, 'released', { reason: `failed: ${message}` });
         // Also to stderr: a failure before the first role has no run record to
         // attach to, so the event bus is the only place it would otherwise go -
         // and nobody is watching an SSE stream at push time.
         console.error(`run for ${next.commit.slice(0, 7)} failed: ${message}`);
         // `runConfig` is inside the promise above and unavailable here, so this
-        // is scoped by the lane's own checkout. They differ only when `prepare`
-        // redirected the run, and a `prepare` that threw never got that far.
+        // is scoped by the lane's own checkout. They differ only when preparing
+        // redirected the run, and a preparation that threw never got that far.
         bus.publish('error', { commit: next.commit, message }, { repoPath: lane.repoPath });
       })
       .finally(() => {
         lane.active = null;
         lane.running = null;
+        lane.current = null;
         // Nothing left to do in this lane, and nothing waiting: forget it, so a
         // long-lived server does not accumulate one entry per repository it has
         // ever seen.
@@ -1191,7 +1767,13 @@ export function createServer(config: Config): ServerParts {
   };
 
   type EnqueueResult =
-    | { accepted: true; queued: boolean; depth: number }
+    | {
+        accepted: true;
+        queued: boolean;
+        depth: number;
+        /** The commit was already waiting or running here; nothing was added. */
+        duplicate: boolean;
+      }
     | { accepted: false; reason: string };
 
   /**
@@ -1211,15 +1793,15 @@ export function createServer(config: Config): ServerParts {
     repo: { key: string; path: string },
     commit: string,
     source: string,
-    prepare?: () => Promise<Config>,
-    force = false,
+    origin?: RunOrigin,
+    options: RunOptions = {},
   ): EnqueueResult => {
     const lane = laneFor(repo.key, repo.path);
 
     if (commit === lane.running || lane.queue.some((item) => item.commit === commit)) {
       // Already in hand. Reported as accepted, because it is: the commit will
       // be documented, and the caller does not need to know it asked twice.
-      return { accepted: true, queued: true, depth: totalDepth() };
+      return { accepted: true, queued: true, depth: lane.queue.length, duplicate: true };
     }
     if (lane.queue.length >= QUEUE_LIMIT) {
       return {
@@ -1228,17 +1810,43 @@ export function createServer(config: Config): ServerParts {
       };
     }
 
-    lane.queue.push(prepare ? { commit, prepare, source, force } : { commit, source, force });
+    const item: QueuedRun = { commit, source, ...options };
+    if (origin) item.origin = origin;
+    lane.queue.push(item);
     const willWait = Boolean(lane.active);
     drainLane(lane);
     // This lane's own depth, not the deployment's. The number a customer's
     // dashboard can act on is how many of their pushes are waiting, and the
     // total across every tenant is not something to broadcast to one of them.
     bus.publish('queue', { depth: lane.queue.length }, { repoPath: lane.repoPath });
-    return { accepted: true, queued: willWait, depth: totalDepth() };
+    // This lane's depth too: a caller answering one customer must not tell them
+    // how busy every other customer's repositories are.
+    return { accepted: true, queued: willWait, depth: lane.queue.length, duplicate: false };
   };
 
+  /**
+   * Document a commit of the server's own checkout.
+   *
+   * The single-tenant path: `docxy serve` and the bundled operator page. On a
+   * database-backed deployment it is refused, because it belongs to nobody.
+   * It runs against the host's checkout rather than a project, so there is no
+   * organization to scope it to and no allowance to admit it against - and the
+   * dashboard proxy forwards any `/api/runs` request from any signed-in account,
+   * which made it a way for anyone who registered to spend the operator's model
+   * budget, with `force` to do it again for the same commit. A project's runs
+   * start from `POST /api/projects/:id/runs`, which checks both.
+   */
   app.post('/api/runs', async (c) => {
+    if (databaseConfigured()) {
+      return c.json(
+        {
+          error:
+            "This deployment starts runs from a project, which checks the organization's " +
+            'allowance: POST /api/projects/:id/runs.',
+        },
+        403,
+      );
+    }
     // SAFETY: a body that is not JSON falls back to `{}`, and every field below is optional and checked before use.
     const body = (await c.req.json().catch(() => ({}))) as { commit?: string; force?: boolean };
     const ref = body.commit || 'HEAD';
@@ -1254,13 +1862,9 @@ export function createServer(config: Config): ServerParts {
       return c.json({ error: `Nothing in ${config.repoPath} resolves to "${ref}".` }, 400);
     }
 
-    const result = enqueueRun(
-      { key: config.repoPath, path: config.repoPath },
-      commit,
-      'api',
-      undefined,
-      body.force === true,
-    );
+    const result = enqueueRun({ key: config.repoPath, path: config.repoPath }, commit, 'api', undefined, {
+      force: body.force === true,
+    });
     if (!result.accepted) return c.json({ error: result.reason }, 503);
     return c.json({ started: true, commit, queued: result.queued, depth: result.depth });
   });
@@ -1288,13 +1892,29 @@ export function createServer(config: Config): ServerParts {
     const delivery = c.req.header('x-github-delivery') ?? 'unknown';
     if (event !== 'push') return c.json({ ok: true, ignored: event ?? 'no event header' });
 
-    // SAFETY: the HMAC above proves this body came from GitHub with our secret,
-    // and every field below is read as optional and checked before use.
-    const payload = JSON.parse(raw.toString('utf8')) as {
+    let payload: {
       ref?: string;
       after?: string;
       repository?: { default_branch?: string; full_name?: string };
+      head_commit?: { message?: string } | null;
     };
+    try {
+      // SAFETY: the HMAC above proves this body came from GitHub with our secret,
+      // and every field below is read as optional and checked before use.
+      payload = JSON.parse(raw.toString('utf8')) as typeof payload;
+    } catch {
+      // Signed, so genuinely GitHub's - most likely a webhook configured to send
+      // `application/x-www-form-urlencoded`. A 400 puts that in the delivery log
+      // where somebody can see it, rather than a 500 that reads as an outage.
+      return c.json(
+        {
+          ok: false,
+          error: 'The payload is not JSON. Set the webhook content type to application/json.',
+          delivery,
+        },
+        400,
+      );
+    }
 
     const defaultBranch = payload.repository?.default_branch;
     if (!defaultBranch || payload.ref !== `refs/heads/${defaultBranch}`) {
@@ -1371,6 +1991,51 @@ export function createServer(config: Config): ServerParts {
       return c.json({ ok: true, ignored: verdict.reason });
     }
 
+    // The allowance, before anything is cloned or any provider is called. Keyed
+    // by GitHub's delivery id, so a redelivery of the same push is recognised
+    // and not charged twice.
+    const project = databaseConfigured()
+      ? await projectForSourceRepo(repository).catch(() => null)
+      : null;
+    let admission: Admission | null;
+    try {
+      admission = await admitFor(
+        project,
+        commit,
+        'push',
+        delivery === 'unknown' ? `github:${repository}:${commit}` : `github:${delivery}`,
+      );
+    } catch (err) {
+      // Neither "yes" nor "no" is known, so nothing is run - and 503 so the
+      // failure shows in GitHub's delivery log, where it can be redelivered.
+      return c.json(
+        {
+          ok: false,
+          error: `could not check the allowance: ${err instanceof Error ? err.message : String(err)}`,
+          delivery,
+        },
+        503,
+      );
+    }
+    if (admission && !admission.admitted && project) {
+      const subject = payload.head_commit?.message?.split('\n')[0]?.trim() ?? '';
+      await recordSkip(
+        project.id,
+        { sha: commit, shortSha: commit.slice(0, 7), subject },
+        admission.code,
+        admission.reason,
+      ).catch(() => {});
+      bus.publish(
+        'skipped',
+        { commit, reason: admission.reason, code: admission.code },
+        { repoPath: checkoutPathFor(repository) },
+      );
+      return c.json({ ok: true, ignored: admission.reason, code: admission.code, delivery });
+    }
+    if (admission?.admitted && admission.replayed) {
+      return c.json({ ok: true, duplicate: true, delivery });
+    }
+
     // The delivery names a commit the checkout has probably never seen - it was
     // authored wherever the pusher was, not here. Sync it first or the run dies
     // in `resolveCommit` before any role starts.
@@ -1386,51 +2051,22 @@ export function createServer(config: Config): ServerParts {
     // `ensureCheckout` resolves below, computed here because a live update has
     // to be addressed before the clone finishes.
     const checkout = pinned ?? checkoutPathFor(repository);
-    const result = enqueueRun({ key: repository, path: checkout }, commit, `webhook ${delivery}`, async () => {
-      const repoPath = await ensureCheckout(repository, defaultBranch, commit, pinned);
-
-      /*
-       * What the project connected for this repository said about its docs.
-       *
-       * The verdict above already refused a repository with no project row on a
-       * database-backed deployment, so absent here means a file-backed one -
-       * which leaves the environment's own settings in charge, and is what a
-       * single-repository install and every CLI run rely on.
-       */
-      const project = databaseConfigured()
-        ? await projectForSourceRepo(repository).catch(() => null)
-        : null;
-      if (!project) return { ...config, repoPath };
-
-      const docs = { ...config.docs };
-      if (project.docsRoots) {
-        docs.roots = project.docsRoots.split(',').map((entry) => entry.trim()).filter(Boolean);
-      }
-
-      // Documentation in its own repository needs its own checkout, and its own
-      // default branch: the code repository's says nothing about it.
-      if (project.docsRepo && project.docsRepo !== repository) {
-        // SAFETY: the empty array is the fallback shape, not a claim about what
-        // `installedRepos` returned - a lookup failure means "nothing known",
-        // and the `!target` branch below refuses rather than proceeding.
-        const installed: InstalledRepo[] = await installedRepos().catch(() => []);
-        const target = installed.find(
-          (repo) => repo.fullName.toLowerCase() === project.docsRepo?.toLowerCase(),
-        );
-        if (!target) {
-          throw new Error(
-            `This project documents ${repository} into ${project.docsRepo}, but the ` +
-              'GitHub App is not installed on that repository, so there is nowhere to ' +
-              'read the documentation from or open a pull request against.',
-          );
-        }
-        docs.repo = target.fullName;
-        docs.baseBranch = target.defaultBranch;
-        docs.repoPath = await ensureCheckout(target.fullName, target.defaultBranch);
-      }
-
-      return { ...config, repoPath, docs };
-    });
+    const options: RunOptions = { triage: true };
+    if (admission?.admitted && admission.reservationId) options.reservation = admission.reservationId;
+    const result = enqueueRun(
+      { key: repository, path: checkout },
+      commit,
+      `webhook ${delivery}`,
+      pinned ? { repository, defaultBranch, pinned } : { repository, defaultBranch },
+      options,
+    );
+    // Taken, but not added: the queue was full, or this commit is already
+    // waiting or running under the slot it was admitted on the first time.
+    if (!result.accepted || result.duplicate) {
+      await settle(options.reservation, 'released', {
+        reason: result.accepted ? 'already queued' : result.reason,
+      });
+    }
 
     if (!result.accepted) {
       // 503 rather than 200: this is the one case where GitHub retrying is
@@ -1543,15 +2179,34 @@ export function createServer(config: Config): ServerParts {
    * branch already existed, GitHub was down - and a run whose five agents have
    * already been paid for should be publishable again without re-running them.
    */
-  app.post('/api/runs/:id/publish', async (c) => {
-    const { run, scoped } = await scopedRun(c.req.param('id'), c.req.query('organizationId'));
-    if (!scoped) return c.json(noOrganization, 400);
-    if (!run) return c.json({ error: 'No such run.' }, 404);
-    if (run.pullRequestUrl) {
-      return c.json({ error: 'This run already has a pull request.', url: run.pullRequestUrl }, 409);
-    }
+  /**
+   * Runs being published right now.
+   *
+   * The "already has a pull request" check reads the stored run, and the URL is
+   * only stored once GitHub has answered - seconds later. A second click, or a
+   * proxy retrying a write that outlived its timeout, passed the check in that
+   * window and opened a second pull request for the same proposal, or failed
+   * halfway on the branch the first had just pushed.
+   */
+  const publishing = new Set<string>();
 
+  app.post('/api/runs/:id/publish', async (c) => {
+    const { run: found, scoped } = await scopedRun(c.req.param('id'), c.req.query('organizationId'));
+    if (!scoped) return c.json(noOrganization, 400);
+    if (!found) return c.json({ error: 'No such run.' }, 404);
+    if (publishing.has(found.id)) {
+      return c.json({ error: 'This run is already being published.' }, 409);
+    }
+    publishing.add(found.id);
+
+    // Read again under the lock: the copy above may predate a publish that
+    // finished while this request was on its way here.
+    const run = (await runs.load(found.id).catch(() => null)) ?? found;
     try {
+      if (run.pullRequestUrl) {
+        return c.json({ error: 'This run already has a pull request.', url: run.pullRequestUrl }, 409);
+      }
+
       const files = await rebuildProposedFiles(config, run);
       if (files.length === 0) return c.json({ error: 'This run proposed no changes.' }, 409);
 
@@ -1566,11 +2221,15 @@ export function createServer(config: Config): ServerParts {
       bus.publish('run', summarize(run), { repoPath: run.repoPath });
       return c.json({ published: true, pullRequestUrl: pr.url, branch: pr.branch });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      run.error = message;
+      run.error = err instanceof Error ? err.message : String(err);
       await runs.save(run);
       bus.publish('run', summarize(run), { repoPath: run.repoPath });
-      return c.json({ error: message }, 500);
+      // The docs or the branch moved under the proposal: a state the caller can
+      // act on (redraft, look at the branch), not a server failure.
+      const conflict = err instanceof StaleProposalError || err instanceof BranchConflictError;
+      return c.json({ error: publicErrorMessage(err) }, conflict ? 409 : 500);
+    } finally {
+      publishing.delete(found.id);
     }
   });
 
@@ -1601,23 +2260,52 @@ export function createServer(config: Config): ServerParts {
       ? c.req.query('organizationId')?.trim() || undefined
       : undefined;
 
+    /*
+     * Torn down exactly once, whichever way the stream ends.
+     *
+     * The request's abort signal is one way; the response body being cancelled
+     * - the socket closing under the writer - is another, and only the first was
+     * handled. A stream cancelled without an abort left its heartbeat running,
+     * and the next tick enqueued onto a closed controller. That throws, and a
+     * throw inside a `setInterval` callback is an uncaught exception, which
+     * takes the whole server down with every run in it.
+     */
+    let teardown: (() => void) | null = null;
+
     return new Response(
       new ReadableStream({
         start(controller) {
           const encoder = new TextEncoder();
-          const send = (chunk: string): void => controller.enqueue(encoder.encode(chunk));
-          send(': connected\n\n');
-          const heartbeat = setInterval(() => send(': ping\n\n'), 20_000);
+          let closed = false;
+          const send = (chunk: string): void => {
+            if (closed) throw new Error('stream closed');
+            controller.enqueue(encoder.encode(chunk));
+          };
+          const heartbeat = setInterval(() => {
+            try {
+              send(': ping\n\n');
+            } catch {
+              teardown?.();
+            }
+          }, 20_000);
+          // The broadcaster drops a subscriber whose `send` throws.
           const remove = bus.add(send, { paths, organizationId });
-          c.req.raw.signal.addEventListener('abort', () => {
+          teardown = () => {
+            if (closed) return;
+            closed = true;
             clearInterval(heartbeat);
             remove();
             try {
               controller.close();
             } catch {
-              // already closed
+              // already closed or cancelled
             }
-          });
+          };
+          c.req.raw.signal.addEventListener('abort', () => teardown?.(), { once: true });
+          send(': connected\n\n');
+        },
+        cancel() {
+          teardown?.();
         },
       }),
       {
@@ -1639,9 +2327,201 @@ export function createServer(config: Config): ServerParts {
   // awaited - the server must accept its first request whether or not the
   // store is reachable - and its own catch keeps a storage hiccup from taking
   // the boot down with it.
-  void reapAbandonedRuns();
+  /**
+   * The repository an interrupted run was documenting, rebuilt from its record.
+   *
+   * Its checkout names a project, the project names a repository, and the
+   * installation names that repository's default branch. `undefined` is the
+   * deployment's own checkout, which needs no origin; null is a run whose
+   * repository can no longer be found or reached.
+   */
+  const originOf = async (run: RunRecord): Promise<RunOrigin | null | undefined> => {
+    if (run.repoPath === config.repoPath) return undefined;
+    if (!databaseConfigured()) return null;
+    const project = await projectForCheckoutPath(run.repoPath).catch(() => null);
+    if (!project?.sourceRepo) return null;
+    const repo = await installedRepo(project.sourceRepo);
+    return repo ? { repository: repo.fullName, defaultBranch: repo.defaultBranch } : null;
+  };
 
-  return { app, bus };
+  /** How many times each run has been resumed, kept on the state volume. */
+  const resumeLedger = join(config.stateDir, 'resumed-runs.json');
+  const readResumeCounts = async (): Promise<Record<string, number>> => {
+    try {
+      const parsed = z
+        .record(z.string(), z.number())
+        .safeParse(JSON.parse(await readFile(resumeLedger, 'utf8')));
+      return parsed.success ? parsed.data : {};
+    } catch {
+      return {};
+    }
+  };
+
+  /**
+   * Finish what a previous process was doing when it stopped.
+   *
+   * Every push to `main` redeploys this service, and a redeploy used to fail
+   * every run in flight - work already paid for, five roles' worth, binned
+   * because the process holding it was replaced. Runs are snapshotted step by
+   * step under their own id (see `runRoles`), so an interrupted one is queued
+   * again with `resume` and picks up at the first step that did not finish.
+   *
+   * `resumeVerdict` bounds it, so a run that keeps taking the process down
+   * cannot keep doing it. Past its limits, or when its repository cannot be
+   * found, a run is closed out as before.
+   */
+  const recoverInterruptedRuns = async (): Promise<void> => {
+    try {
+      const counts = await readResumeCounts();
+      const resumed: Record<string, number> = {};
+      const paths = await syncedPaths();
+      for (const run of await runs.list(200, paths)) {
+        if (run.status !== 'running') continue;
+
+        const attempts = counts[run.id] ?? 0;
+        const verdict = resumeVerdict(run.startedAt, attempts, Date.now());
+        if (!verdict.resume) {
+          await abandonRun(run, verdict.why);
+          continue;
+        }
+        const origin = await originOf(run);
+        if (origin === null) {
+          await abandonRun(run, 'its repository could no longer be reached');
+          continue;
+        }
+
+        const options: RunOptions = { resume: run.id };
+        const reservation = await reservationOf(run);
+        if (reservation) options.reservation = reservation;
+        const result = enqueueRun(
+          { key: origin?.repository ?? config.repoPath, path: run.repoPath },
+          run.commit.sha,
+          'resumed after a restart',
+          origin,
+          options,
+        );
+        if (!result.accepted) {
+          await abandonRun(run, 'its queue was full');
+          continue;
+        }
+        resumed[run.id] = attempts + 1;
+        console.log(`resuming ${run.id.slice(0, 8)} on ${run.commit.shortSha} (attempt ${attempts + 1})`);
+      }
+      // Only the runs resumed this time are carried forward: one that finished,
+      // or was closed out, has no further use for a count.
+      await mkdir(dirname(resumeLedger), { recursive: true });
+      await writeFile(resumeLedger, JSON.stringify(resumed));
+    } catch (err) {
+      // Housekeeping. A storage hiccup here must not stop the server booting.
+      console.error(
+        `could not recover interrupted runs: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  };
+
+  /**
+   * Runs that were waiting when the last process stopped, written to the state
+   * volume by `shutdown` and taken up once here.
+   */
+  const handoffFile = join(config.stateDir, 'queue-handoff.json');
+  const handoffSchema = z.array(
+    z.object({
+      key: z.string(),
+      path: z.string(),
+      commit: z.string(),
+      source: z.string(),
+      origin: z
+        .object({ repository: z.string(), defaultBranch: z.string(), pinned: z.string().optional() })
+        .optional(),
+      force: z.boolean().optional(),
+      triage: z.boolean().optional(),
+      resume: z.string().optional(),
+      reservation: z.string().optional(),
+    }),
+  );
+  type Handoff = z.infer<typeof handoffSchema>[number];
+
+  const restoreHandoff = async (): Promise<void> => {
+    let raw: string;
+    try {
+      raw = await readFile(handoffFile, 'utf8');
+    } catch {
+      return;
+    }
+    // Taken once, whatever happens next: a file that fails to parse would
+    // otherwise be retried, and fail, on every boot.
+    await rm(handoffFile, { force: true });
+    try {
+      const parsed = handoffSchema.safeParse(JSON.parse(raw));
+      if (!parsed.success) throw new Error(parsed.error.message);
+      for (const { key, path, commit, source, origin, ...options } of parsed.data) {
+        const result = enqueueRun({ key, path }, commit, `${source}, carried over a restart`, origin, options);
+        if (!result.accepted) console.error(`could not requeue ${commit.slice(0, 7)}: ${result.reason}`);
+      }
+      if (parsed.data.length > 0) {
+        console.log(`requeued ${parsed.data.length} run(s) the previous process left waiting`);
+      }
+    } catch (err) {
+      console.error(
+        `could not read the queue the previous process left: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  };
+
+  /**
+   * Write down what a restart would otherwise lose: everything still queued,
+   * plus anything started that never produced a run record - a restart has
+   * nothing to resume for those.
+   */
+  const handOff = async (): Promise<void> => {
+    const waiting: Handoff[] = [...lanes.values()].flatMap((lane) =>
+      [
+        ...(lane.active && lane.current && !lane.current.runId ? [lane.current.item] : []),
+        ...lane.queue,
+      ].map((item) => ({ key: lane.key, path: lane.repoPath, ...item })),
+    );
+    try {
+      if (waiting.length === 0) {
+        await rm(handoffFile, { force: true });
+        return;
+      }
+      await mkdir(dirname(handoffFile), { recursive: true });
+      await writeFile(handoffFile, JSON.stringify(waiting));
+      console.log(`stopping: ${waiting.length} waiting run(s) written down for the next process`);
+    } catch (err) {
+      console.error(
+        `stopping: could not write down ${waiting.length} waiting run(s): ${
+          err instanceof Error ? err.message : String(err)
+        }. Their commits: ${waiting.map((item) => item.commit.slice(0, 7)).join(', ')}`,
+      );
+    }
+  };
+
+  const shutdown = async (graceMs: number): Promise<void> => {
+    draining = true;
+    // Written once at the start, before waiting on anything: the platform may
+    // kill the container well before the grace period is up, and a queue that
+    // was only going to be saved at the end would be lost with it. A run that
+    // ends up both resumed and handed on is queued once - the lane dedupes it
+    // by commit.
+    await handOff();
+
+    const active = [...lanes.values()].flatMap((lane) => (lane.active ? [lane.active] : []));
+    if (active.length === 0) return;
+    console.log(`stopping: giving ${active.length} run(s) up to ${Math.round(graceMs / 1000)}s to finish`);
+    await Promise.race([
+      Promise.allSettled(active),
+      new Promise((resolve) => setTimeout(resolve, graceMs)),
+    ]);
+    // And again with whatever finished meanwhile taken out.
+    await handOff();
+  };
+
+  // Resumed runs first, so each lane finishes what it was doing before it
+  // takes up what was waiting behind it.
+  void recoverInterruptedRuns().then(restoreHandoff);
+
+  return { app, bus, shutdown };
 }
 
 export function startServer(config: Config): ServerHandle {

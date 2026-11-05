@@ -73,3 +73,51 @@ export function freePeriodBounds(anchor: Date, now: Date = new Date()): PeriodBo
 
   return { start: addMonthsUtc(anchor, index), end: addMonthsUtc(anchor, index + 1) };
 }
+
+/** The parts of a subscription that can fix a paid window. */
+export interface PaidWindow {
+  /** The subscription the window belongs to. */
+  id: string;
+  currentPeriodStart: Date | null;
+  currentPeriodEnd: Date | null;
+}
+
+export interface UsageWindow {
+  bounds: PeriodBounds;
+  /** The subscription the window came from; null for a Free window. */
+  subscriptionId: string | null;
+}
+
+/**
+ * The window an account's runs count against right now.
+ *
+ * Both sides open usage periods - the dashboard when somebody looks at billing,
+ * admission when a run asks for a slot - and the unique key they meet on is the
+ * period's start. If they chose windows differently, one month would become two
+ * rows with two allowances: the one the customer is shown and the one their
+ * runs are counted against. So the choice is made here, once.
+ *
+ * A paid plan uses the provider's own boundaries. Falling back to the Free
+ * window when a paid subscription has not reported them yet keeps the account
+ * metered rather than unmetered - an unknown period is not a licence.
+ *
+ * Pass null for an account on Free, whatever subscription rows it has: the Free
+ * ledger is anchored to the account, and an old subscription left behind by a
+ * cancellation must not drag it back into its last paid window. A paid window
+ * whose end has passed without a renewal is still the window returned - the
+ * account spends what is left of the period it paid for rather than opening one
+ * nobody has paid for yet.
+ */
+export function usageWindow(
+  accountCreatedAt: Date,
+  subscription: PaidWindow | null,
+  now: Date = new Date(),
+): UsageWindow {
+  if (subscription?.currentPeriodStart && subscription.currentPeriodEnd) {
+    return {
+      bounds: { start: subscription.currentPeriodStart, end: subscription.currentPeriodEnd },
+      subscriptionId: subscription.id,
+    };
+  }
+  return { bounds: freePeriodBounds(accountCreatedAt, now), subscriptionId: null };
+}

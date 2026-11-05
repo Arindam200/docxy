@@ -4,11 +4,14 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { docsRoot, type Config } from '../config.js';
+import { fetchSource, networkGit } from '../github/checkout.js';
 
 const exec = promisify(execFile);
 
 async function git(cwd: string, args: string[]): Promise<string> {
-  const { stdout } = await exec('git', args, { cwd, maxBuffer: 32 * 1024 * 1024 });
+  // Hooks off: checking out a branch runs `post-checkout`, and in a repository
+  // whose hooks are tracked files that is anyone's code. See `github/pr.ts`.
+  const { stdout } = await exec('git', ['-c', 'core.hooksPath=/dev/null', ...args], { cwd, maxBuffer: 32 * 1024 * 1024 });
   return stdout.trim();
 }
 
@@ -28,6 +31,23 @@ async function hasOrigin(repoPath: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Bring `refs/remotes/origin/<branch>` up to the remote's tip.
+ *
+ * Fetched from `fetchSource` rather than from `origin` by name: a managed
+ * checkout's `origin` carries no credential, so on a private repository the
+ * by-name fetch failed every time and the branch was silently read from
+ * whatever the first clone left behind. Throws when the fetch does; both
+ * callers treat that as "use what is here".
+ */
+async function fetchBranch(repoPath: string, branch: string): Promise<void> {
+  await networkGit(repoPath, 'fetch', [
+    '--no-tags',
+    await fetchSource(repoPath),
+    `+refs/heads/${branch}:refs/remotes/origin/${branch}`,
+  ]);
 }
 
 /**
@@ -97,11 +117,17 @@ export async function openDocsTree(config: Config): Promise<DocsTree> {
   // to the local branch when there is no origin (local-only repos, tests).
   let ref = `refs/heads/${branch}`;
   if (await hasOrigin(repo)) {
+    const remote = `refs/remotes/origin/${branch}`;
     try {
-      await git(repo, ['fetch', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
-      ref = `refs/remotes/origin/${branch}`;
+      await fetchBranch(repo, branch);
+      ref = remote;
     } catch {
-      // Remote does not have it (or the network is down) - try the local branch.
+      // Remote does not have it, or the network is down. The last fetched tip
+      // is still the remote's branch, just older - and a checkout docxy cloned
+      // has no local branch of that name at all, so falling straight to
+      // `refs/heads` turned a transient fetch failure into "the documentation
+      // branch does not exist".
+      if (await refExists(repo, remote)) ref = remote;
     }
   }
 
@@ -151,7 +177,7 @@ export async function openDocsTree(config: Config): Promise<DocsTree> {
 export async function resolveBaseRef(repoPath: string, branch: string): Promise<string> {
   if (await hasOrigin(repoPath)) {
     try {
-      await git(repoPath, ['fetch', 'origin', `+refs/heads/${branch}:refs/remotes/origin/${branch}`]);
+      await fetchBranch(repoPath, branch);
     } catch {
       // fall through to whatever exists locally
     }

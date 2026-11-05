@@ -18,6 +18,7 @@ flowchart TD
   API --> Mastra[Mastra: five agents in the API process]
   Mastra -->|model requests| Nebius[Nebius Token Factory]
   API -->|isolated validation and optional code mode| Daytona[Daytona]
+  API -.->|optional push triage: commit excerpt| TypeSafe[TypeSafe AI: Jev]
   API -->|managed checkouts| Volume[Railway volume: /data]
   CustomerRepo[Connected customer repositories] -->|signed push webhook| API
   API -->|GitHub App authentication| GitHub[GitHub: read code and open documentation PRs]
@@ -26,7 +27,8 @@ flowchart TD
   Composio -.-> Accounts[Slack / Notion / Linear / Jira]
 ```
 
-Solid arrows describe the deployed architecture. Composio's key is configured
+Solid arrows describe the deployed architecture. The dotted TypeSafe path is
+built but inactive until `TYPESAFE_API_KEY` is set on Railway. Composio's key is configured
 in Vercel production and validated. After deploying the connection UI through
 `main`, authorize each account from the dashboard. The dotted path
 does not imply notifications, publishing, or issue automation already run.
@@ -48,6 +50,7 @@ documentation runs.
 | Mastra | Inside the Railway API process | Agent runtime, memory, workflows and sandbox integration. No separate harness server. |
 | Nebius | Railway `NEBIUS_API_KEY` | Model provider. Backend health reports configured; no model request was made during the deployment check. |
 | Daytona | Railway `DAYTONA_API_KEY` | Remote workspaces for validation and optional code mode. Backend health reports configured; no sandbox job was launched during this check. |
+| TypeSafe AI (Jev) | Railway `TYPESAFE_API_KEY`, when set | Optional triage of push-triggered runs (`src/triage.ts`). Not configured in production as of 2026-10-14. When a key is set, each pushed commit's subject, message, file list and up to ~24k characters of its diff are sent to `api.typesafe.ai`. That makes TypeSafe a processor of customer source code, so settle terms and customer disclosure before setting the key. Manual, forced and resumed runs are never triaged, and any Jev failure runs the commit as before. |
 | Railway volume | `/data`; `DOCXY_STATE_DIR=/data/.docxy` | Persistent managed checkouts and local runtime files. Preserve it when updating the service. |
 | GitHub App | `docxy-bot` | App identity and webhook settings were verified. Webhook is `https://docxy-production.up.railway.app/webhook`, JSON, TLS verification enabled. |
 | Resend | Vercel environment | API key and email domain are configured. Mail delivery was not exercised in this check. |
@@ -70,6 +73,8 @@ That is a dated observation, not a revision to pin future deployments to.
 | `GITHUB_APP_ID`, private key, webhook secret | Root `.env` | Railway | Used for repository access, PR publication and webhook verification. Never copy private keys into docs. |
 | `GITHUB_APP_SLUG`, App client ID and App client secret | `web/.env.local` | Vercel | Used for the GitHub App installation flow. These differ from optional GitHub sign-in OAuth credentials. |
 | `NEBIUS_API_KEY`, `DAYTONA_API_KEY` | Root `.env` | Railway | Consumed by the backend; a copy on Vercel does not configure the backend. |
+| `TYPESAFE_API_KEY`, optional `DOCXY_TRIAGE=0`, `DOCXY_TRIAGE_MODEL`, `DOCXY_TRIAGE_TIMEOUT_MS` | Root `.env` | Railway, only once data sharing is agreed | Unset means no triage and nothing sent. `DOCXY_TRIAGE=0` keeps the key but stops skipping runs. |
+| `DOCXY_ENFORCE_ALLOWANCES`, `DODO_PAYMENTS_ENVIRONMENT` | Root `.env`, normally unset | Railway, only when hosted run metering is switched on | **Off by default.** Unless `DOCXY_ENFORCE_ALLOWANCES` is `1`/`true`/`yes`/`on` and `DATABASE_URL` is set, no run is counted or refused, which is what self-hosted installs want. Read by `src/billing/admission.ts`. When on, the server admits each push (keyed by GitHub delivery id) and each dashboard run before queueing it: a refusal is recorded as a skipped commit, a run that does work consumes its slot, and a skipped or failed run releases it. Apply migrations through `0008` first. `DODO_PAYMENTS_ENVIRONMENT` must match Vercel's value (`test_mode` unless it is exactly `live_mode`) so both halves meter the same account rows. |
 | `COMPOSIO_API_KEY`, optional toolkit auth config IDs | `web/.env.local` | Vercel | Consumed by the connection UI's server endpoints. Root `.env` is not loaded by Next.js in `web/`. |
 | Resend and optional Dodo configuration | `web/.env.local` | Vercel | Resend enables product mail; Dodo additionally needs explicit billing configuration. |
 
@@ -86,6 +91,12 @@ an explicit staging environment before treating previews as a full staging stack
 - Better Auth owns user sign-in and organization membership in the `auth` schema.
   An owner or admin can manage an organization's Composio connections. Removed
   members cannot use a cached session to manage them.
+- Roles are enforced on proxied writes. Owners and admins connect, change and
+  delete projects, edit instructions and bind GitHub installations; plain
+  members can start runs and publish a run's pull request, nothing else
+  (`web/src/lib/proxy-access.ts`). Only an owner can remove or change the role
+  of an admin. Seat limits on invitations and acceptance apply once Dodo
+  billing is configured; without it they are not enforced.
 - Vercel calls the Railway API with `DOCXY_API_TOKEN` and organization/project
   scope. The shared token authenticates the web server; it does not replace
   organization authorization.

@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { LuBookOpen, LuGitBranch } from "react-icons/lu";
 import { fetchRepositories } from "@/lib/docxy";
+import { activeOrganizationId } from "@/lib/organization";
 import { currentProject } from "@/lib/project-scope";
 
 export const dynamic = "force-dynamic";
@@ -22,12 +23,17 @@ export default async function ProjectSettingsPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const scope = await currentProject(id);
+  // Started beside the project lookup rather than after it - see "Reads beside
+  // the lookup" in lib/project-scope.ts for why that leaves nothing exposed.
+  const organizationId = await activeOrganizationId();
+  const [scope, repositories] = await Promise.all([
+    currentProject(id),
+    fetchRepositories(organizationId),
+  ]);
   if (scope.kind === "offline") return null;
   if (scope.kind === "missing") notFound();
 
-  const { project, organizationId } = scope;
-  const repositories = await fetchRepositories(organizationId);
+  const { project } = scope;
   const repository = repositories?.repositories.find(
     (repo) => repo.fullName.toLowerCase() === project.sourceRepo?.toLowerCase(),
   );

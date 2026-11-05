@@ -5,6 +5,7 @@ import { fetchLogs } from "@/lib/docxy";
 import { ROLE_ORDER, roleTitle } from "@/lib/format";
 import { ApiOffline } from "@/components/dashboard/ApiOffline";
 import { LogStream } from "@/components/dashboard/LogStream";
+import { activeOrganizationId } from "@/lib/organization";
 import { currentProject } from "@/lib/project-scope";
 import { projectHref } from "@/lib/projects";
 
@@ -30,17 +31,22 @@ export default async function ProjectLogsPage({
   searchParams: Promise<{ kind?: string; role?: string }>;
 }) {
   const [{ id }, filters] = await Promise.all([params, searchParams]);
-  const scope = await currentProject(id);
+  // Started beside the project lookup rather than after it - see "Reads beside
+  // the lookup" in lib/project-scope.ts for why that leaves nothing exposed.
+  const organizationId = await activeOrganizationId();
+  const [scope, logs] = await Promise.all([
+    currentProject(id),
+    fetchLogs(organizationId, {
+      kind: filters.kind,
+      role: filters.role,
+      projectId: id,
+      limit: 300,
+    }),
+  ]);
   if (scope.kind === "offline") return null;
   if (scope.kind === "missing") notFound();
 
-  const { project, organizationId } = scope;
-  const logs = await fetchLogs(organizationId, {
-    kind: filters.kind,
-    role: filters.role,
-    projectId: project.id,
-    limit: 300,
-  });
+  const { project } = scope;
 
   const online = logs !== null;
   const entries = logs?.entries ?? [];

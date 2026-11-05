@@ -1,5 +1,6 @@
 import { and, eq, isNull, sql } from 'drizzle-orm';
 import { getDb } from './index.js';
+import { forgetProjectKeys } from './executor.js';
 import { projects } from './schema.js';
 
 /**
@@ -234,6 +235,9 @@ export async function deleteProject(id: string, organizationId: string): Promise
   const removed = await getDb()
     .delete(projects)
     .where(and(eq(projects.id, id), eq(projects.organizationId, organizationId)))
-    .returning({ id: projects.id });
+    .returning({ id: projects.id, key: projects.key });
+  // The row is gone, so its memoised id must go too, or reconnecting the same
+  // repository writes its runs against the deleted one. See `projectId`.
+  forgetProjectKeys(removed.map((row) => row.key));
   return removed.length > 0;
 }
